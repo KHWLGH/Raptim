@@ -1,0 +1,111 @@
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    out property <color> canvas: Palette.background;
+    out property <color> navigation: Palette.background.mix(Palette.foreground, 0.965);
+    out property <color> surface: Palette.background.mix(#ffffff, 0.975);
+    out property <color> stroke: Palette.background.mix(Palette.foreground, 0.87);
+    out property <color> selection: Palette.background.mix(Palette.accent-background, 0.87);
+}
+
+export component HintSurface inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <string> notes;
+    max-width: 360px;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.stroke;
+    border-radius: 4px;
+    VerticalLayout {
+        padding: 10px; spacing: 4px; alignment: start;
+        Text { text: root.title; vertical-stretch: 0; max-width: 340px; color: Palette.foreground; font-size: root.detail == "" && root.notes == "" ? 12px : 13px; font-weight: root.detail == "" && root.notes == "" ? 400 : 600; wrap: char-wrap; }
+        if root.detail != "": Text { text: root.detail; vertical-stretch: 0; max-width: 340px; color: Palette.alternate-foreground; font-size: 12px; wrap: char-wrap; }
+        if root.notes != "": Text { text: root.notes; vertical-stretch: 0; max-width: 340px; max-lines: 6; color: Palette.foreground; font-size: 12px; wrap: char-wrap; overflow: elide; }
+    }
+}
+
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    in property <bool> danger;
+    callback clicked;
+    width: 32px; height: 32px;
+    horizontal-stretch: 0;
+    border-radius: 6px;
+    background: checked ? Theme.selection : area.has-hover ? Theme.navigation : transparent;
+    animate background { duration: 100ms; }
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: Palette.accent-background;
+    opacity: enabled ? 1 : 0.4;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    forward-focus: focus;
+    Image { x: 8px; y: 8px; width: 16px; height: 16px; source: root.icon; colorize: root.checked ? Palette.accent-background : root.danger && area.has-hover ? #c42b1c : Palette.foreground; }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; }
+    }
+    area := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+    Tooltip { HintSurface { title: root.label; } }
+}
+
+export component TitleBar inherits Rectangle {
+    in property <string> title;
+    callback close;
+    in property <bool> manual-drag;
+    in property <bool> separator: true;
+    callback drag-start;
+    min-height: 44px; max-height: 44px;
+    VerticalLayout {
+        padding: 0px; spacing: 0px;
+        HorizontalLayout {
+            padding-top: 6px; padding-bottom: 5px;
+            padding-left: 14px; padding-right: 6px; spacing: 2px;
+            if root.title == "Diascia": Rectangle { width: 24px; height: 32px; Image { y: 7px; width: 18px; height: 18px; source: @image-url("icons/app.svg"); colorize: Palette.accent-background; } }
+            WindowMoveArea {
+                enabled: !root.manual-drag;
+                min-width: 64px; horizontal-stretch: 1;
+                height: 32px;
+                Text { x: 0px; width: parent.width; height: parent.height; text: root.title; font-weight: 600; font-size: 14px; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
+                TouchArea { pointer-event(event) => { if root.manual-drag && event.kind == PointerEventKind.down && event.button == PointerEventButton.left { root.drag-start(); } } }
+            }
+            @children
+            IconButton { icon: @image-url("icons/close.svg"); label: "关闭"; danger: true; clicked => { root.close(); } }
+        }
+        if root.separator: Rectangle { height: 1px; background: Theme.stroke; }
+    }
+}
+
+export component AppWindow inherits Window {
+    in-out property <bool> frame-active: true;
+    no-frame: true;
+    resize-border-width: 5px;
+    background: Palette.background;
+    default-font-family: "Microsoft YaHei UI";
+    default-font-size: 14px;
+    Rectangle {
+        @children
+    }
+}
+
+export component SettingRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <length> control-width: 150px;
+    min-height: 44px;
+    max-height: 44px;
+    opacity: enabled ? 1 : 0.45;
+    HorizontalLayout {
+        padding-left: 4px; padding-right: 4px; spacing: 16px;
+        Text { text: root.label; color: Palette.foreground; vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap; }
+        Rectangle { width: root.control-width;
+            HorizontalLayout { y: (parent.height - 32px) / 2; height: 32px; alignment: end; spacing: 8px; @children }
+        }
+    }
+    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.stroke; }
+}

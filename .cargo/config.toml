@@ -1,0 +1,13 @@
+# libsqlite3-sys compiles the SQLite amalgamation with FTS3/FTS5/RTree/DBSTAT/soundex/JSON
+# enabled. This launcher uses four plain tables and parses its JSON payloads in Rust, so those
+# modules are dead weight — FTS5 alone is ~10% of sqlite3.c.
+#
+# cc appends CFLAGS after the build script's own flags, and cl.exe lets the later option win,
+# so /U undoes the corresponding -D. SQLITE_OMIT_JSON has to be defined rather than undefined:
+# JSON is compiled in by default from SQLite 3.38 onward.
+#
+# Deliberately left alone: SQLITE_THREADSAFE, SQLITE_DEFAULT_FOREIGN_KEYS (ON DELETE RESTRICT),
+# SQLITE_ENABLE_API_ARMOR, SQLITE_ENABLE_COLUMN_METADATA, SQLITE_ENABLE_MEMORY_MANAGEMENT,
+# SQLITE_USE_URI, SQLITE_ENABLE_STAT4, HAVE_USLEEP, HAVE_ISNAN.
+[env]
+CFLAGS = "/USQLITE_ENABLE_FTS5 /USQLITE_ENABLE_FTS3 /USQLITE_ENABLE_FTS3_PARENTHESIS /USQLITE_ENABLE_RTREE /USQLITE_ENABLE_DBSTAT_VTAB /USQLITE_SOUNDEX /DSQLITE_OMIT_JSON /DSQLITE_OMIT_LOAD_EXTENSION"

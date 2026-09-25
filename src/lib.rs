@@ -1,0 +1,19 @@
+pub mod commands;
+pub mod diagnostics;
+pub mod docking;
+pub mod gestures;
+pub mod hotkey;
+pub mod icons;
+pub mod importing;
+pub mod launch;
+pub mod menus;
+pub mod model;
+pub mod paths;
+pub mod platform;
+pub mod policy;
+pub mod search;
+pub mod storage;
+pub mod windowing;
+
+pub mod metrics;
+pub mod session;
