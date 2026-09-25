@@ -16,6 +16,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 url = "2"
+# Already in the graph through Slint's SVG chain, so naming it here costs nothing: JSON carries
+# icon bytes as base64 instead of one number token per byte (src/model.rs).
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 # Only the toneless reading is used (src/search.rs), so the heteronym table and the three
 # tone spellings stay out of the binary.
 pinyin = { version = "0.10", default-features = false, features = ["plain"] }
@@ -25,7 +28,7 @@ raw-window-handle = "0.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_DataExchange", "Win32_System_SystemServices", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Performance", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Networking_WinHttp"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_DataExchange", "Win32_System_SystemServices", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Networking_WinHttp"] }
 tray-icon = "0.24"
 windows-core = "0.62"
 
@@ -35,8 +38,14 @@ slint-build = "=1.18.0"
 [dev-dependencies]
 tempfile = "3"
 png = "0.18"
+# Only for tests/probe_seed.rs, which builds a fixture image through `diascia::icons::encode`.
+# Same version as the normal dependency, so this adds nothing to the binary.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.release]
+# Measured against `opt-level = 2` on the 300-entry fixture: first frame 161.4 -> 149.6 ms and the
+# blob hash 2.68 -> 1.51 ms, for 14.84 -> 21.30 MB. Not a trade worth making; frame_ms p50 was
+# already 0.4 ms, so neither the rasterizer nor the allocator is the bottleneck here.
 opt-level = "z"
 lto = "fat"
 codegen-units = 1

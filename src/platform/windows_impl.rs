@@ -14,7 +14,7 @@ use windows::{
         Foundation::*,
         Graphics::{Dwm::*, Gdi::*},
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
-        System::{Com::*, Threading::*},
+        System::{Com::*, ProcessStatus::*, Threading::*},
         UI::{
             Accessibility::*, Controls::MARGINS, Input::KeyboardAndMouse::*, Shell::*,
             WindowsAndMessaging::*,
@@ -1350,11 +1350,35 @@ pub fn finish_edge_motion(window: &slint::Window) {
         }
     }
 }
+/// (working set, private bytes) in KiB, for the opt-in metrics CSV. Recorded beside
+/// `entry_blob_bytes` so a memory reading always carries the dataset it was taken on.
+pub fn memory_kib() -> (u64, u64) {
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            std::ptr::addr_of_mut!(counters).cast(),
+            counters.cb,
+        )
+    };
+    if ok.as_bool() {
+        (
+            counters.WorkingSetSize as u64 / 1024,
+            counters.PrivateUsage as u64 / 1024,
+        )
+    } else {
+        (0, 0)
+    }
+}
 /// Native clip prevents a sliding window leaking onto an adjacent display.
 pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
     let Some(hwnd) = native_handle(window) else {
         return;
     };
+    crate::metrics::record("region_set", 1.);
     unsafe {
         let first = GetPropW(hwnd, w!("Diascia.EdgeClip")).0 as usize != 2;
         let _ = SetPropW(hwnd, w!("Diascia.EdgeClip"), Some(HANDLE(2usize as _)));

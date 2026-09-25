@@ -49,13 +49,24 @@ fn seed_probe_data_dir() {
         println!("probe dir already has entries, leaving it alone");
         return;
     }
+    let wanted: usize = std::env::var("DIASCIA_PROBE_ENTRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300);
+    let blobs: u32 = std::env::var("DIASCIA_PROBE_BLOBS_KB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let mut index = 0;
-    for round in 0..10 {
+    while index < wanted {
         for category in &categories {
+            if index == wanted {
+                break;
+            }
             index += 1;
             let target = if index % 5 == 0 {
                 Target::Url {
-                    url: format!("https://example.com/probe/{round}-{index}"),
+                    url: format!("https://example.com/probe/{index}"),
                 }
             } else {
                 Target::Program {
@@ -75,16 +86,40 @@ fn seed_probe_data_dir() {
                     name: format!("探针项目 {index}"),
                     aliases: String::new(),
                     notes: "度量夹具".into(),
-                    icon: Vec::new(),
+                    icon: blob(index, blobs),
                     position: 0,
                     target,
                 })
                 .unwrap();
         }
     }
+    let entries = store.entries().unwrap();
     println!(
-        "seeded {} entries into {}",
-        store.entries().unwrap().len(),
-        directory.display()
+        "seeded {} entries into {} ({} blob bytes total)",
+        entries.len(),
+        directory.display(),
+        entries.iter().map(|e| e.icon.len()).sum::<usize>()
     );
+}
+
+/// A reproducible icon of roughly `kib` KiB. Without this every run carries whatever the shell
+/// extraction happened to return, so `entry_blob_bytes` differs between runs and no private-byte
+/// number from one run can be compared against another. Each row gets its own bytes so the
+/// fingerprints differ the way they do in a real library.
+fn blob(index: usize, kib: u32) -> Vec<u8> {
+    if kib == 0 {
+        return Vec::new();
+    }
+    // Incompressible noise costs about four bytes per pixel, and `encode` caps at 128px.
+    let side = (((kib as usize * 1024) / 4).isqrt().min(128)) as u32;
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64 ^ (index as u64).wrapping_mul(0x85eb_ca6b);
+    let mut next = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as u8
+    };
+    let pixels: Vec<u8> = (0..(side * side * 4)).map(|_| next()).collect();
+    let image = image::RgbaImage::from_raw(side, side, pixels).expect("fixture image");
+    diascia::icons::encode(image).expect("encode fixture")
 }

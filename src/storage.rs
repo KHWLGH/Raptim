@@ -1,19 +1,24 @@
 use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{collections::HashSet, path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 pub struct Store {
     conn: Connection,
     base: std::path::PathBuf,
     initial: Option<Export>,
 }
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const SCHEMA_DDL: &str = "CREATE TABLE collections (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES collections(id) ON DELETE RESTRICT, name TEXT NOT NULL, position INTEGER NOT NULL);
-                CREATE TABLE entries (id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE RESTRICT, payload TEXT NOT NULL, position INTEGER NOT NULL);
+                CREATE TABLE entries (id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE RESTRICT, payload TEXT NOT NULL, position INTEGER NOT NULL, icon BLOB, dup_key TEXT NOT NULL);
+                CREATE INDEX entries_collection ON entries(collection_id, dup_key);
                 CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
                 CREATE TABLE local_state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
                 INSERT INTO collections VALUES (1, NULL, '常用', 0), (2, 1, '默认分类', 0);
-                PRAGMA user_version=1;";
+                PRAGMA user_version=2;";
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let mut conn = Connection::open(path)?;
@@ -43,6 +48,9 @@ impl Store {
         }
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
+        // Measured, not assumed: capping the page cache at 4 MiB (`cache_size=-4000`) doubled the
+        // startup table read from 27.8 to 56.5 ms, because the icon BLOBs alone exceed it. SQLite's
+        // 12.5 MiB default stays.
         let base = std::path::absolute(path)?.parent().unwrap().to_path_buf();
         let mut store = Self {
             conn,
@@ -50,8 +58,12 @@ impl Store {
             initial: None,
         };
         // Fail visibly on damaged payload/settings. Never silently replace user data.
+        let started = Instant::now();
         let validated = store.export()?;
+        crate::metrics::record("store_export_ms", started.elapsed().as_secs_f64() * 1000.);
+        let started = Instant::now();
         validate_export(&validated)?;
+        crate::metrics::record("store_validate_ms", started.elapsed().as_secs_f64() * 1000.);
         store.initial = Some(validated);
         Ok(store)
     }
@@ -139,16 +151,25 @@ impl Store {
                 let mut updated = entry.clone();
                 updated.collection_id = dest;
                 updated.position = position;
+                let payload = Self::payload_of(&updated)?;
+                let dup_key = self.dup_key(&updated);
                 if copy {
                     updated.id = 0;
                     tx.execute(
-                        "INSERT INTO entries(collection_id,payload,position) VALUES(?1,?2,?3)",
-                        params![dest, serde_json::to_string(&updated)?, position],
+                        "INSERT INTO entries(collection_id,payload,position,icon,dup_key) VALUES(?1,?2,?3,?4,?5)",
+                        params![dest, payload, position, updated.icon.as_slice(), dup_key],
                     )?;
                 } else {
                     tx.execute(
-                        "UPDATE entries SET collection_id=?1,payload=?2,position=?3 WHERE id=?4",
-                        params![dest, serde_json::to_string(&updated)?, position, entry.id],
+                        "UPDATE entries SET collection_id=?1,payload=?2,position=?3,icon=?4,dup_key=?5 WHERE id=?6",
+                        params![
+                            dest,
+                            payload,
+                            position,
+                            updated.icon.as_slice(),
+                            dup_key,
+                            entry.id
+                        ],
                     )?;
                 }
                 position += 1;
@@ -175,6 +196,20 @@ impl Store {
             .unwrap_or_else(|_| target.clone())
             .duplicate_key()
     }
+    /// The `payload` column: the entry without its icon, which lives in the `icon` BLOB column so
+    /// that reading a library never decodes icon bytes. A version 1 database kept both in one JSON
+    /// document, where `Vec<u8>` costs ~3.6 text characters per byte and one token each.
+    fn payload_of(entry: &Entry) -> Result<String> {
+        let mut row = entry.clone();
+        row.icon = Vec::new();
+        Ok(serde_json::to_string(&row)?)
+    }
+    /// The dedup identity, materialised because `target_key` relativises paths against the data
+    /// directory and lower-cases URLs, neither of which SQLite can express. It exists so the
+    /// duplicate-target check is an index probe instead of a full-table re-read.
+    fn dup_key(&self, entry: &Entry) -> String {
+        self.target_key(&entry.target)
+    }
     pub fn collections(&self) -> Result<Vec<Collection>> {
         let mut statement = self
             .conn
@@ -191,8 +226,9 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
     pub fn entries(&self) -> Result<Vec<Entry>> {
+        let started = Instant::now();
         let mut statement = self.conn.prepare(
-            "SELECT id,collection_id,payload,position FROM entries ORDER BY position,id",
+            "SELECT id,collection_id,payload,position,icon FROM entries ORDER BY position,id",
         )?;
         let rows = statement.query_map([], |r| {
             Ok((
@@ -200,17 +236,22 @@ impl Store {
                 r.get::<_, i64>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, i64>(3)?,
+                r.get::<_, Option<Vec<u8>>>(4)?,
             ))
         })?;
-        rows.map(|row| {
-            let (id, collection_id, payload, position) = row?;
-            let mut e: Entry = serde_json::from_str(&payload)?;
-            e.id = id;
-            e.collection_id = collection_id;
-            e.position = position;
-            Ok(e)
-        })
-        .collect()
+        let entries = rows
+            .map(|row| {
+                let (id, collection_id, payload, position, icon) = row?;
+                let mut e: Entry = serde_json::from_str(&payload)?;
+                e.id = id;
+                e.collection_id = collection_id;
+                e.position = position;
+                e.icon = icon.unwrap_or_default();
+                Ok(e)
+            })
+            .collect();
+        crate::metrics::record("entries_query_ms", started.elapsed().as_secs_f64() * 1000.);
+        entries
     }
     pub fn settings(&self) -> Result<Settings> {
         let json: String =
@@ -227,28 +268,31 @@ impl Store {
         Ok(())
     }
     pub fn update_targets_checked(&mut self, updates: &[Entry], originals: &[Entry]) -> Result<()> {
+        // Resolved before the transaction because it needs `&self`, which the write borrow denies.
+        let keys: Vec<String> = updates.iter().map(|e| self.dup_key(e)).collect();
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         for old in originals {
-            let row: (i64, String, i64) = tx.query_row(
-                "SELECT collection_id,payload,position FROM entries WHERE id=?1",
+            let row: (i64, String, i64, Option<Vec<u8>>) = tx.query_row(
+                "SELECT collection_id,payload,position,icon FROM entries WHERE id=?1",
                 [old.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
             let mut entry: Entry = serde_json::from_str(&row.1)?;
             entry.id = old.id;
             entry.collection_id = row.0;
             entry.position = row.2;
+            entry.icon = row.3.unwrap_or_default();
             if &entry != old {
                 return Err(Error::Invalid("项目已变化，请重新预览".into()));
             }
         }
-        for e in updates {
+        for (e, dup_key) in updates.iter().zip(keys) {
             e.validate()?;
             tx.execute(
-                "UPDATE entries SET payload=?1 WHERE id=?2",
-                params![serde_json::to_string(e)?, e.id],
+                "UPDATE entries SET payload=?1,icon=?2,dup_key=?3 WHERE id=?4",
+                params![Self::payload_of(e)?, e.icon.as_slice(), dup_key, e.id],
             )?;
         }
         tx.commit()?;
@@ -348,28 +392,50 @@ impl Store {
         Ok(())
     }
     pub fn save_entry(&mut self, entry: &Entry) -> Result<i64> {
+        let started = Instant::now();
         entry.validate()?;
-        if self.entries()?.iter().any(|e| {
-            e.id != entry.id
-                && e.collection_id == entry.collection_id
-                && self.target_key(&e.target) == self.target_key(&entry.target)
-        }) {
+        let payload = Self::payload_of(entry)?;
+        let dup_key = self.dup_key(entry);
+        let clash: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entries WHERE collection_id=?1 AND dup_key=?2 AND id<>?3)",
+            params![entry.collection_id, dup_key, entry.id],
+            |r| r.get(0),
+        )?;
+        if clash {
             return Err(Error::Invalid("当前分类已收录同一目标".into()));
         }
-        let json = serde_json::to_string(entry)?;
-        if entry.id == 0 {
-            self.conn.execute("INSERT INTO entries(collection_id,payload,position) VALUES(?1,?2,(SELECT coalesce(max(position),-1)+1 FROM entries))", params![entry.collection_id,json])?;
-            Ok(self.conn.last_insert_rowid())
+        let id = if entry.id == 0 {
+            self.conn.execute("INSERT INTO entries(collection_id,payload,position,icon,dup_key) VALUES(?1,?2,(SELECT coalesce(max(position),-1)+1 FROM entries),?3,?4)", params![entry.collection_id, payload, entry.icon.as_slice(), dup_key])?;
+            self.conn.last_insert_rowid()
+        } else if self.conn.execute(
+            "UPDATE entries SET collection_id=?1,payload=?2,icon=?3,dup_key=?4 WHERE id=?5",
+            params![
+                entry.collection_id,
+                payload,
+                entry.icon.as_slice(),
+                dup_key,
+                entry.id
+            ],
+        )? == 0
+        {
+            return Err(Error::Invalid("项目已不存在".into()));
         } else {
-            if self.conn.execute(
-                "UPDATE entries SET collection_id=?1,payload=?2 WHERE id=?3",
-                params![entry.collection_id, json, entry.id],
-            )? == 0
-            {
-                return Err(Error::Invalid("项目已不存在".into()));
-            }
-            Ok(entry.id)
+            entry.id
+        };
+        crate::metrics::record("save_entry_ms", started.elapsed().as_secs_f64() * 1000.);
+        Ok(id)
+    }
+    /// Only the icon column. The backfill used to go through `save_entry`, which rewrote the
+    /// payload and re-ran the whole duplicate check for a change that touches neither.
+    pub fn save_icon(&mut self, id: i64, icon: &[u8]) -> Result<()> {
+        if self
+            .conn
+            .execute("UPDATE entries SET icon=?2 WHERE id=?1", params![id, icon])?
+            == 0
+        {
+            return Err(Error::Invalid("项目已不存在".into()));
         }
+        Ok(())
     }
     pub fn delete_entry(&mut self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM entries WHERE id=?1", [id])?;
@@ -383,35 +449,45 @@ impl Store {
         {
             return Err(Error::Invalid("目标分类已不存在".into()));
         }
-        let mut entry = self
-            .entries()?
-            .into_iter()
-            .find(|e| e.id == id)
-            .ok_or_else(|| Error::Invalid("项目已不存在".into()))?;
+        let row = self
+            .conn
+            .query_row("SELECT payload,icon FROM entries WHERE id=?1", [id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+            })
+            .optional()?;
+        let Some((payload, icon)) = row else {
+            return Err(Error::Invalid("项目已不存在".into()));
+        };
+        let mut entry: Entry = serde_json::from_str(&payload)?;
+        entry.icon = icon.unwrap_or_default();
         entry.id = 0;
         entry.collection_id = destination;
         self.save_entry(&entry)
     }
     /// One drop/picker operation commits atomically; repeated targets are skipped.
     pub fn add_entries(&mut self, entries: &[Entry]) -> Result<(usize, usize)> {
-        let mut keys: HashSet<_> = self
-            .entries()?
-            .iter()
-            .map(|e| (e.collection_id, self.target_key(&e.target)))
-            .collect();
-        let mut accepted = Vec::new();
+        // Only the two dedup columns are read. The previous shape re-parsed every payload, icon
+        // bytes included, to answer "is this target already here".
+        let mut keys: HashSet<(i64, String)> = self
+            .conn
+            .prepare("SELECT collection_id,dup_key FROM entries")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut rows = Vec::new();
         for entry in entries {
             entry.validate()?;
-            if keys.insert((entry.collection_id, self.target_key(&entry.target))) {
-                accepted.push(entry);
+            let dup_key = self.dup_key(entry);
+            if keys.insert((entry.collection_id, dup_key.clone())) {
+                rows.push((entry, Self::payload_of(entry)?, dup_key));
             }
         }
         let tx = self.conn.transaction()?;
-        for entry in &accepted {
-            tx.execute("INSERT INTO entries(collection_id,payload,position) VALUES(?1,?2,(SELECT coalesce(max(position),-1)+1 FROM entries))", params![entry.collection_id, serde_json::to_string(entry)?])?;
+        for (entry, payload, dup_key) in &rows {
+            tx.execute("INSERT INTO entries(collection_id,payload,position,icon,dup_key) VALUES(?1,?2,(SELECT coalesce(max(position),-1)+1 FROM entries),?3,?4)", params![entry.collection_id, payload, entry.icon.as_slice(), dup_key])?;
         }
         tx.commit()?;
-        Ok((accepted.len(), entries.len() - accepted.len()))
+        let accepted = rows.len();
+        Ok((accepted, entries.len() - accepted))
     }
     pub fn move_at(&mut self, id: i64, before: i64, after: bool) -> Result<()> {
         let all = self.entries()?;
@@ -472,7 +548,7 @@ impl Store {
     }
     pub fn export(&self) -> Result<Export> {
         Ok(Export {
-            format_version: 1,
+            format_version: SCHEMA_VERSION,
             collections: self.collections()?,
             entries: self.entries()?,
             settings: self.settings()?,
@@ -490,6 +566,8 @@ impl Store {
     }
     pub fn restore(&mut self, data: &Export) -> Result<()> {
         validate_export(data)?;
+        // Resolved while `&self` is still free: the transaction holds it mutably afterwards.
+        let keys: Vec<String> = data.entries.iter().map(|e| self.dup_key(e)).collect();
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM entries", [])?;
         tx.execute("DELETE FROM collections WHERE parent_id IS NOT NULL", [])?;
@@ -510,14 +588,16 @@ impl Store {
                 ],
             )?;
         }
-        for entry in &data.entries {
+        for (entry, dup_key) in data.entries.iter().zip(keys) {
             tx.execute(
-                "INSERT INTO entries VALUES(?1,?2,?3,?4)",
+                "INSERT INTO entries(id,collection_id,payload,position,icon,dup_key) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
                     entry.id,
                     entry.collection_id,
-                    serde_json::to_string(entry)?,
-                    entry.position
+                    Self::payload_of(entry)?,
+                    entry.position,
+                    entry.icon.as_slice(),
+                    dup_key
                 ],
             )?;
         }
@@ -676,6 +756,106 @@ mod tests {
             position: 0,
         }
     }
+    /// The reason for the split columns: reading a library must not touch icon bytes at all, and
+    /// an icon must not cost ~3.6 text characters per byte wherever it is serialised.
+    #[test]
+    fn icon_bytes_live_in_their_own_column_not_in_the_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("icon.db");
+        let mut store = Store::open(&path).unwrap();
+        let mut e = entry();
+        e.icon = vec![7u8; 100 * 1024];
+        let id = store.save_entry(&e).unwrap();
+        let (payload_len, icon_len): (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT length(payload),length(icon) FROM entries WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(icon_len, 100 * 1024);
+        assert!(
+            payload_len < 2048,
+            "payload still carries the icon: {payload_len} bytes"
+        );
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.entries().unwrap()[0].icon, vec![7u8; 100 * 1024]);
+        // The JSON export keeps icons, but base64 costs about 1.33 characters per byte instead of
+        // one whole number token each.
+        let json = serde_json::to_string(&store.export().unwrap()).unwrap();
+        // base64 of 0x07 0x07 0x07.
+        assert!(json.contains("BwcH"), "export lost the icon");
+        assert!(
+            json.len() < 200_000,
+            "export still spells bytes as integers: {} chars",
+            json.len()
+        );
+    }
+    #[test]
+    fn duplicate_target_is_rejected_after_a_category_change_too() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let id = store.save_entry(&entry()).unwrap();
+        assert!(store.save_entry(&entry()).is_err());
+        // The rule is per category, so the same target in a sibling category is legal.
+        let other = store.save_collection(None, Some(1), "另一个分类").unwrap();
+        let mut twin = entry();
+        twin.collection_id = other;
+        let twin_id = store.save_entry(&twin).unwrap();
+        // Moving the first one over there now collides with that twin.
+        let mut moved = entry();
+        moved.id = id;
+        moved.collection_id = other;
+        assert!(store.save_entry(&moved).is_err());
+        // With the twin gone the move is legal again, which is what the dedup index must track.
+        store.delete_entry(twin_id).unwrap();
+        assert_eq!(store.save_entry(&moved).unwrap(), id);
+    }
+    #[test]
+    fn save_icon_touches_only_the_icon_column() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let id = store.save_entry(&entry()).unwrap();
+        let before: (String, String) = store
+            .conn
+            .query_row(
+                "SELECT payload,dup_key FROM entries WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        store.save_icon(id, &[9u8; 4096]).unwrap();
+        let after: (String, String) = store
+            .conn
+            .query_row(
+                "SELECT payload,dup_key FROM entries WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "the backfill must not rewrite payload or dup_key"
+        );
+        assert_eq!(store.entries().unwrap()[0].icon, vec![9u8; 4096]);
+        // The dedup probe still works on a row whose icon was replaced behind its payload.
+        assert!(store.save_entry(&entry()).is_err());
+        assert!(store.save_icon(4040, &[1]).is_err());
+    }
+    #[test]
+    fn add_entries_still_skips_targets_already_present() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        store.save_entry(&entry()).unwrap();
+        let mut fresh = entry();
+        fresh.target = Target::Url {
+            url: "https://other.example".into(),
+        };
+        assert_eq!(
+            store.add_entries(&[entry(), fresh]).unwrap(),
+            (1, 1),
+            "the dedup set now comes from the dup_key column"
+        );
+    }
     fn open_error(path: &Path) -> String {
         match Store::open(path) {
             Err(error) => error.to_string(),
@@ -702,7 +882,7 @@ mod tests {
         store.save_window_state(&state).unwrap();
         let export = store.export().unwrap();
         let json = serde_json::to_string(&export).unwrap();
-        assert_eq!(export.format_version, 1);
+        assert_eq!(export.format_version, 2);
         assert!(!json.contains("monitor"));
         assert!(!json.contains("always_on_top"));
         store.restore(&export).unwrap();
@@ -714,7 +894,7 @@ mod tests {
                 .conn
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            1
+            2
         );
         assert_eq!(
             std::fs::read_dir(dir.path())
@@ -878,7 +1058,7 @@ mod tests {
     fn export_with_another_format_version_is_rejected_and_keeps_data() {
         let mut store = Store::open(Path::new(":memory:")).unwrap();
         store.save_entry(&entry()).unwrap();
-        for version in [0, 2, 4, 5] {
+        for version in [0, 1, 4, 5] {
             let mut data = store.export().unwrap();
             data.format_version = version;
             assert!(store.restore(&data).is_err(), "version {version}");
@@ -1340,7 +1520,8 @@ mod tests {
     fn other_schema_versions_are_rejected_without_downgrading() {
         // Diascia restarts its version counter, so a pre-reset database and a future one
         // share one wording; both must be refused and left byte-identical in version.
-        for version in [2, 5, 99] {
+        // Version 1 is the real previous schema, whose `entries` had no icon/dup_key columns.
+        for version in [1, 5, 99] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("other.db");
             let conn = Connection::open(&path).unwrap();

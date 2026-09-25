@@ -18,7 +18,7 @@ cargo run --release --locked
 
 程序位于 `target/release/diascia.exe`。使用 Slint 1.18.0 Fluent 控件、winit Windows 后端和软件渲染器，不依赖 WebView、JavaScript 或 C#。
 
-默认直接在 **EXE 同级目录**保存 `diascia.db`（含设置和项目图标），不创建 data 子目录、不写 AppData。首次运行建立版本 1 的新库，内含“常用”分组及真实的“默认分类”。
+默认直接在 **EXE 同级目录**保存 `diascia.db`（含设置和项目图标），不创建 data 子目录、不写 AppData。首次运行建立版本 2 的新库，内含“常用”分组及真实的“默认分类”。
 
 ```powershell
 # 便携模式：与默认相同，直接写 EXE 同级目录
@@ -32,6 +32,8 @@ cargo run --release --locked
 
 ## 近期实现记录
 
+- 数据库升到版本 2：图标从 `entries.payload` 的 JSON 文本移到独立 `icon BLOB` 列，重复目标判定键 `dup_key` 在写入时物化，校验不再读全表；JSON 导出的 `icon` 改 base64。图标回填也不再触发全量 `refresh()`，而是就地替换 blob 并只让可见带重解码那一条。同时给探针补了启动时间线（`startup_*`／`store_*`／`refresh_ms`／`entries_query_ms`）、进程内 `working_set_kb`／`private_kb`、以及 `full_frame`／`region_set` 两个帧归因计数。
+- 用这轮新加的读数否掉了四个候选优化，都没有合入：`opt-level=2`（+6.45 MB 换约 1.2 ms，`frame_ms` 反而略差）、隐藏态 `EmptyWorkingSet`（工作集能压到 435 KB 但 `private_kb` 一字节不还）、`PRAGMA cache_size=-4000`（全表读 27.8 → 56.5 ms，图标 BLOB 撑不进 4 MB 缓存）、以及贴边动画每帧 `SetWindowRgn` 的假设（`clip` 只在跨显示器泄漏时才为真，单显示器下 `region_set` 实测 0 行）。保留 `opt-level="z"` 的理由写在 `Cargo.toml` 注释里。
 - 名称编辑与应用选择是主窗口／编辑器窗口内的覆盖层，不再有独立顶层窗口；设置窗口按需创建。启动复用已校验的数据快照。主网格按行虚拟化，图标在后台按可见范围解码并统一缩到 128 像素（新存入的图标同样以 128 像素保存，旧库里的 256 像素图标读取时降采样），解码缓存上限 24 MiB，完全隐藏时收缩到只剩可见范围。
 - 第二实例改用系统事件通知；完全隐藏时不轮询，贴边收纳只做一次光标位置判断（光标远离揭示带时间隔 32 毫秒，靠近时 16 毫秒），贴边动画按帧时钟推进。热键、托盘和第二实例继续经过统一保护策略。
 - 记忆主窗位置、尺寸、贴边方向及最后分组/分类；分类滚动位置和键盘焦点在当前会话中保留。显示器变化时将窗口限制在可见工作区。
@@ -42,7 +44,7 @@ cargo run --release --locked
 - 窗口位置和“始终置顶”是本机状态，不随 JSON 导出。
 - “呼出与隐藏”新增“窗口始终置顶”，允许同时贴边收纳；标题栏临时钉住仍会暂停自动隐藏。保护解除后，原来可见且未钉住的贴边窗口只恢复收纳入口，不自动展开、不抢焦点；手动隐藏不会自动恢复。
 - 工具与项目提示统一使用主题表面、细描边和紧凑圆角。项目提示显示名称、完整路径或网址与备注，备注最多六行。编辑窗在原生句柄就绪后注册图片拖入，关闭时释放，并丢弃旧编辑会话的拖入回调。
-- 探针的数据夹具独立成 `tests/probe_seed.rs`：真机指标不再对着空库量，`probe.ps1 -Seed` 会先铺 40 条再采样。
+- 探针的数据夹具独立成 `tests/probe_seed.rs`：真机指标不再对着空库量，`probe.ps1 -Seed` 会先铺数据再采样（默认 300 条，可用 `-Entries`／`-BlobsKb` 指定条数和每条图标体积，让内存读数可比）。
 - 机器验收的链延长到分类树与删除确认（同名分类自动编号、“至少保留一个分组”都走真窗口），打包应用图标的回填等待钉在 4 秒内。
 - `verify.ps1` 增加第二道格式检查：`src/ui_commands.rs` 与 `src/app_session.rs` 是 `include!` 进 `main.rs` 的，`cargo fmt` 的模块走查根本看不见它们。
 
@@ -74,13 +76,15 @@ cargo run --release --locked
 
 数据目录里的 `error-log.txt` 是常开的：启动失败、没有区域认领的菜单命令和 panic 都会各写一行，带毫秒时间戳并做路径脱敏，超过 512 KiB 就从开头截断。发布版不附控制台，这里几乎是唯一的文字故障记录；它和要在设置里显式开启的保护判定记录（`protection-log.csv`）不是一回事。数据目录定下来之前发生的错误只能进对话框。
 
-“恢复”只接受本应用版本 1 的 JSON，确认后替换当前数据。数据库 `.db` 备份可在退出应用后复制到一个**新的空目录**，命名为 `diascia.db`，再用 `--data-dir` 打开检查，同时保留原数据目录。
+“恢复”只接受本应用版本 2 的 JSON，确认后替换当前数据。数据库 `.db` 备份可在退出应用后复制到一个**新的空目录**，命名为 `diascia.db`，再用 `--data-dir` 打开检查，同时保留原数据目录。
 
-导出/备份不覆盖已有同名文件，请使用新名称。本项目不导入任何旧版数据；未知 JSON 字段/类型和非版本 1 的数据库一律拒绝读取、不作改写。
+导出/备份不覆盖已有同名文件，请使用新名称。本项目不导入任何旧版数据；未知 JSON 字段/类型和非版本 2 的数据库一律拒绝读取、不作改写。
 
 ## 数据兼容与当前边界
 
-数据库与 JSON 导出都是版本 1，Diascia 只读写版本 1。版本号随“这是新软件”的定位归零重开，因此 0.3–0.5 开发阶段留下的库、任何非版本 1 的库和外部结构的库都会被拒绝且不作改写；设置项允许缺字段（读取时取默认值），但不接受未知字段。
+数据库与 JSON 导出都是版本 2，Diascia 只读写版本 2。版本号随“这是新软件”的定位归零重开，因此 0.3–0.5 开发阶段留下的库、版本 1 的库、任何其它版本号的库和外部结构的库都会被拒绝且不作改写；设置项允许缺字段（读取时取默认值），但不接受未知字段。
+
+版本 2 只改存储形状，不改功能：项目的 PNG 图标从 `entries.payload` 的 JSON 文本里搬到独立的 `icon BLOB` 列，另加一列 `dup_key`（把“同一分类不得重复目标”的判定键在写入时物化，因为归一化要相对化路径、解析 URL 并做全 Unicode 小写，SQLite 表达不了）。`payload` 因此不再包含图标，重复目标校验也不再读全表。JSON 导出里 `icon` 改为 base64 字符串（`Vec<u8>` 的默认序列化是每个字节一个十进制 token，约 3.6 个字符/字节）。实测同一份 300 条 / 7.34 MB 图标的数据集：启动到首帧 294.6 → 161.4 ms，`Store::open` 的全表读 187.8 → 27.8 ms，铺 300 条 33.9 → 0.35 s，空闲 private 23,970 → 19,466 KB。
 
 本项目不做旧版数据迁移。浏览器/OLE 已有原生格式与生命周期回归，真实浏览器拖放、混合 DPI 和显示器热插拔仍需人工验收。游戏保护保留现有 500 ms 复核和显示前检查；尚未做 osu!lazer 真机矩阵。Narrator、高对比度、热插拔显示器及真实跨 DPI 鼠标操作仍需要人工验收。
 
@@ -101,7 +105,7 @@ cargo run --release --locked
 
 - `verify.ps1` 的格式检查是**两道**：`cargo fmt --check` 走不到 `src/ui_commands.rs` 和 `src/app_session.rs`——它们被 `include!` 进 `main.rs`，不在 rustfmt 的模块走查里——这两个文件由第二条 `rustfmt --edition 2024 --check` 单独覆盖。
 - `tests/partial_repaint.rs`、`batch_panel_grid.rs`、`titlebar_search.rs`、`tooltip_render.rs`、`tooltip_popup_render.rs`、`ui_interactions.rs` 各自安装一个 `MinimalSoftwareWindow` 平台，用 `dispatch_event` 驱动回调、把界面光栅化进自有的像素缓冲。`slint::platform::set_platform` 每进程只能调一次，所以一个测试二进制只可能有一种平台。
-- 第七个二进制 `tests/probe_seed.rs` 不渲染任何东西，是手动夹具：`DIASCIA_PROBE_SEED=<目录> cargo test --release --test probe_seed -- --ignored` 在该目录建一个库，2 分组 × 2 子分类共 4 个分类、10 轮 40 条（每第 5 条是网址），给第三层探针喂出有代表性的数据——空库上滚动、搜索和图标解码都量不到东西。环境变量没设就直接返回，所以它不会被 `--ignored` 撞出来。
+- 第七个二进制 `tests/probe_seed.rs` 不渲染任何东西，是手动夹具：`DIASCIA_PROBE_SEED=<目录> cargo test --release --test probe_seed -- --ignored` 在该目录建一个库，2 分组 × 2 子分类共 4 个分类、默认 300 条（每第 5 条是网址），给第三层探针喂出有代表性的数据——空库上滚动、搜索和图标解码都量不到东西。另有两个尺寸旋钮：`DIASCIA_PROBE_ENTRIES` 覆盖条数，`DIASCIA_PROBE_BLOBS_KB`（默认 0，即不写图标）给每条写入**可复现**的合成 PNG。没有它，每次铺出来的 blob 总量取决于 shell 提取到什么，内存读数就无法跨构建比较。环境变量没设就直接返回，所以它不会被 `--ignored` 撞出来。
 - `tests/menu_trees.rs` 只依赖 `diascia::menus` 的数据：菜单内容、分段、命令号与 `region()` 归属、置灰条件、字形都在这里被钉住，既不建窗口也不碰 GDI。原生弹窗需要真 HWND，离屏窗口没有，所以**菜单内容只能作为数据被证明**。
 - `src/platform/fluent_menu.rs` 的 `pixel_probes` 把 owner-draw 画进内存位图再用 `GetDIBits` 读回：分隔线粗细／缩进／颜色、行高 34、宽度夹在 206–340、悬停填充只在“选中且可用”时出现、禁用项用弱化色，100% 与 200% DPI 各测一遍。
 - 看图：`DIASCIA_MENU_DUMP=target/menu.png cargo test --lib dump_every` 实际产出 `target/menu.dark.png` 与 `target/menu.light.png`（五套菜单展平成一张、浅深各一张，只按 200% 渲染），`DIASCIA_TOOLTIP_DUMP` 同理。挑字形就靠这张图，不用开真菜单。
@@ -120,15 +124,18 @@ cargo test --release --locked -- --ignored --nocapture
 ```powershell
 cargo build --release --locked
 .\scripts\probe.ps1 -Seconds 30                          # 采样后按事件打 p50/p95，并算呼出延迟
-.\scripts\probe.ps1 -Seed -Seconds 60                    # 先用夹具铺 40 条再采样
+.\scripts\probe.ps1 -Seed -Seconds 60                    # 先用夹具铺 300 条再采样
+.\scripts\probe.ps1 -Seed -Entries 300 -BlobsKb 24        # 固定每条图标体积，内存才可比
 .\scripts\probe.ps1 -Perf -Seconds 300 -Label collapsed  # 附带 CPU/内存采样
 ```
 
-`probe.ps1` 的参数只有 `-Seconds`（默认 20）、`-Perf`、`-Seed`、`-DataDir`（默认 `target/probe-data`）、`-Csv`（默认 `target/probe.csv`）、`-Label`；`-Seed`（或数据目录里还没有库）会先跑一次 `probe_seed` 夹具。想按状态单独量 CPU／内存，用 `scripts\perf_sample.ps1`：给 `-Name`（默认 `diascia`）或 `-ProcessId`，加 `-Seconds`（默认 300）、`-IntervalMs`（默认 250）、`-Label`，它只挂到一个已经在跑的进程、不启动也不注入，取的是 `TotalProcessorTime` 的整窗差值——任务管理器会把空闲的启动器抹成 0%。
+`probe.ps1` 的参数只有 `-Seconds`（默认 20）、`-Perf`、`-Seed`、`-DataDir`（默认 `target/probe-data`）、`-Csv`（默认 `target/probe.csv`）、`-Label`、`-Entries`、`-BlobsKb`（后两个透传给夹具，0 表示用默认）；`-Seed`（或数据目录里还没有库）会先跑一次 `probe_seed` 夹具。想按状态单独量 CPU／内存，用 `scripts\perf_sample.ps1`：给 `-Name`（默认 `diascia`）或 `-ProcessId`，加 `-Seconds`（默认 300）、`-IntervalMs`（默认 250）、`-Label`，它只挂到一个已经在跑的进程、不启动也不注入，取的是 `TotalProcessorTime` 的整窗差值——任务管理器会把空闲的启动器抹成 0%。
+
+呼出延迟分两条报：`hotkey→show_requested` 是应用侧响应（召唤一个已映射窗口时也能采到），`hotkey→首帧` 只认 1 秒内落下的 `frame_ms` 样本。后者很重要：召唤一个无需重绘的窗口时，下一条 `frame_ms` 可能属于几秒之后的一次滚动，把它当延迟读会量出 2.5–10.5 秒的假数字；脚本现在单独计数并提示“召唤后滚一下才采得到”。
 
 探针用 `--data-dir target/probe-data` 起一个独立实例（互斥体按数据目录哈希命名，不会和你正在用的那个冲突），设 `DIASCIA_METRICS` 收集 `时间,事件,值`，然后**等你自己操作**——脚本从不发送鼠标或键盘事件，因为合成输入会移走使用者的指针、点到桌面上的任何程序。**千万不要**把探针指向真实数据目录：那会把正在使用的启动器拽到前台。
 
-会改变本机行为的变量一共五个：`DIASCIA_METRICS`（指标 CSV 路径）、`DIASCIA_MENU_DUMP` 与 `DIASCIA_TOOLTIP_DUMP`（离屏图输出）、`DIASCIA_PROBE_SEED`（夹具目录）、`DIASCIA_IME_TRACE`（只在 debug 构建里逐条打印输入法组合信号）。
+会改变本机行为的变量一共七个：`DIASCIA_METRICS`（指标 CSV 路径）、`DIASCIA_MENU_DUMP` 与 `DIASCIA_TOOLTIP_DUMP`（离屏图输出）、`DIASCIA_PROBE_SEED`（夹具目录）、`DIASCIA_PROBE_ENTRIES`（夹具条数，默认 300）、`DIASCIA_PROBE_BLOBS_KB`（夹具每条图标体积，默认 0＝不写）、`DIASCIA_IME_TRACE`（只在 debug 构建里逐条打印输入法组合信号）。
 
 离屏渲染支持浅深色、100%/150%/200% DPI、最小窗口及搜索/路径转换面板，但不等同于原生窗口验收。仍需人工过一遍：真实浏览器拖放、混合 DPI 与显示器热插拔、Narrator／高对比度，以及真开一次右键菜单，确认字形、分段和圆角与离屏图一致。
 

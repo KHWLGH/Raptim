@@ -629,6 +629,7 @@ impl App {
         self.main.set_status(text.into());
     }
     fn refresh(&mut self) -> Result<()> {
+        let started = Instant::now();
         if let Some(initial) = self.initial.take() {
             self.collections = initial.collections;
             self.entries = initial.entries;
@@ -638,13 +639,10 @@ impl App {
             self.entries = self.store.entries()?;
         }
         self.search_index.sync(&self.entries);
-        diascia::metrics::record("entry_count", self.entries.len() as f64);
-        diascia::metrics::record(
-            "entry_blob_bytes",
-            self.entries.iter().map(|e| e.icon.len()).sum::<usize>() as f64,
-        );
+        self.record_dataset();
         let ids: std::collections::HashSet<_> = self.entries.iter().map(|e| e.id).collect();
         self.icon_cache.retain(&ids);
+        let keyed = Instant::now();
         self.icon_index = self
             .entries
             .iter()
@@ -659,6 +657,7 @@ impl App {
                 )
             })
             .collect();
+        diascia::metrics::record("icon_index_ms", keyed.elapsed().as_secs_f64() * 1000.);
         self.eligible = None;
         self.collection_names = self
             .collections
@@ -674,7 +673,10 @@ impl App {
                 (c.id, name)
             })
             .collect();
-        self.rebuild_navigation()
+        // `n` in the probe table is the refresh count, so no separate counter is needed.
+        let rebuilt = self.rebuild_navigation();
+        diascia::metrics::record("refresh_ms", started.elapsed().as_secs_f64() * 1000.);
+        rebuilt
     }
     fn rebuild_navigation(&mut self) -> Result<()> {
         if !self
@@ -2197,6 +2199,14 @@ fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Startup timeline. Each mark records ms since `run_at` began, on the same origin as every
+    // other row; the probe subtracts neighbours to get the per-phase cost.
+    let clock = Instant::now();
+    macro_rules! mark {
+        ($name:literal) => {
+            diascia::metrics::record($name, clock.elapsed().as_secs_f64() * 1000.)
+        };
+    }
     std::fs::create_dir_all(&data_dir)?;
     let data_dir = data_dir.canonicalize()?;
     diascia::diagnostics::attach(&data_dir);
@@ -2219,11 +2229,13 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
     let Some(mut instance) = platform::Instance::acquire(&data_dir).map_err(Error::Invalid)? else {
         return Ok(());
     };
+    mark!("startup_prepare_ms");
     let mut store = Store::open(&data_dir.join("diascia.db"))?;
     let initial = store.take_initial()?;
     let settings = initial.settings.clone();
     diascia::diagnostics::set_protection_log(settings.protection_log);
     let saved_window = store.window_state()?;
+    mark!("startup_store_ms");
     diascia::metrics::record("database_ready", 0.);
     let selector = slint::BackendSelector::new()
         .backend_name("winit".into())
@@ -2240,10 +2252,13 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         builder
     });
     selector.select()?;
+    mark!("startup_backend_ms");
     let main = MainWindow::new()?;
+    mark!("startup_window_ms");
     let mut policy = DisplayPolicy::default();
     let signals = platform::collect_signals(&settings, &mut platform::ProtectionCache::default());
     policy.update(decide(signals), Instant::now(), signals.hold_release());
+    mark!("startup_signals_ms");
     let native_epoch = Arc::new(AtomicU64::new(policy.ticket()));
     let epoch = native_epoch.clone();
     let weak = main.as_weak();
@@ -2260,6 +2275,7 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         .map_err(Error::Invalid)?;
     #[cfg(debug_assertions)]
     eprintln!("hotkey worker ready");
+    mark!("startup_hotkey_ms");
     instance.listen(notify.clone());
     let foreground = platform::ForegroundWatch::new(notify.clone()).map_err(Error::Invalid)?;
     let frame_clock = platform::FrameClock::new(notify.clone()).map_err(Error::Invalid)?;
@@ -2347,6 +2363,8 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         saving_editor: false,
     }));
     app.borrow_mut().weak_self = Rc::downgrade(&app);
+    // Everything up to here is building the App state, including the decode worker's thread spawn.
+    mark!("startup_app_ms");
     macro_rules! bind { ($ui:ident, $callback:ident, |$s:ident $(,$arg:ident)*| $body:block) => { { let weak = Rc::downgrade(&app); $ui.$callback(move |$($arg),*| { if let Some(app) = weak.upgrade() { #[allow(unused_mut)] let mut $s = app.borrow_mut(); $body } }); } }; }
     bind!(main, on_search, |s, _query| {
         let started = Instant::now();
@@ -2407,21 +2425,18 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             }
             if icon.is_empty() {
                 s.status("无法从目标提取图标，保留当前图标");
-            } else if let Some(mut e) = s
-                .entries
-                .iter()
-                .find(|e| e.id == id && e.target.duplicate_key() == key && e.icon == old)
-                .cloned()
-            {
-                e.icon = icon;
-                match s.store.save_entry(&e) {
-                    Ok(_) => {
-                        s.icon_cache.remove(&id);
-                        s.report_refresh();
-                        s.status("图标缓存已刷新");
-                    }
-                    Err(error) => s.status(error),
-                }
+                return;
+            }
+            // The caller handed over `old` so a reply to a stale request cannot overwrite a newer
+            // icon, which is also what the row must still hold for the band sweep to be correct.
+            let usable = s
+                .icon_index
+                .get(&id)
+                .and_then(|slot| s.entries.get(slot.index))
+                .is_some_and(|e| e.target.duplicate_key() == key && e.icon == old);
+            if usable && s.replace_icon(id, icon) {
+                s.update_visible_icons();
+                s.status("图标缓存已刷新");
             }
         }
     });
@@ -2432,20 +2447,21 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             if epoch != s.data_epoch {
                 return;
             }
+            let mut applied = false;
             for (id, key, icon) in icons {
-                if let Some(mut entry) = s
-                    .entries
-                    .iter()
-                    .find(|e| e.id == id && e.icon.is_empty() && e.target.duplicate_key() == key)
-                    .cloned()
-                {
-                    entry.icon = icon;
-                    if let Err(e) = s.store.save_entry(&entry) {
-                        s.status(e);
-                    }
+                let stale = s
+                    .icon_index
+                    .get(&id)
+                    .and_then(|slot| s.entries.get(slot.index))
+                    .is_none_or(|e| !e.icon.is_empty() || e.target.duplicate_key() != key);
+                if stale {
+                    continue;
                 }
+                applied |= s.replace_icon(id, icon);
             }
-            s.report_refresh();
+            if applied {
+                s.update_visible_icons();
+            }
         }
     });
     bind!(main, on_icon_ready, |s, value| {
@@ -3012,11 +3028,14 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         true,
     );
     bind_ui_commands(&app);
+    // Slint callback registration, i.e. the ~34 `bind!` sites plus the ui-command table.
+    mark!("startup_callbacks_ms");
     {
         let mut s = app.borrow_mut();
         s.refresh()?;
         s.sync_settings_ui();
     }
+    mark!("startup_ready_ms");
     let startup = Rc::downgrade(&app);
     slint::Timer::single_shot(Duration::ZERO, move || {
         if let Some(app) = startup.upgrade() {
@@ -3047,6 +3066,12 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
                 s.evaluate();
                 s.process_files();
                 s.save_window(false);
+                if diascia::metrics::enabled() {
+                    s.record_dataset();
+                    let (working_set, private) = platform::memory_kib();
+                    diascia::metrics::record("working_set_kb", working_set as f64);
+                    diascia::metrics::record("private_kb", private as f64);
+                }
                 diascia::metrics::flush();
             }
         },

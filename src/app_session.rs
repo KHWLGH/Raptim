@@ -152,6 +152,37 @@ impl App {
         }
     }
 
+    /// The dataset stamp every memory or timing reading has to be compared against. Emitted both
+    /// after a full reload and on the idle timer, because icons now land through `replace_icon`
+    /// and would otherwise leave a stale size recorded for the whole run.
+    fn record_dataset(&self) {
+        diascia::metrics::record("entry_count", self.entries.len() as f64);
+        diascia::metrics::record(
+            "entry_blob_bytes",
+            self.entries.iter().map(|e| e.icon.len()).sum::<usize>() as f64,
+        );
+    }
+    /// A backfilled or refreshed icon replaces one blob in place, then asks the band sweep to
+    /// re-decode just that row. The previous shape ran `save_entry` plus a full `refresh()` per
+    /// reply, so a 300-row startup backfill re-read the whole library about twenty times right
+    /// after the first paint.
+    fn replace_icon(&mut self, id: i64, icon: Vec<u8>) -> bool {
+        let index = match self.icon_index.get(&id) {
+            Some(key) if self.entries.get(key.index).is_some_and(|e| e.id == id) => key.index,
+            _ => return false,
+        };
+        if let Err(error) = self.store.save_icon(id, &icon) {
+            self.status(error);
+            return false;
+        }
+        self.entries[index].icon = icon;
+        // The sweep keys its cache on the blob's fingerprint, so it has to follow the new bytes.
+        if let Some(key) = self.icon_index.get_mut(&id) {
+            key.fingerprint = diascia::icons::fingerprint(&self.entries[index].icon);
+        }
+        self.icon_cache.remove(&id);
+        true
+    }
     fn update_visible_icons(&mut self) {
         let started = Instant::now();
         let mut visible = std::collections::HashSet::new();
@@ -396,13 +427,19 @@ impl App {
         self.main.set_batch_mode(false);
     }
     fn reset_batch_selection(&mut self) {
+        // Every search keystroke arrives here. With nothing selected there is no row left to
+        // un-check, and walking both models cloned every row of both just to re-derive the two
+        // counters that are set a few lines below anyway.
+        let row_flags = !self.browsing.selected.is_empty() || self.main.get_batch_count() != 0;
         self.browsing.clear_selection();
         self.main.set_batch_count(0);
         self.main.set_batch_confirm(false);
         self.main.set_batch_target_open(false);
         self.main.set_batch_error("".into());
         self.main.set_batch_all_selected(false);
-        self.update_selection();
+        if row_flags {
+            self.update_selection();
+        }
     }
     fn update_selection(&self) {
         for model in [self.main.get_items(), self.main.get_results()] {

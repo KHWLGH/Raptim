@@ -255,8 +255,9 @@ pub struct Collection {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
-    /// Embedded PNG bytes; travels with database backups and JSON exports.
-    #[serde(default)]
+    /// Embedded PNG bytes; travels with database backups and JSON exports. The database keeps this
+    /// in its own BLOB column, so only exports and the shell IPC pay the text encoding.
+    #[serde(default, with = "base64_bytes")]
     pub icon: Vec<u8>,
     pub id: i64,
     pub collection_id: i64,
@@ -265,6 +266,25 @@ pub struct Entry {
     pub notes: String,
     pub target: Target,
     pub position: i64,
+}
+/// Serde's default for `Vec<u8>` is a JSON array of integers, which costs about 3.6 text bytes per
+/// icon byte and parses one number token per byte. Base64 is 1.33 and decodes in one pass.
+mod base64_bytes {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde::Deserialize as _;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        bytes: &Vec<u8>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
 }
 impl Entry {
     pub fn validate(&self) -> Result<()> {

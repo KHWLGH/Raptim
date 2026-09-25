@@ -1026,6 +1026,7 @@ name = "diascia"
 version = "0.0.0"
 dependencies = [
  "arboard",
+ "base64",
  "i-slint-core",
  "image",
  "pinyin",

@@ -13,6 +13,9 @@ pub fn invalidate(window: &slint::Window) {
 /// surface (resize, scale-factor and theme changes); a partial dirty region can otherwise
 /// retain old tiles. This deliberately does not request another frame.
 pub fn mark_full_frame(window: &slint::Window) {
+    // Counts whole-surface dirty marks, i.e. how often the software renderer has to repaint the
+    // entire backing store rather than a damage rectangle.
+    crate::metrics::record("full_frame", 1.);
     prepare_tooltips(window);
     use i_slint_core::{
         lengths::{LogicalPoint, LogicalRect, LogicalSize},
