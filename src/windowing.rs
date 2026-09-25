@@ -71,9 +71,7 @@ pub fn prepare_tooltips(window: &slint::Window) {
 }
 
 pub fn show(window: &slint::Window) -> Result<(), slint::PlatformError> {
-    use slint::winit_030::WinitWindowAccessor;
-    use slint::winit_030::winit::platform::windows::WindowExtWindows;
-    window.with_winit_window(|w| w.set_skip_taskbar(true));
+    crate::platform::skip_taskbar(window);
     window.show()?;
     crate::platform::decorate(window);
     if let Some((rect, work)) = crate::platform::geometry(window) {

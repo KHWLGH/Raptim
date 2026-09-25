@@ -32,6 +32,7 @@ cargo run --release --locked
 
 ## 近期实现记录
 
+- 贴边展开时的圆角／阴影跳变修掉了，根因是两件事叠在一起。一是装饰函数 `decorate()` 在每次召唤、每次展开、每次 resize 上都无条件重写 `GWL_EXSTYLE`、经 winit 重设按钮掩码、重写四项 DWM 属性并清一次窗口区域；二是层级切换走 winit 的 `set_window_level`，它按 winit 自己的窗口状态**重算两个样式字**，把 `WS_EX_TOOLWINDOW` 抹掉，于是下一次 `decorate` 必须写回来，而这次写回正落在窗口还在滑的那一拍。现在每一笔改框写入都对着 HWND 的当前状态判断（样式位、是否装着区域、在哪个层级），winit 那条会重写样式的路径不再被调用；`SetWindowRgn(NULL)` 只在确实装着区域时才做且带上重绘，焦点事件不再重写边框色，`refresh_geometry` 也不再靠“标记被清掉了”来推断要不要重建框。顺带修掉同源的缺陷：贴边滚一轮之后启动器重新出现在任务栏／Alt+Tab。机器验收加了一段真窗口检查——完整收起→展开，逐拍比对 `GWL_STYLE`／`GWL_EXSTYLE`／是否装着区域，并要求第二次召唤**一笔改框写入都不发**；计数器是故意留下的，因为只有它能区分“状态碰没变”和“有没有再要求合成器重建非客户区”。圆角本身仍然证不了，那要人到桌面前看一眼（取证脚本见下一层）。
 - 数据库升到版本 2：图标从 `entries.payload` 的 JSON 文本移到独立 `icon BLOB` 列，重复目标判定键 `dup_key` 在写入时物化，校验不再读全表；JSON 导出的 `icon` 改 base64。图标回填也不再触发全量 `refresh()`，而是就地替换 blob 并只让可见带重解码那一条。同时给探针补了启动时间线（`startup_*`／`store_*`／`refresh_ms`／`entries_query_ms`）、进程内 `working_set_kb`／`private_kb`、以及 `full_frame`／`region_set` 两个帧归因计数。
 - 用这轮新加的读数否掉了四个候选优化，都没有合入：`opt-level=2`（+6.45 MB 换约 1.2 ms，`frame_ms` 反而略差）、隐藏态 `EmptyWorkingSet`（工作集能压到 435 KB 但 `private_kb` 一字节不还）、`PRAGMA cache_size=-4000`（全表读 27.8 → 56.5 ms，图标 BLOB 撑不进 4 MB 缓存）、以及贴边动画每帧 `SetWindowRgn` 的假设（`clip` 只在跨显示器泄漏时才为真，单显示器下 `region_set` 实测 0 行）。保留 `opt-level="z"` 的理由写在 `Cargo.toml` 注释里。
 - 名称编辑与应用选择是主窗口／编辑器窗口内的覆盖层，不再有独立顶层窗口；设置窗口按需创建。启动复用已校验的数据快照。主网格按行虚拟化，图标在后台按可见范围解码并统一缩到 128 像素（新存入的图标同样以 128 像素保存，旧库里的 256 像素图标读取时降采样），解码缓存上限 24 MiB，完全隐藏时收缩到只剩可见范围。
@@ -117,7 +118,7 @@ cargo run --release --locked
 cargo test --release --locked -- --ignored --nocapture
 ```
 
-`src/app_regression.rs` 跑真实事件循环：弹主窗口和编辑器窗口并聚焦、放托盘图标、注册 Ctrl+Alt+Shift+F10 与 F9（你自己的实例在场时它的注册会失败，这是预期的）。它不联网、不启动目标、不写剪贴板、不建快捷方式。这个文件只允许**一个** `#[test]`（单实例互斥体和原生事件循环都是进程级单例），新的真实路径检查挂进 `check_picker_after_owner_close` 链尾、排在 `check_window_state` 之前。它以 `#[cfg(test)] mod` 的形式被 `include!` 进 `main.rs`，因此不在 `lib.rs` 的模块表里。链尾当前顺序：`check_picker_after_owner_close → check_collection_tree → check_collection_delete → check_window_state → request_quit`——应用选择器、打包应用图标回填（最多等 4 秒）、分类树与删除确认（含同名分类自动编号、“至少保留一个分组”）都在这条链上走一遍真窗口。
+`src/app_regression.rs` 跑真实事件循环：弹主窗口和编辑器窗口并聚焦、放托盘图标、注册 Ctrl+Alt+Shift+F10 与 F9（你自己的实例在场时它的注册会失败，这是预期的）。它不联网、不启动目标、不写剪贴板、不建快捷方式。这个文件只允许**一个** `#[test]`（单实例互斥体和原生事件循环都是进程级单例），新的真实路径检查挂进 `check_picker_after_owner_close` 链尾、排在 `check_window_state` 之前。它以 `#[cfg(test)] mod` 的形式被 `include!` 进 `main.rs`，因此不在 `lib.rs` 的模块表里。链尾当前顺序：`check_picker_after_owner_close → check_collection_tree → check_collection_delete → check_edge_motion_frame_state → check_window_state → request_quit`——应用选择器、打包应用图标回填（最多等 4 秒）、分类树与删除确认（含同名分类自动编号、“至少保留一个分组”）、贴边收起→展开整段滑动期间窗口框一次都不变（`GWL_STYLE`／`GWL_EXSTYLE`／是否装着区域）以及第二次召唤完全不动框，都在这条链上走一遍真窗口。圆角本身仍然证不了，那要人到桌面前看一眼（取证脚本见下一层）。
 
 ### 第三层：真机指标（脚本从不发输入）
 
@@ -130,6 +131,8 @@ cargo build --release --locked
 ```
 
 `probe.ps1` 的参数只有 `-Seconds`（默认 20）、`-Perf`、`-Seed`、`-DataDir`（默认 `target/probe-data`）、`-Csv`（默认 `target/probe.csv`）、`-Label`、`-Entries`、`-BlobsKb`（后两个透传给夹具，0 表示用默认）；`-Seed`（或数据目录里还没有库）会先跑一次 `probe_seed` 夹具。想按状态单独量 CPU／内存，用 `scripts\perf_sample.ps1`：给 `-Name`（默认 `diascia`）或 `-ProcessId`，加 `-Seconds`（默认 300）、`-IntervalMs`（默认 250）、`-Label`，它只挂到一个已经在跑的进程、不启动也不注入，取的是 `TotalProcessorTime` 的整窗差值——任务管理器会把空闲的启动器抹成 0%。
+
+圆角和阴影是**合成器**的效果，`PrintWindow` 与 `GetDC(hwnd)` 取到的客户区根本没有“角”，所以只能到桌面上读：`.\scripts\corner_watch.ps1` 按标题加矩形面积认出主窗口，以约 5 毫秒一拍读回四个角外侧的 28×28 像素，沿对角线数“有几个像素不是窗口自己的内容”——圆角约给出 `0.29 × 半径`（200% DPI 下 8 逻辑像素半径＝16 物理＝读数 5 上下），被抹平成方形时读数 0。每次读数变化存一张四角拼图，CSV 的 `app_elapsed_ms` 与 `probe.ps1` 的 `elapsed_ms` 对齐。它只读屏幕、不发任何输入，收起／展开／热键召唤由人来做。判读：读数在 `moving=0` 那一拍翻转 → 收束时有人动了窗口框；在 `moving=1` 期间翻转 → 每帧移动本身；只有露边贴在屏幕外沿时才不同 → 系统按边缘改框，不归项目代码管。参数：`-Title`（默认 `Diascia`）、`-Name`／`-ProcessId`、`-Seconds`（默认 12）、`-IntervalMs`（默认 5）、`-Patch`（默认 28）、`-Tolerance`（默认 14）、`-Csv`／`-Out`（默认 `target/corner-watch*`）。
 
 呼出延迟分两条报：`hotkey→show_requested` 是应用侧响应（召唤一个已映射窗口时也能采到），`hotkey→首帧` 只认 1 秒内落下的 `frame_ms` 样本。后者很重要：召唤一个无需重绘的窗口时，下一条 `frame_ms` 可能属于几秒之后的一次滚动，把它当延迟读会量出 2.5–10.5 秒的假数字；脚本现在单独计数并提示“召唤后滚一下才采得到”。
 

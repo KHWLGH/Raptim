@@ -455,9 +455,137 @@ fn check_picker_after_owner_close(app: &Rc<RefCell<App>>) {
         later.borrow_mut().drop_editor();
         check_collection_tree(&later);
         check_collection_delete(&later);
+        check_edge_motion_frame_state(&later);
         check_window_state(&later);
         later.borrow_mut().request_quit();
     });
+}
+
+/// The docked slide may only move the window. Every style, region or z-band write hands DWM a
+/// reason to rebuild the non-client area, and that rebuild is the corner and shadow pop a human
+/// sees around a reveal - which is why it has to be watched on a real HWND.
+fn check_edge_motion_frame_state(app: &Rc<RefCell<App>>) {
+    let mut s = app.borrow_mut();
+    assert_eq!(
+        s.policy.protection(),
+        Protection::Normal,
+        "贴边动画不能在保护状态里跑"
+    );
+    let (rect, work) = platform::geometry(s.main.window()).expect("native geometry");
+    let mut docked = rect;
+    docked.x = work.x;
+    docked.y = work.y;
+    s.settings.edge_hide = true;
+    s.settings.edge_strip_visible = true;
+    s.main.set_batch_mode(false);
+    s.protected_edge_waiting = false;
+    s.dock = Some((diascia::docking::Edge::Left, docked));
+    s.dock_work = Some(work);
+    s.show_main(ShowSource::Restore);
+    assert!(
+        s.main.window().is_visible(),
+        "召唤必须先把窗口摆回桌面，否则下面的滑动只是空跑"
+    );
+    s.main
+        .window()
+        .set_position(slint::PhysicalPosition::new(docked.x, docked.y));
+    let settled = platform::frame_state(s.main.window()).expect("live native window");
+    assert!(
+        !settled.region,
+        "单显示器上形状必须交回合成器，否则这里比的是自己的区域"
+    );
+
+    let mut keys = vec![];
+    slide_to(&mut s, true, &mut keys);
+    let collapsed = platform::geometry(s.main.window())
+        .expect("收起后仍要能取到窗口矩形")
+        .0;
+    assert_ne!(
+        (collapsed.x, collapsed.y),
+        (docked.x, docked.y),
+        "收起必须真的移动窗口：露边可以是 1 像素，但不能是一条空跑的断言"
+    );
+    slide_to(&mut s, false, &mut keys);
+    let expanded = platform::geometry(s.main.window())
+        .expect("展开后仍要能取到窗口矩形")
+        .0;
+    assert_eq!(
+        (expanded.x, expanded.y),
+        (docked.x, docked.y),
+        "展开要回到贴边矩形，否则上面的滑动没走完"
+    );
+    assert_eq!(keys.len(), 1, "整段滑动期间窗口框被重建过：{keys:?}");
+    assert_eq!(
+        platform::frame_state(s.main.window()).map(|frame| frame.topmost),
+        Some(settled.topmost),
+        "展开收束后回到用户自己的层级"
+    );
+
+    // A repeat summon used to rewrite the ex-style, re-apply the button mask through winit, clear
+    // a region that was never installed and re-frame the window for the taskbar. Each one of those
+    // is now answered by a property on the HWND instead. The resulting state cannot prove it -
+    // writing a value the window already has is invisible to `frame_state` and still redraws the
+    // frame - so the writes themselves are what gets asserted.
+    let liveness = platform::frame_write_count();
+    platform::topmost(s.main.window(), !settled.topmost);
+    platform::topmost(s.main.window(), settled.topmost);
+    assert!(
+        platform::frame_write_count() > liveness,
+        "计数器必须数到重建窗口框的调用，否则下面那条断言是空的"
+    );
+    let quiet = platform::frame_write_count();
+    platform::launcher_window(s.main.window());
+    assert_eq!(
+        platform::frame_write_count(),
+        quiet,
+        "launcher_window 不该再动窗口框"
+    );
+    platform::decorate(s.main.window());
+    assert_eq!(
+        platform::frame_write_count(),
+        quiet,
+        "decorate 不该在状态没变时重下同一批写入"
+    );
+    platform::refresh_geometry(s.main.window());
+    s.user_summon_edge();
+    assert_eq!(
+        platform::frame_write_count(),
+        quiet,
+        "第二次召唤必须一笔窗口框写入都不发"
+    );
+    assert_eq!(
+        platform::frame_state(s.main.window()),
+        Some(settled),
+        "第二次召唤必须完全不动窗口框"
+    );
+}
+
+/// One docked slide, sampled after every tick. `edge_since` is refreshed each tick so the dwell
+/// rules cannot reverse the direction mid-slide, which would make the result depend on wherever
+/// the pointer happens to be while the machine pass runs.
+fn slide_to(s: &mut App, hidden: bool, keys: &mut Vec<(isize, isize, bool)>) {
+    s.animate_edge(hidden);
+    let deadline = Instant::now() + Duration::from_millis(900);
+    while s.edge_motion.is_some() && Instant::now() < deadline {
+        s.edge_since = Instant::now();
+        s.tick_window(true);
+        note_frame(s.main.window(), keys);
+        std::thread::sleep(Duration::from_millis(6));
+    }
+    assert_eq!(s.edge_hidden, hidden, "动画必须收束到请求的方向");
+    assert!(
+        s.edge_motion.is_none(),
+        "动画必须在超时前收束，否则位置断言是空的"
+    );
+}
+
+fn note_frame(window: &slint::Window, keys: &mut Vec<(isize, isize, bool)>) {
+    if let Some(state) = platform::frame_state(window) {
+        let key = (state.style, state.ex_style, state.region);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
 }
 
 /// The editor's category chooser is the same tree the organizer uses, so it is exercised through

@@ -6,7 +6,11 @@ use crate::{
 use std::{
     hash::{Hash, Hasher},
     path::Path,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
 };
 use windows::{
@@ -1001,6 +1005,31 @@ fn native_handle(window: &slint::Window) -> Option<HWND> {
 pub fn native_ready(window: &slint::Window) -> bool {
     native_handle(window).is_some_and(|hwnd| unsafe { IsWindow(Some(hwnd)).as_bool() })
 }
+/// Frame bookkeeping, kept in window properties. A property dies with its HWND, so a recreated
+/// window invalidates every "already applied" answer by itself and no global cache can go stale.
+/// `w!` needs a literal, so these take the name at call time.
+unsafe fn prop_value(hwnd: HWND, name: &str) -> usize {
+    let name = wide(name);
+    unsafe { GetPropW(hwnd, PCWSTR(name.as_ptr())).0 as usize }
+}
+unsafe fn set_prop_value(hwnd: HWND, name: &str, value: usize) {
+    let name = wide(name);
+    unsafe {
+        let _ = SetPropW(hwnd, PCWSTR(name.as_ptr()), Some(HANDLE(value as _)));
+    }
+}
+/// Take the window shape back from our own region and hand it to the compositor. Only ever
+/// touches a window we actually gave a region to: `SetWindowRgn` rebuilds the frame, so calling it
+/// on a window that already has none is what makes corners and shadows jump.
+unsafe fn clear_region(hwnd: HWND) {
+    unsafe {
+        if prop_value(hwnd, "Diascia.Region") != 0 {
+            set_prop_value(hwnd, "Diascia.Region", 0);
+            note_frame_write();
+            let _ = SetWindowRgn(hwnd, None, true);
+        }
+    }
+}
 
 /// Outer size in physical pixels, or None once the native handle is gone. `winit::Window::
 /// outer_size` panics in that case, and a dead handle is reachable here: Windows destroys an
@@ -1141,77 +1170,120 @@ unsafe extern "system" fn frame_proc(
         }
     }
 }
+/// Frame decoration. Called from every show, reveal, un-dock and resize path, so nothing here may
+/// assume it is the first call: each write below rebuilds DWM's frame, and a rebuild while the
+/// window is sliding is the corner-and-shadow pop this used to show. Every one of them is now
+/// guarded by the state already applied to this HWND.
 pub fn decorate(window: &slint::Window) {
     let Some(hwnd) = native_handle(window) else {
         return;
     };
+    use slint::winit_030::{
+        WinitWindowAccessor,
+        winit::window::{Theme, WindowButtons},
+    };
     unsafe {
+        // Read before the remove: a work-area clip leaves DONOTROUND and a region behind, and
+        // 2 is the only marker that says so.
+        let undoing_clip = prop_value(hwnd, "Diascia.EdgeClip") == 2;
         let _ = RemovePropW(hwnd, w!("Diascia.EdgeClip"));
         enable_custom_frame(hwnd);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-            (ex & !(WS_EX_APPWINDOW.0 as isize)) | WS_EX_TOOLWINDOW.0 as isize,
-        );
-        use slint::winit_030::{
-            WinitWindowAccessor,
-            winit::window::{Theme, WindowButtons},
-        };
-        window.with_winit_window(|w| {
-            // 窗口隐藏到托盘/贴边即为关闭语义；最小化会让跳过任务栏的窗口无法找回。
-            w.set_enabled_buttons(WindowButtons::CLOSE);
-        });
-        let dark = windows::core::BOOL::from(
-            window
-                .with_winit_window(|w| w.theme() == Some(Theme::Dark))
-                .unwrap_or(false),
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            &dark as *const _ as _,
-            4,
-        );
-        let corner = DWMWCP_ROUND;
-        let rounded = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &corner as *const _ as _,
-            4,
-        )
-        .is_ok();
-        let policy = DWMNCRP_ENABLED;
-        let _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as _, 4);
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS::default());
-        refresh_border(window);
-        if rounded {
-            // Let the compositor anti-alias corners. An HRGN here disables DWM
-            // rounding and creates visibly jagged edges, especially at high DPI.
-            let _ = SetWindowRgn(hwnd, None, false);
-        } else {
-            let size = window.size();
-            let diameter = (16. * window.scale_factor()).round() as i32;
-            let region = CreateRoundRectRgn(
-                0,
-                0,
-                size.width as i32,
-                size.height as i32,
-                diameter,
-                diameter,
+        let tool = (ex & !(WS_EX_APPWINDOW.0 as isize)) | WS_EX_TOOLWINDOW.0 as isize;
+        if ex != tool {
+            note_frame_write();
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool);
+        }
+        if prop_value(hwnd, "Diascia.Buttons") == 0 {
+            set_prop_value(hwnd, "Diascia.Buttons", 1);
+            note_frame_write();
+            window.with_winit_window(|w| {
+                // 窗口隐藏到托盘/贴边即为关闭语义；最小化会让跳过任务栏的窗口无法找回。
+                // winit writes GWL_STYLE and re-frames the window to apply this.
+                w.set_enabled_buttons(WindowButtons::CLOSE);
+            });
+        }
+        let dark = window
+            .with_winit_window(|w| w.theme() == Some(Theme::Dark))
+            .unwrap_or(false);
+        if prop_value(hwnd, "Diascia.Dark") != dark as usize + 1 {
+            set_prop_value(hwnd, "Diascia.Dark", dark as usize + 1);
+            note_frame_write();
+            let immersive = windows::core::BOOL::from(dark);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &immersive as *const _ as _,
+                4,
             );
-            if SetWindowRgn(hwnd, Some(region), false) == 0 {
-                let _ = DeleteObject(region.into());
+        }
+        // 1: the compositor rounds this window. 2: it cannot, so our own region does.
+        let frame = prop_value(hwnd, "Diascia.Frame");
+        if frame == 0 || undoing_clip || frame == 2 {
+            note_frame_write();
+            let corner = DWMWCP_ROUND;
+            let rounded = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner as *const _ as _,
+                4,
+            )
+            .is_ok();
+            let policy = DWMNCRP_ENABLED;
+            let _ =
+                DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as _, 4);
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS::default());
+            refresh_border(window);
+            if rounded {
+                // Let the compositor anti-alias corners. An HRGN here disables DWM
+                // rounding and creates visibly jagged edges, especially at high DPI.
+                clear_region(hwnd);
+                set_prop_value(hwnd, "Diascia.Frame", 1);
+            } else {
+                let size = window.size();
+                let diameter = (16. * window.scale_factor()).round() as i32;
+                let region = CreateRoundRectRgn(
+                    0,
+                    0,
+                    size.width as i32,
+                    size.height as i32,
+                    diameter,
+                    diameter,
+                );
+                set_prop_value(hwnd, "Diascia.Region", 1);
+                if SetWindowRgn(hwnd, Some(region), true) == 0 {
+                    let _ = DeleteObject(region.into());
+                }
+                set_prop_value(hwnd, "Diascia.Frame", 2);
             }
         }
     }
 }
-pub fn refresh_geometry(window: &slint::Window) {
-    if native_handle(window)
-        .is_some_and(|hwnd| unsafe { GetPropW(hwnd, w!("Diascia.EdgeClip")).is_invalid() })
-    {
-        decorate(window);
+/// Skip the taskbar for a Slint window. Checked against the live style bits rather than remembered:
+/// winit rebuilds both style words from its own idea of the window every time it applies a style,
+/// so a "this was already done" note could go stale and leave the launcher in the taskbar.
+pub fn skip_taskbar(window: &slint::Window) {
+    use slint::winit_030::WinitWindowAccessor;
+    use slint::winit_030::winit::platform::windows::WindowExtWindows;
+    let Some(hwnd) = native_handle(window) else {
+        return;
+    };
+    let hidden = unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        ex & WS_EX_TOOLWINDOW.0 as isize != 0 && ex & WS_EX_APPWINDOW.0 as isize == 0
+    };
+    if hidden {
+        return;
     }
+    note_frame_write();
+    window.with_winit_window(|w| w.set_skip_taskbar(true));
+}
+/// Re-apply the decoration after a resize, a scale-factor change or a theme change. This used to
+/// skip while a docked slide held its clip outline; `decorate` now answers "already applied" itself
+/// for every write, so the one case that genuinely must not be skipped - the non-client theme
+/// changing mid-slide - reaches it too.
+pub fn refresh_geometry(window: &slint::Window) {
+    decorate(window);
 }
 unsafe fn enable_custom_frame(hwnd: HWND) {
     unsafe {
@@ -1222,6 +1294,7 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
             style &= !(WS_MAXIMIZEBOX.0 as isize);
         }
         if old != style {
+            note_frame_write();
             SetWindowLongPtrW(hwnd, GWL_STYLE, style);
             let _ = SetWindowPos(
                 hwnd,
@@ -1238,6 +1311,7 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
 pub fn refresh_border(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
+            note_frame_write();
             // DWMWA_COLOR_NONE: no accent tint or active/inactive color changes.
             let color = COLORREF(0xfffffffe);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &color as *const _ as _, 4);
@@ -1382,11 +1456,15 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
     unsafe {
         let first = GetPropW(hwnd, w!("Diascia.EdgeClip")).0 as usize != 2;
         let _ = SetPropW(hwnd, w!("Diascia.EdgeClip"), Some(HANDLE(2usize as _)));
+        // This path installs a region outside `decorate`, and `clear_region` only hands the shape
+        // back to the compositor if it knows one is installed.
+        set_prop_value(hwnd, "Diascia.Region", 1);
         let mut r = RECT::default();
         if GetWindowRect(hwnd, &mut r).is_err() {
             return;
         }
         if first {
+            note_frame_write();
             let corner = DWMWCP_DONOTROUND;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -1421,6 +1499,7 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
             let _ = CombineRgn(Some(region), Some(region), Some(rounded), RGN_AND);
             let _ = DeleteObject(rounded.into());
         }
+        note_frame_write();
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(region.into());
         }
@@ -1486,18 +1565,33 @@ pub fn reveal_file(path: &Path) -> Result<(), String> {
     }
 }
 pub fn topmost(window: &slint::Window, enabled: bool) {
-    use slint::winit_030::{WinitWindowAccessor, winit::window::WindowLevel};
-    window.with_winit_window(|w| {
-        w.set_window_level(if enabled {
-            WindowLevel::AlwaysOnTop
-        } else {
-            WindowLevel::Normal
-        })
-    });
-    if let Some(hwnd) = native_handle(window) {
-        unsafe {
-            enable_custom_frame(hwnd);
+    let Some(hwnd) = native_handle(window) else {
+        return;
+    };
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (ex & WS_EX_TOPMOST.0 as isize != 0) == enabled {
+            // Already in that band - the common answer on a summon path. winit's `set_window_level`
+            // reaches the same place by rewriting both style words from its own state, which drops
+            // `WS_EX_TOOLWINDOW` and gives DWM a reason to redraw the frame under a window that is
+            // mid-slide, so the band is set directly here.
+            return;
         }
+        note_frame_write();
+        let _ = SetWindowPos(
+            hwnd,
+            Some(if enabled {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            }),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        enable_custom_frame(hwnd);
     }
 }
 pub fn launcher_window(window: &slint::Window) {
@@ -1506,9 +1600,7 @@ pub fn launcher_window(window: &slint::Window) {
             let _ = SetPropW(hwnd, w!("Diascia.Launcher"), Some(HANDLE(1usize as _)));
         }
     }
-    use slint::winit_030::WinitWindowAccessor;
-    use slint::winit_030::winit::platform::windows::WindowExtWindows;
-    window.with_winit_window(|w| w.set_skip_taskbar(true));
+    skip_taskbar(window);
     decorate(window);
 }
 /// Idempotent: safe on the first native event, and after a recreated HWND.
@@ -1546,6 +1638,51 @@ impl LauncherProbe {
         }
     }
 }
+/// Counts the writes that make DWM rebuild a window's frame. The resulting *state* is not enough
+/// evidence: asking for a value the window already has is invisible to `frame_state` and still
+/// redraws the non-client area, which is exactly the bug this guards. The machine pass asserts a
+/// repeat summon leaves the counter where it found it.
+static FRAME_WRITES: AtomicU64 = AtomicU64::new(0);
+
+pub fn frame_write_count() -> u64 {
+    FRAME_WRITES.load(Ordering::Relaxed)
+}
+
+fn note_frame_write() {
+    FRAME_WRITES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// What the compositor currently reads off this window: the two style words, whether this process
+/// owns a window region, and the z-band. `ex_style` deliberately excludes `WS_EX_TOPMOST` because
+/// `topmost` reports that on its own, and a docked slide raises and re-lowers the window on
+/// purpose. The machine pass asserts the rest never changes while the window is only moving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameState {
+    pub style: isize,
+    pub ex_style: isize,
+    pub region: bool,
+    pub topmost: bool,
+}
+
+pub fn frame_state(window: &slint::Window) -> Option<FrameState> {
+    let hwnd = native_handle(window)?;
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let installed = {
+            let code = GetWindowRgn(hwnd, probe);
+            code == SIMPLEREGION || code == COMPLEXREGION
+        };
+        let _ = DeleteObject(probe.into());
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        Some(FrameState {
+            style: GetWindowLongPtrW(hwnd, GWL_STYLE),
+            ex_style: ex & !(WS_EX_TOPMOST.0 as isize),
+            region: installed,
+            topmost: ex & WS_EX_TOPMOST.0 as isize != 0,
+        })
+    }
+}
+
 pub fn geometry(
     window: &slint::Window,
 ) -> Option<(crate::windowing::Rect, crate::windowing::Rect)> {

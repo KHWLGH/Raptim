@@ -2024,7 +2024,6 @@ fn install_keys(
         }
         match event {
             WindowEvent::ModifiersChanged(modifiers) => control = modifiers.state().control_key(),
-            WindowEvent::Focused(_) => platform::refresh_border(window),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::ThemeChanged(_) => {
                 platform::refresh_geometry(window);
                 // The size is still settling here, so the full repaint waits for this frame.
