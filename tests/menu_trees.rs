@@ -175,9 +175,9 @@ fn no_row_ships_the_placeholder_glyph() {
         });
     }
     assert_ne!(
-        labelled(&menus::tree(0, &ctx), "备份…").icon,
+        labelled(&menus::tree(0, &ctx), "恢复…").icon,
         labelled(&menus::tree(1, &ctx), "删除…").icon,
-        "备份和删除不能是同一个字形"
+        "恢复和删除不能是同一个字形"
     );
     for kind in [1, 2, 3] {
         assert_eq!(
@@ -324,13 +324,13 @@ fn view_rows_reflect_the_current_view() {
 #[test]
 fn unrelated_rows_of_one_menu_never_share_a_glyph() {
     // Related operations may share a family on purpose (复制路径 and 复制到 are both copies), but two
-    // unrelated rows in one popup wearing the same glyph read as one operation. 数据 once wore
-    // 备份's archive box, and 多选整理 wore 列表查看's list.
+    // unrelated rows in one popup wearing the same glyph read as one operation. 数据 once wore the
+    // archive box belonging to its 备份… row (since dropped), and 多选整理 wore 列表查看's list.
     let ctx = fixture();
     let more = menus::tree(0, &ctx);
     let item = menus::tree(1, &ctx);
     for (menu, left, right) in [
-        (&more, "数据", "备份…"),
+        (&more, "数据", "恢复…"),
         (&more, "多选整理", "列表查看"),
         (&more, "路径转换", "图标大小"),
         (&item, "移动到", "复制到"),

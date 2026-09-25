@@ -11,7 +11,7 @@ build = "build.rs"
 slint = { version = "=1.18.0", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2", "accessibility", "unstable-winit-030"] }
 # Small, version-pinned repaint bridge; see src/windowing.rs.
 i-slint-core = "=1.18.0"
-rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

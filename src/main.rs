@@ -16,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 slint::include_modules!();
 include!("ui_commands.rs");
@@ -1563,10 +1563,6 @@ impl App {
                     .add_filter("Diascia 导出", &["json"])
                     .set_file_name("diascia-export.json")
                     .save_file(),
-                3 => dialog
-                    .add_filter("SQLite 备份", &["db"])
-                    .set_file_name("diascia-backup.db")
-                    .save_file(),
                 7 if folder => dialog.pick_folder(),
                 7 => dialog.pick_file(),
                 _ => dialog.add_filter("Diascia 导出", &["json"]).pick_file(),
@@ -1635,10 +1631,6 @@ impl App {
                 file.write_all(&bytes)?;
                 file.sync_all()?;
                 self.settings_ui.set_status("已导出".into());
-            }
-            3 => {
-                self.store.backup(&path)?;
-                self.settings_ui.set_status("已备份".into());
             }
             7 => self.apply_relocate(value)?,
             _ => {
@@ -1712,12 +1704,6 @@ impl App {
         let Some(data) = self.pending_import.as_ref() else {
             return Ok(());
         };
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let backup = self.data_dir.join(format!("before-restore-{stamp}.db"));
-        self.store.backup(&backup)?;
         let old_hotkey = self.settings.hotkey.clone();
         self.hotkey
             .configure(&data.settings.hotkey, self.policy.hotkey_enabled())
@@ -1737,8 +1723,7 @@ impl App {
         self.refresh()?;
         self.pending_import = None;
         self.settings_ui.set_restore_confirm(false);
-        self.settings_ui
-            .set_status(format!("已恢复。原数据备份：{}", backup.display()).into());
+        self.settings_ui.set_status("已恢复".into());
         self.evaluate();
         Ok(())
     }
@@ -3202,9 +3187,6 @@ fn create_settings(
     });
     bind!(settings_ui, on_export_data, |s| {
         s.dialog(2);
-    });
-    bind!(settings_ui, on_backup, |s| {
-        s.dialog(3);
     });
     bind!(settings_ui, on_import_data, |s| {
         s.dialog(4);

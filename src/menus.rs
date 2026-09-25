@@ -159,7 +159,6 @@ pub fn tree(kind: i32, ctx: &MenuContext) -> Vec<MenuItem> {
                     vec![
                         MenuItem::action("导出…", 1).icon('\u{e74e}'),
                         MenuItem::action("恢复…", 2).icon('\u{e8e5}'),
-                        MenuItem::action("备份…", 3).icon('\u{e7b8}'),
                         MenuItem::separator(),
                         MenuItem::action("打开数据目录", 4).icon('\u{e8b7}'),
                     ],

@@ -554,16 +554,6 @@ impl Store {
             settings: self.settings()?,
         })
     }
-    /// SQLite's backup API includes committed WAL data; copying just the .db would not.
-    pub fn backup(&self, destination: &Path) -> Result<()> {
-        if destination.exists() {
-            return Err(Error::Invalid("备份文件已存在，请换一个名称".into()));
-        }
-        let mut target = Connection::open(destination)?;
-        let backup = rusqlite::backup::Backup::new(&self.conn, &mut target)?;
-        backup.run_to_completion(64, Duration::from_millis(5), None)?;
-        Ok(())
-    }
     pub fn restore(&mut self, data: &Export) -> Result<()> {
         validate_export(data)?;
         // Resolved while `&self` is still free: the transaction holds it mutably afterwards.
@@ -1502,19 +1492,6 @@ mod tests {
         store.delete_entry(original.entries[0].id).unwrap();
         store.restore(&original).unwrap();
         assert_eq!(store.entries().unwrap(), original.entries);
-    }
-    #[test]
-    fn backup_includes_wal_and_never_overwrites() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("source.db")).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let backup = dir.path().join("backup.db");
-        store.backup(&backup).unwrap();
-        assert_eq!(
-            Store::open(&backup).unwrap().entries().unwrap(),
-            store.entries().unwrap()
-        );
-        assert!(store.backup(&backup).is_err());
     }
     #[test]
     fn other_schema_versions_are_rejected_without_downgrading() {

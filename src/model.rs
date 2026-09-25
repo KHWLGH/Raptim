@@ -255,8 +255,8 @@ pub struct Collection {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
-    /// Embedded PNG bytes; travels with database backups and JSON exports. The database keeps this
-    /// in its own BLOB column, so only exports and the shell IPC pay the text encoding.
+    /// Embedded PNG bytes; travels with JSON exports. The database keeps this in its own BLOB
+    /// column, so only exports and the shell IPC pay the text encoding.
     #[serde(default, with = "base64_bytes")]
     pub icon: Vec<u8>,
     pub id: i64,

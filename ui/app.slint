@@ -890,7 +890,7 @@ export component SettingsWindow inherits AppWindow {
     in property <string> data-path;
     in-out property <string> status;
     in-out property <bool> restore-confirm;
-    callback open-rust; callback change(int); callback browse-game; callback add-protected-app(string); callback remove-protected-app(int); callback export-data; callback import-data; callback backup;
+    callback open-rust; callback change(int); callback browse-game; callback add-protected-app(string); callback remove-protected-app(int); callback export-data; callback import-data;
     callback confirm-restore; callback cancel;
     VerticalLayout {
         padding: 1px; spacing: 0px;
@@ -974,10 +974,9 @@ if root.page == 0: SettingRow { label: "打开项目后隐藏"; Switch { height:
                                 HorizontalLayout { spacing: 8px; alignment: start;
                                     Button { text: "导出"; clicked => { root.export-data(); } }
                                     Button { text: "恢复"; clicked => { root.import-data(); } }
-                                    Button { text: "备份"; clicked => { root.backup(); } }
                                 }
                                 if root.restore-confirm: VerticalLayout { spacing: 12px;
-                                    Text { text: "替换当前数据？将先自动备份。"; wrap: word-wrap; color: Palette.foreground; }
+                                    Text { text: "替换当前数据？请先自行备份数据目录。"; wrap: word-wrap; color: Palette.foreground; }
                                     HorizontalLayout { Button { text: "恢复"; clicked => { root.confirm-restore(); } } Button { text: "取消"; clicked => { root.restore-confirm = false; } } }
                                 }
                             }

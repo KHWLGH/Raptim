@@ -351,7 +351,6 @@ fn dispatch_app(ui: &MainWindow, command: u32) {
     match command {
         1 => ui.invoke_global_action(2),
         2 => ui.invoke_global_action(4),
-        3 => ui.invoke_global_action(3),
         4 => ui.invoke_global_action(5),
         5 => ui.invoke_global_action(6),
         6 | 7 => ui.invoke_begin_conversion(command == 6),
@@ -588,7 +587,7 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
     });
     bind!(on_global_action, |s, action| {
         match action {
-            2..=4 => {
+            2 | 4 => {
                 s.show_settings();
                 if s.settings_ui.get().is_none() {
                     return;
