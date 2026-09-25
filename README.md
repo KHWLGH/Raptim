@@ -137,7 +137,7 @@ cargo build --release --locked
 
 第一版不是这么判的，两个坑值得记下来：拿角上像素和同一块内部的参考色比，则“桌面颜色恰好等于窗口表面色”会被读成方角，鼠标离开时的一次悬停重绘就足以伪造一次跳变；而收纳态只有 1 个物理像素在屏内，`CopyFromScreen` 对超出屏幕的部分返回全黑而**不报错**，看起来正是“四角全方”。现在放不下、或跑出虚拟屏幕的块一律记 `-1` 且不参与前后比对。判读：`moving=0` 的 mask 翻转＝有人在窗口静止时重建了窗口框；`moving=1` 期间的翻转＝每帧移动本身；只有 band 跳＝阴影变化，用同一行的 `active`／`cursor_inside` 分辨是激活切换还是悬停重绘。
 
-两边共用一把毫秒刻度：`DIASCIA_METRICS` 会记 `frame_write` 事件（值＝调用编号，含义列在 `src/platform/windows_impl.rs` 的 `FRAME_WRITES` 注释里），`probe.ps1` 收尾按编号打时间戳，`corner_watch.ps1` 的 `app_elapsed_ms` 由进程启动时间换算——肉眼看到的那一下因此能钉到具体某次调用，而不是靠猜。参数：`-Title`（默认 `Diascia`）、`-Name`／`-ProcessId`、`-Seconds`（默认 15）、`-IntervalMs`（默认 5）、`-Crop`／`-Outside`／`-Band`／`-Depth`（取样几何）、`-BandJump`（默认 14）、`-MinMargin`（默认 60）、`-Csv`／`-Out`（默认 `target/corner-watch*`）。
+两边共用一把毫秒刻度：`DIASCIA_METRICS` 会记 `frame_write` 事件（值＝调用编号，含义列在 `src/platform/windows_impl.rs` 的 `FRAME_WRITES` 注释里），`probe.ps1` 收尾按编号打时间戳，`corner_watch.ps1` 的 `app_elapsed_ms` 由进程启动时间换算——肉眼看到的那一下因此能钉到具体某次调用，而不是靠猜。参数：`-Title`（默认 `Diascia`）、`-Name`／`-ProcessId`、`-Seconds`（默认 15）、`-IntervalMs`（默认 5）、`-Crop`／`-Outside`／`-Band`／`-Depth`（取样几何）、`-BandJump`（默认 14）、`-Spread`（默认 90，外侧带与内侧内容差不到这个数就不给结论）、`-MinMargin`（默认 60）、`-Csv`／`-Out`（默认 `target/corner-watch*`）。
 
 呼出延迟分两条报：`hotkey→show_requested` 是应用侧响应（召唤一个已映射窗口时也能采到），`hotkey→首帧` 只认 1 秒内落下的 `frame_ms` 样本。后者很重要：召唤一个无需重绘的窗口时，下一条 `frame_ms` 可能属于几秒之后的一次滚动，把它当延迟读会量出 2.5–10.5 秒的假数字；脚本现在单独计数并提示“召唤后滚一下才采得到”。
 
