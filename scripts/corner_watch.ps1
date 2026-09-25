@@ -21,10 +21,12 @@
     outside band doubles as the shadow measurement, sampled every tick: it jumping while the window is
     not moving is a shadow change with the mask untouched.
 
-    A crop that does not fit on the desktop is reported as -1 and never compared. This matters because
-    a collapsed launcher keeps one physical pixel on screen, so 27 of its 28 corner columns are off the
-    display - and CopyFromScreen answers with black instead of failing, which the first version read as
-    "square corners".
+    A crop is only read when it fits entirely inside the monitor the window is on, and a corner is
+    only judged when the two references differ from each other by at least -Spread. Both guards exist
+    because of what the first runs on a multi-monitor desktop showed: a patch reaching onto the
+    neighbouring display, or reaching off the desktop at all, comes back as that other content or as
+    plain black - and both look exactly like a squared corner. IntersectsWith is not enough either;
+    one of 72 columns on screen is the collapsed state and says nothing.
 
     WHAT TO DO: start it, then do one collapse, one reveal, and one hotkey summon. Read the event
     lines: mask flips while moving=1 point at the per-frame window moves; mask flips while moving=0
@@ -54,6 +56,7 @@ param(
     [int]$Band = 8,
     [int]$Depth = 26,
     [int]$BandJump = 14,
+    [int]$Spread = 90,
     [int]$MinMargin = 60,
     [string]$Csv = 'target/corner-watch.csv',
     [string]$Out = 'target/corner-watch'
@@ -81,8 +84,17 @@ namespace DiasciaProbe {
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+        [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+        [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO info);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern int GetWindowTextW(IntPtr hWnd, StringBuilder text, int maxCount);
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO {
+        public uint cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
     }
 }
 '@)
@@ -162,12 +174,17 @@ function Get-Average($data, [int]$x, [int]$y, [int]$stepX, [int]$stepY, [int]$fr
     return [int]($r / $count) -bor ([int]($g / $count) -shl 8) -bor ([int]($b / $count) -shl 16)
 }
 
-function Measure-Corner($data, [int]$x, [int]$y, [int]$signX, [int]$signY, [int]$band, [int]$depth) {
-    # rounded(1)/square(0), the decision margin, and the shadow band luminance. Outside the window rect
-    # is $sign; content is the opposite direction.
+function Measure-Corner($data, [int]$x, [int]$y, [int]$signX, [int]$signY, [int]$band, [int]$depth, [int]$spread) {
+    # rounded(1)/square(0)/no-opinion(-1), the decision margin, and the shadow band luminance. Outside
+    # the window rect is $sign; content is the opposite direction.
     $extreme = Read-Pixel $data $x $y
     $outside = Get-Average $data $x $y $signX $signY 2 $band $false
     $inside = Get-Average $data $x $y (-$signX) (-$signY) 20 $depth $false
+    # If the two references are not distinguishable from each other, no comparison of the corner
+    # pixel against them can say anything - report that instead of guessing.
+    if ((Get-Distance $outside $inside) -lt $spread) {
+        return @(-1, -1, (Get-Average $data $x $y $signX $signY 2 $band $true))
+    }
     $toOutside = Get-Distance $extreme $outside
     $toInside = Get-Distance $extreme $inside
     $shadow = Get-Average $data $x $y $signX $signY 2 $band $true
@@ -237,6 +254,20 @@ while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
         $cursor.Y -ge $sample.Top -and $cursor.Y -lt $sample.Bottom) { 1 } else { 0 }
     $active = if ([DiasciaProbe.Native]::GetForegroundWindow() -eq $hwnd) { 1 } else { 0 }
     $shown = [DiasciaProbe.Native]::IsWindowVisible($hwnd)
+    # A crop may only be read from the monitor the window itself is on: a patch reaching onto the
+    # neighbouring display compares the launcher against that display's content, and one reaching off
+    # the desktop at all comes back black - both look exactly like a squared corner. Containment, not
+    # intersection: 1 of 72 columns on screen is the collapsed state and says nothing.
+    $area = $virtual
+    $monitor = New-Object DiasciaProbe.MONITORINFO
+    $monitor.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($monitor)
+    $fromWindow = [DiasciaProbe.Native]::MonitorFromWindow($hwnd, 2)
+    if ($fromWindow -ne [IntPtr]::Zero -and
+        [DiasciaProbe.Native]::GetMonitorInfo($fromWindow, [ref]$monitor)) {
+        $edge = $monitor.rcMonitor
+        $area = New-Object System.Drawing.Rectangle($edge.Left, $edge.Top,
+            ($edge.Right - $edge.Left), ($edge.Bottom - $edge.Top))
+    }
 
     $states = @(0, 0, 0, 0)
     $margins = @(0, 0, 0, 0)
@@ -251,7 +282,7 @@ while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
         $originX = $cornerX - $(if ($signX -lt 0) { $Outside } else { $Crop - $Outside - 1 })
         $originY = $cornerY - $(if ($signY -lt 0) { $Outside } else { $Crop - $Outside - 1 })
         $box = New-Object System.Drawing.Rectangle($originX, $originY, $Crop, $Crop)
-        if ((-not $shown) -or (-not $virtual.IntersectsWith($box))) {
+        if ((-not $shown) -or (-not $area.Contains($box))) {
             # Nothing honest can be said about this corner this tick.
             $unreadable++
             continue
@@ -264,7 +295,7 @@ while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
         $data = $bitmap.LockBits($bounds, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
             [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         try {
-            $measured = Measure-Corner $data ($cornerX - $originX) ($cornerY - $originY) $signX $signY $Band $Depth
+            $measured = Measure-Corner $data ($cornerX - $originX) ($cornerY - $originY) $signX $signY $Band $Depth $Spread
         }
         finally {
             [void]$bitmap.UnlockBits($data)

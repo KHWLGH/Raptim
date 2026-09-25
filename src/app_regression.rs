@@ -496,7 +496,7 @@ fn check_edge_motion_frame_state(app: &Rc<RefCell<App>>) {
     );
 
     let mut keys = vec![];
-    slide_to(&mut s, true, &mut keys);
+    let collapsing = slide_to(&mut s, true, &mut keys);
     let collapsed = platform::geometry(s.main.window())
         .expect("收起后仍要能取到窗口矩形")
         .0;
@@ -505,7 +505,7 @@ fn check_edge_motion_frame_state(app: &Rc<RefCell<App>>) {
         (docked.x, docked.y),
         "收起必须真的移动窗口：露边可以是 1 像素，但不能是一条空跑的断言"
     );
-    slide_to(&mut s, false, &mut keys);
+    let revealing = slide_to(&mut s, false, &mut keys);
     let expanded = platform::geometry(s.main.window())
         .expect("展开后仍要能取到窗口矩形")
         .0;
@@ -514,6 +514,14 @@ fn check_edge_motion_frame_state(app: &Rc<RefCell<App>>) {
         (docked.x, docked.y),
         "展开要回到贴边矩形，否则上面的滑动没走完"
     );
+    // A slide may only rebuild the frame for its two deliberate band flips: raising into the top
+    // band when the motion starts, and handing the level back when a reveal settles. Anything above
+    // that is a call nobody asked for, landing between two painted frames.
+    assert!(
+        collapsing <= 1 && revealing <= 2,
+        "滑动期间出现了计划外的改框写入：收起 {collapsing} 次、展开 {revealing} 次"
+    );
+    println!("slide frame writes: collapse={collapsing} reveal={revealing}");
     assert_eq!(keys.len(), 1, "整段滑动期间窗口框被重建过：{keys:?}");
     assert_eq!(
         platform::frame_state(s.main.window()).map(|frame| frame.topmost),
@@ -560,10 +568,11 @@ fn check_edge_motion_frame_state(app: &Rc<RefCell<App>>) {
     );
 }
 
-/// One docked slide, sampled after every tick. `edge_since` is refreshed each tick so the dwell
-/// rules cannot reverse the direction mid-slide, which would make the result depend on wherever
-/// the pointer happens to be while the machine pass runs.
-fn slide_to(s: &mut App, hidden: bool, keys: &mut Vec<(isize, isize, bool)>) {
+/// One docked slide, sampled after every tick; returns how many frame rebuilds it performed.
+/// `edge_since` is refreshed each tick so the dwell rules cannot reverse the direction mid-slide,
+/// which would make the result depend on wherever the pointer happens to be while it runs.
+fn slide_to(s: &mut App, hidden: bool, keys: &mut Vec<(isize, isize, bool)>) -> u64 {
+    let before = platform::frame_write_count();
     s.animate_edge(hidden);
     let deadline = Instant::now() + Duration::from_millis(900);
     while s.edge_motion.is_some() && Instant::now() < deadline {
@@ -577,6 +586,7 @@ fn slide_to(s: &mut App, hidden: bool, keys: &mut Vec<(isize, isize, bool)>) {
         s.edge_motion.is_none(),
         "动画必须在超时前收束，否则位置断言是空的"
     );
+    platform::frame_write_count() - before
 }
 
 fn note_frame(window: &slint::Window, keys: &mut Vec<(isize, isize, bool)>) {
