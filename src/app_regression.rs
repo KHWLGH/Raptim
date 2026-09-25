@@ -522,6 +522,26 @@ fn check_edge_motion_frame_state(app: &Rc<RefCell<App>>) {
         "滑动期间出现了计划外的改框写入：收起 {collapsing} 次、展开 {revealing} 次"
     );
     println!("slide frame writes: collapse={collapsing} reveal={revealing}");
+    // The same slide with the z-band already where the user wants it: then no band flip is left to
+    // make, which is the strongest statement this counter can give. Warm up one cycle first, because
+    // entering the top band once is legitimate. Reproduced by hand with 「始终置顶」 on: the corner
+    // still moves even here, so what remains is DWM aligning its mask with a window that is moved
+    // every refresh, not a call from this process.
+    s.saved_window.always_on_top = true;
+    slide_to(&mut s, true, &mut keys);
+    slide_to(&mut s, false, &mut keys);
+    let pinned_out = slide_to(&mut s, true, &mut keys);
+    let pinned_back = slide_to(&mut s, false, &mut keys);
+    s.saved_window.always_on_top = false;
+    // Hand the level back the way a settle would, or the window is left in the top band and the
+    // assertion below reads the experiment's own residue.
+    platform::topmost(s.main.window(), s.wants_topmost());
+    assert_eq!(
+        (pinned_out, pinned_back),
+        (0, 0),
+        "层级不变时，滑动不该再动窗口框"
+    );
+    println!("slide frame writes always-on-top: collapse={pinned_out} reveal={pinned_back}");
     assert_eq!(keys.len(), 1, "整段滑动期间窗口框被重建过：{keys:?}");
     assert_eq!(
         platform::frame_state(s.main.window()).map(|frame| frame.topmost),
