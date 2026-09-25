@@ -1025,7 +1025,7 @@ unsafe fn clear_region(hwnd: HWND) {
     unsafe {
         if prop_value(hwnd, "Diascia.Region") != 0 {
             set_prop_value(hwnd, "Diascia.Region", 0);
-            note_frame_write();
+            note_frame_write(1);
             let _ = SetWindowRgn(hwnd, None, true);
         }
     }
@@ -1191,12 +1191,12 @@ pub fn decorate(window: &slint::Window) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let tool = (ex & !(WS_EX_APPWINDOW.0 as isize)) | WS_EX_TOOLWINDOW.0 as isize;
         if ex != tool {
-            note_frame_write();
+            note_frame_write(2);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool);
         }
         if prop_value(hwnd, "Diascia.Buttons") == 0 {
             set_prop_value(hwnd, "Diascia.Buttons", 1);
-            note_frame_write();
+            note_frame_write(3);
             window.with_winit_window(|w| {
                 // 窗口隐藏到托盘/贴边即为关闭语义；最小化会让跳过任务栏的窗口无法找回。
                 // winit writes GWL_STYLE and re-frames the window to apply this.
@@ -1208,7 +1208,7 @@ pub fn decorate(window: &slint::Window) {
             .unwrap_or(false);
         if prop_value(hwnd, "Diascia.Dark") != dark as usize + 1 {
             set_prop_value(hwnd, "Diascia.Dark", dark as usize + 1);
-            note_frame_write();
+            note_frame_write(4);
             let immersive = windows::core::BOOL::from(dark);
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -1220,7 +1220,7 @@ pub fn decorate(window: &slint::Window) {
         // 1: the compositor rounds this window. 2: it cannot, so our own region does.
         let frame = prop_value(hwnd, "Diascia.Frame");
         if frame == 0 || undoing_clip || frame == 2 {
-            note_frame_write();
+            note_frame_write(5);
             let corner = DWMWCP_ROUND;
             let rounded = DwmSetWindowAttribute(
                 hwnd,
@@ -1275,7 +1275,7 @@ pub fn skip_taskbar(window: &slint::Window) {
     if hidden {
         return;
     }
-    note_frame_write();
+    note_frame_write(6);
     window.with_winit_window(|w| w.set_skip_taskbar(true));
 }
 /// Re-apply the decoration after a resize, a scale-factor change or a theme change. This used to
@@ -1294,7 +1294,7 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
             style &= !(WS_MAXIMIZEBOX.0 as isize);
         }
         if old != style {
-            note_frame_write();
+            note_frame_write(7);
             SetWindowLongPtrW(hwnd, GWL_STYLE, style);
             let _ = SetWindowPos(
                 hwnd,
@@ -1311,7 +1311,7 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
 pub fn refresh_border(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
-            note_frame_write();
+            note_frame_write(8);
             // DWMWA_COLOR_NONE: no accent tint or active/inactive color changes.
             let color = COLORREF(0xfffffffe);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &color as *const _ as _, 4);
@@ -1464,7 +1464,7 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
             return;
         }
         if first {
-            note_frame_write();
+            note_frame_write(9);
             let corner = DWMWCP_DONOTROUND;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -1499,7 +1499,7 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
             let _ = CombineRgn(Some(region), Some(region), Some(rounded), RGN_AND);
             let _ = DeleteObject(rounded.into());
         }
-        note_frame_write();
+        note_frame_write(10);
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(region.into());
         }
@@ -1518,10 +1518,12 @@ pub fn set_opacity(window: &slint::Window, opacity: f32) {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         if opacity >= 1.0 {
             if style & WS_EX_LAYERED.0 as isize != 0 {
+                note_frame_write(12);
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_LAYERED.0 as isize));
                 window.request_redraw();
             }
         } else {
+            note_frame_write(12);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
             let _ = SetLayeredWindowAttributes(
                 hwnd,
@@ -1577,7 +1579,7 @@ pub fn topmost(window: &slint::Window, enabled: bool) {
             // mid-slide, so the band is set directly here.
             return;
         }
-        note_frame_write();
+        note_frame_write(11);
         let _ = SetWindowPos(
             hwnd,
             Some(if enabled {
@@ -1642,14 +1644,23 @@ impl LauncherProbe {
 /// evidence: asking for a value the window already has is invisible to `frame_state` and still
 /// redraws the non-client area, which is exactly the bug this guards. The machine pass asserts a
 /// repeat summon leaves the counter where it found it.
+///
+/// Each write also reports its reason code to the metrics CSV (`frame_write`), so a human-run probe
+/// can tie a visible change to a specific call: 1 hand the shape back to the compositor, 2 rewrite
+/// the ex-style, 3 winit's button mask, 4 immersive dark mode, 5 the corner/NC-policy block,
+/// 6 winit's skip-taskbar, 7 the custom-frame style write, 8 the border colour, 9 square corners for
+/// a work-area clip, 10 the clip region itself, 11 the z-band, 12 `WS_EX_LAYERED` for opacity.
 static FRAME_WRITES: AtomicU64 = AtomicU64::new(0);
 
 pub fn frame_write_count() -> u64 {
     FRAME_WRITES.load(Ordering::Relaxed)
 }
 
-fn note_frame_write() {
+fn note_frame_write(reason: u8) {
     FRAME_WRITES.fetch_add(1, Ordering::Relaxed);
+    // The reason travels as the value, so one CSV column says both "a frame was rebuilt" and which
+    // call did it. Codes are listed on FRAME_WRITES.
+    crate::metrics::record("frame_write", reason as f64);
 }
 
 /// What the compositor currently reads off this window: the two style words, whether this process

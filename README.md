@@ -133,7 +133,11 @@ cargo build --release --locked
 
 `probe.ps1` 的参数只有 `-Seconds`（默认 20）、`-Perf`、`-Seed`、`-DataDir`（默认 `target/probe-data`）、`-Csv`（默认 `target/probe.csv`）、`-Label`、`-Entries`、`-BlobsKb`（后两个透传给夹具，0 表示用默认）；`-Seed`（或数据目录里还没有库）会先跑一次 `probe_seed` 夹具。想按状态单独量 CPU／内存，用 `scripts\perf_sample.ps1`：给 `-Name`（默认 `diascia`）或 `-ProcessId`，加 `-Seconds`（默认 300）、`-IntervalMs`（默认 250）、`-Label`，它只挂到一个已经在跑的进程、不启动也不注入，取的是 `TotalProcessorTime` 的整窗差值——任务管理器会把空闲的启动器抹成 0%。
 
-圆角和阴影是**合成器**的效果，`PrintWindow` 与 `GetDC(hwnd)` 取到的客户区根本没有“角”，所以只能到桌面上读：`.\scripts\corner_watch.ps1` 按标题加矩形面积认出主窗口，以约 5 毫秒一拍读回四个角外侧的 28×28 像素，沿对角线数“有几个像素不是窗口自己的内容”——圆角约给出 `0.29 × 半径`（200% DPI 下 8 逻辑像素半径＝16 物理＝读数 5 上下），被抹平成方形时读数 0。每次读数变化存一张四角拼图，CSV 的 `app_elapsed_ms` 与 `probe.ps1` 的 `elapsed_ms` 对齐。它只读屏幕、不发任何输入，收起／展开／热键召唤由人来做。判读：读数在 `moving=0` 那一拍翻转 → 收束时有人动了窗口框；在 `moving=1` 期间翻转 → 每帧移动本身；只有露边贴在屏幕外沿时才不同 → 系统按边缘改框，不归项目代码管。参数：`-Title`（默认 `Diascia`）、`-Name`／`-ProcessId`、`-Seconds`（默认 12）、`-IntervalMs`（默认 5）、`-Patch`（默认 28）、`-Tolerance`（默认 14）、`-Csv`／`-Out`（默认 `target/corner-watch*`）。
+圆角和阴影是**合成器**的效果，`PrintWindow` 与 `GetDC(hwnd)` 取到的客户区根本没有“角”，所以只能到桌面上读。`.\scripts\corner_watch.ps1` 按标题加矩形面积认出主窗口，约 5 ms 一拍取四个角各 72×72 像素，把**窗口矩形最外那颗像素**同时与“矩形外侧一条带”和“矩形内侧深处”比较：像外侧说明遮罩在起作用（圆角），像内侧说明角被抹平了（方角），并记下两个距离之差作为可信度（低于 `-MinMargin`，默认 60，就只报不信）。外侧那条带同时是**阴影读数**——mask 没变而它跳了，动的就只有阴影。
+
+第一版不是这么判的，两个坑值得记下来：拿角上像素和同一块内部的参考色比，则“桌面颜色恰好等于窗口表面色”会被读成方角，鼠标离开时的一次悬停重绘就足以伪造一次跳变；而收纳态只有 1 个物理像素在屏内，`CopyFromScreen` 对超出屏幕的部分返回全黑而**不报错**，看起来正是“四角全方”。现在放不下、或跑出虚拟屏幕的块一律记 `-1` 且不参与前后比对。判读：`moving=0` 的 mask 翻转＝有人在窗口静止时重建了窗口框；`moving=1` 期间的翻转＝每帧移动本身；只有 band 跳＝阴影变化，用同一行的 `active`／`cursor_inside` 分辨是激活切换还是悬停重绘。
+
+两边共用一把毫秒刻度：`DIASCIA_METRICS` 会记 `frame_write` 事件（值＝调用编号，含义列在 `src/platform/windows_impl.rs` 的 `FRAME_WRITES` 注释里），`probe.ps1` 收尾按编号打时间戳，`corner_watch.ps1` 的 `app_elapsed_ms` 由进程启动时间换算——肉眼看到的那一下因此能钉到具体某次调用，而不是靠猜。参数：`-Title`（默认 `Diascia`）、`-Name`／`-ProcessId`、`-Seconds`（默认 15）、`-IntervalMs`（默认 5）、`-Crop`／`-Outside`／`-Band`／`-Depth`（取样几何）、`-BandJump`（默认 14）、`-MinMargin`（默认 60）、`-Csv`／`-Out`（默认 `target/corner-watch*`）。
 
 呼出延迟分两条报：`hotkey→show_requested` 是应用侧响应（召唤一个已映射窗口时也能采到），`hotkey→首帧` 只认 1 秒内落下的 `frame_ms` 样本。后者很重要：召唤一个无需重绘的窗口时，下一条 `frame_ms` 可能属于几秒之后的一次滚动，把它当延迟读会量出 2.5–10.5 秒的假数字；脚本现在单独计数并提示“召唤后滚一下才采得到”。
 

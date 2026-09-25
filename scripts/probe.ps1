@@ -161,6 +161,29 @@ foreach ($name in 'full_frame', 'region_set', 'refresh_ms') {
     Write-Output ("{0,-14} n={1}" -f "$name ", $count)
 }
 
+# Which call rebuilt a window frame, and when. corner_watch.ps1 reports the same clock in its
+# app_elapsed_ms column, so a visible corner or shadow change can be matched against a specific
+# write instead of guessed at. No rows here is the expected result for a docked session.
+$writes = @($rows | Where-Object { $_.event -eq 'frame_write' })
+$writeNames = @{
+    1 = 'hand shape back';   2 = 'ex-style';         3 = 'winit buttons';
+    4 = 'immersive dark';    5 = 'corner/nc block';  6 = 'winit skip-taskbar';
+    7 = 'custom frame style';8 = 'border colour';    9 = 'square for clip';
+    10 = 'clip region';      11 = 'z-band';          12 = 'layered opacity'
+}
+if ($writes.Count) {
+    Write-Output "frame_write  n=$($writes.Count)  (each of these makes DWM redraw the non-client area)"
+    $writes | Group-Object { [int]$_.value } | Sort-Object { [int]$_.Name } | ForEach-Object {
+        $at = @($_.Group | ForEach-Object { [int]$_.at })
+        $shown = @($at | Select-Object -First 12) -join ' '
+        if ($at.Count -gt 12) {
+            $shown += " ... (+$($at.Count - 12) more)"
+        }
+        $label = if ($writeNames.ContainsKey([int]$_.Name)) { $writeNames[[int]$_.Name] } else { "code $($_.Name)" }
+        Write-Output ("  {0,-20} n={1,-4} at(ms): {2}" -f $label, $_.Count, $shown)
+    }
+}
+
 # Startup timeline. `startup_*` rows are offsets from the start of run_at, so the phase cost is
 # the delta against the previous mark. Durations (store_export_ms, refresh_ms, ...) already appear
 # in the table above. first_frame is the elapsed_ms of the first rasterised frame, on the
