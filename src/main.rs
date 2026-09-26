@@ -885,7 +885,9 @@ impl App {
         }
         self.native_epoch
             .store(self.policy.ticket(), Ordering::SeqCst);
+        let label = self.settings.hotkey.clone();
         self.hotkey.set_enabled(
+            &label,
             self.policy.hotkey_enabled()
                 && !self
                     .settings_ui
@@ -1251,8 +1253,7 @@ impl App {
         let Some(entry) = self.entries.iter().find(|e| e.id == id) else {
             return;
         };
-        let mut target = diascia::paths::convert_target(&entry.target, &self.data_dir, false)
-            .unwrap_or_else(|_| entry.target.clone());
+        let mut target = diascia::paths::resolve_for_shell(&entry.target, &self.data_dir);
         if elevated {
             target = match target {
                 Target::Program {
@@ -1308,11 +1309,15 @@ impl App {
     }
     /// Arms the in-window relocate panel. Returns false when the target has no path to
     /// re-point, so callers can fall back to a plain status message.
-    fn show_relocate(&mut self, id: i64, message: &str) -> bool {
+    fn show_relocate(&mut self, id: i64, message: &str, error_relocatable: bool) -> bool {
         let Some(entry) = self.entries.iter().find(|e| e.id == id) else {
             return false;
         };
-        if !entry.target.relocatable() {
+        // Two independent questions, and the shipped build asked only one of them. Does this class
+        // of failure mean "the path we hold does not resolve" — as opposed to a declined elevation,
+        // a refused permission or an unclassified system error? And does this target have a path to
+        // re-point at all?
+        if !error_relocatable || !entry.target.relocatable() {
             return false;
         }
         self.relocate_pending = id;
@@ -1647,6 +1652,15 @@ impl App {
                 }
                 let data: Export = serde_json::from_slice(&bytes)?;
                 diascia::storage::validate_export(&data)?;
+                // `validate_export` answers about the raw value, so an export stays legal whatever
+                // directory it was written on. This answers about the identity the rows are about to
+                // be indexed under: two spellings of one file pass the first gate and land on a
+                // single `dup_key`, which makes both of them uneditable from then on.
+                if let Some(name) = self.store.export_clash(&data.entries) {
+                    return Err(Error::Invalid(format!(
+                        "同一分类内有指向同一目标的不同写法：{name}；未改动数据"
+                    )));
+                }
                 self.settings_ui.set_status(
                     format!(
                         "将恢复 {} 个分组/分类、{} 个项目",
@@ -2549,7 +2563,7 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             }
         } else if let Ok(failure) = serde_json::from_str::<Failure>(&error) {
             s.status(failure.message.clone());
-            s.show_relocate(failure.entry, &failure.message);
+            s.show_relocate(failure.entry, &failure.message, failure.relocatable);
         } else {
             // A payload we cannot parse must still tell the user the launch failed.
             s.status(error);
@@ -2762,10 +2776,9 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         {
             s.status("请先完成此项目的编辑");
         } else {
-            let base = s.data_dir.clone();
             if let Err(e) = s
                 .store
-                .move_to_collection(i64::from(id), i64::from(destination), &base)
+                .move_to_collection(i64::from(id), i64::from(destination))
             {
                 s.status(e);
             }
@@ -3138,7 +3151,8 @@ fn create_settings(
             .set_recording_hotkey(!s.settings_ui.get_recording_hotkey());
         s.settings_ui.set_hotkey_error("".into());
         let enabled = !s.settings_ui.get_recording_hotkey() && s.policy.hotkey_enabled();
-        s.hotkey.set_enabled(enabled);
+        let label = s.settings.hotkey.clone();
+        s.hotkey.set_enabled(&label, enabled);
         // A foreground request still goes through the policy, even from the settings window.
         if s.allowed(ShowSource::Settings) {
             platform::focus(s.settings_ui.window());

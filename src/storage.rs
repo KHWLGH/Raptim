@@ -126,18 +126,24 @@ impl Store {
             {
                 return Err(Error::Invalid("目标分类已不存在".into()));
             }
-            let mut keys: HashSet<_> = all
-                .iter()
-                .filter(|e| e.collection_id == dest)
-                .map(|e| self.target_key(&e.target))
-                .collect();
-            for e in &selected {
-                if !keys.insert(self.target_key(&e.target)) {
-                    return Err(Error::Invalid(format!(
-                        "目标分类存在重复项目：{}；整批未修改",
-                        e.name
-                    )));
-                }
+            // Choosing the category the batch already sits in is not an operation. Refuse it by name:
+            // until now the duplicate scan below happened to reject it too, but it reported a clash
+            // with a project that was not a clash, which sent the reader looking for one.
+            if selected.iter().any(|e| e.collection_id == dest) {
+                return Err(Error::Invalid("项目已经在所选分类里；整批未修改".into()));
+            }
+            let mut taken = self.slots_of(&[])?;
+            let keys: Vec<String> = selected.iter().map(|e| self.dup_key(e)).collect();
+            if let Some(name) = Self::first_clash(
+                &mut taken,
+                selected
+                    .iter()
+                    .zip(&keys)
+                    .map(|(e, key)| (dest, *e, key.as_str())),
+            ) {
+                return Err(Error::Invalid(format!(
+                    "目标分类存在重复项目：{name}；整批未修改"
+                )));
             }
         }
 
@@ -191,10 +197,11 @@ impl Store {
         }
         Ok(())
     }
-    fn target_key(&self, target: &Target) -> String {
-        crate::paths::convert_target(target, &self.base, false)
-            .unwrap_or_else(|_| target.clone())
-            .duplicate_key()
+    /// The dedup identity this store commits: the target as the Shell would see it, resolved
+    /// against the directory the database lives in. Every duplicate check and the `dup_key` column
+    /// go through here, so a probe cannot answer about a different string than the one it indexes.
+    fn storage_key(&self, target: &Target) -> String {
+        crate::paths::resolve_for_shell(target, &self.base).duplicate_key()
     }
     /// The `payload` column: the entry without its icon, which lives in the `icon` BLOB column so
     /// that reading a library never decodes icon bytes. A version 1 database kept both in one JSON
@@ -204,11 +211,70 @@ impl Store {
         row.icon = Vec::new();
         Ok(serde_json::to_string(&row)?)
     }
-    /// The dedup identity, materialised because `target_key` relativises paths against the data
+    /// The dedup identity, materialised because `storage_key` absolutises paths against the data
     /// directory and lower-cases URLs, neither of which SQLite can express. It exists so the
     /// duplicate-target check is an index probe instead of a full-table re-read.
     fn dup_key(&self, entry: &Entry) -> String {
-        self.target_key(&entry.target)
+        self.storage_key(&entry.target)
+    }
+    /// The slots the committed table already holds, as `(collection_id, dup_key)`, minus the rows in
+    /// `except`: a rewrite must not be refused by the slot it is itself vacating. Only the dedup
+    /// columns are read — a batch check must not re-parse every payload.
+    fn slots_of(&self, except: &[i64]) -> Result<HashSet<(i64, String)>> {
+        let skip: HashSet<i64> = except.iter().copied().collect();
+        let mut statement = self
+            .conn
+            .prepare("SELECT collection_id,dup_key,id FROM entries")?;
+        let rows = statement.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut out = HashSet::new();
+        for row in rows {
+            let (collection_id, dup_key, id) = row?;
+            if !skip.contains(&id) {
+                out.insert((collection_id, dup_key));
+            }
+        }
+        Ok(out)
+    }
+    /// The name of the first row whose `(collection, key)` slot is already taken, counting the
+    /// earlier rows of the same batch. Keys come from `dup_key`, so a probe never answers about a
+    /// different string than the one the write goes on to index. The collection is a parameter
+    /// rather than read off the entry because a batch move asks about the *destination*. Each write
+    /// path hands in the `taken` that is correct for it — the committed table for a rewrite, the
+    /// whole library for a move, nothing for a replacement — and picks its own outcome:
+    /// `add_entries` skips a repeat silently, every other path refuses the batch.
+    fn first_clash<'a, 'b>(
+        taken: &mut HashSet<(i64, String)>,
+        batch: impl Iterator<Item = (i64, &'a Entry, &'b str)>,
+    ) -> Option<String> {
+        for (collection_id, entry, key) in batch {
+            if !taken.insert((collection_id, key.to_owned())) {
+                return Some(entry.name.clone());
+            }
+        }
+        None
+    }
+    /// A whole-library replacement, checked against the identity that will actually be indexed.
+    /// Two rows that only *spell* the same target differently pass `validate_export`, which compares
+    /// the raw value on purpose so an export stays legal whatever directory the database sits in,
+    /// and then land on one `dup_key` — after which every edit of either is refused. Only the import
+    /// path asks this: `restore` itself stays lax, so sorting and reordering keep working on a
+    /// library that already holds a pair.
+    pub fn export_clash(&self, entries: &[Entry]) -> Option<String> {
+        let keys: Vec<String> = entries.iter().map(|e| self.dup_key(e)).collect();
+        let mut taken = HashSet::new();
+        Self::first_clash(
+            &mut taken,
+            entries
+                .iter()
+                .zip(&keys)
+                .map(|(e, key)| (e.collection_id, e, key.as_str())),
+        )
     }
     pub fn collections(&self) -> Result<Vec<Collection>> {
         let mut statement = self
@@ -270,6 +336,22 @@ impl Store {
     pub fn update_targets_checked(&mut self, updates: &[Entry], originals: &[Entry]) -> Result<()> {
         // Resolved before the transaction because it needs `&self`, which the write borrow denies.
         let keys: Vec<String> = updates.iter().map(|e| self.dup_key(e)).collect();
+        // Rewriting a target rewrites its slot, so this is the one place a rewrite can create a pair
+        // of rows that index identically. 重新定位 and 路径转换 both land here, and the collision they
+        // write is what makes both rows uneditable afterwards and `Store::open` refuse to boot.
+        let rewritten: Vec<i64> = updates.iter().map(|e| e.id).collect();
+        let mut taken = self.slots_of(&rewritten)?;
+        if let Some(name) = Self::first_clash(
+            &mut taken,
+            updates
+                .iter()
+                .zip(&keys)
+                .map(|(e, key)| (e.collection_id, e, key.as_str())),
+        ) {
+            return Err(Error::Invalid(format!(
+                "目标分类已有重复项目：{name}；未修改任何项目"
+            )));
+        }
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -466,13 +548,9 @@ impl Store {
     }
     /// One drop/picker operation commits atomically; repeated targets are skipped.
     pub fn add_entries(&mut self, entries: &[Entry]) -> Result<(usize, usize)> {
-        // Only the two dedup columns are read. The previous shape re-parsed every payload, icon
-        // bytes included, to answer "is this target already here".
-        let mut keys: HashSet<(i64, String)> = self
-            .conn
-            .prepare("SELECT collection_id,dup_key FROM entries")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
+        // Only the dedup columns are read. The previous shape re-parsed every payload, icon bytes
+        // included, to answer "is this target already here".
+        let mut keys = self.slots_of(&[])?;
         let mut rows = Vec::new();
         for entry in entries {
             entry.validate()?;
@@ -852,6 +930,168 @@ mod tests {
             Ok(_) => panic!("database must not be opened"),
         }
     }
+    fn file_entry(name: &str, path: &str) -> Entry {
+        Entry {
+            icon: Vec::new(),
+            id: 0,
+            collection_id: 2,
+            name: name.into(),
+            aliases: String::new(),
+            notes: String::new(),
+            target: Target::File { path: path.into() },
+            position: 0,
+        }
+    }
+    /// 重新定位 and 路径转换 both land in `update_targets_checked`, which used to be the only write
+    /// path that rewrote `dup_key` without asking whether the slot was already taken. What it wrote
+    /// made both rows uneditable and got the whole library refused at the next start.
+    #[test]
+    fn relocating_onto_a_siblings_target_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("relocate.db")).unwrap();
+        let mut lost = file_entry("失联", &dir.path().join("gone.txt").to_string_lossy());
+        let mut present = file_entry("在册", &dir.path().join("a.txt").to_string_lossy());
+        lost.id = store.save_entry(&lost).unwrap();
+        present.id = store.save_entry(&present).unwrap();
+        let original = present.clone();
+        present.target = lost.target.clone();
+        let error = store
+            .update_targets_checked(&[present], std::slice::from_ref(&original))
+            .expect_err("同一个分类里已经有这个目标，重新定位必须被拒");
+        assert!(error.to_string().contains("在册"), "{error}");
+        let still = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == original.id)
+            .unwrap();
+        assert_eq!(still.target, original.target, "拒绝必须一笔都不写");
+    }
+    /// The gap `validate_export` cannot see: it compares the raw value on purpose, so an export that
+    /// spells one file two ways passes it, while both rows land on the same normalized `dup_key`.
+    /// That pair then refuses every edit of either row. Only the import path can create it, so only
+    /// the import path is tightened.
+    #[test]
+    fn an_export_that_spells_one_target_two_ways_is_refused_before_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("import.db")).unwrap();
+        let entries = vec![
+            Entry {
+                id: 1,
+                ..file_entry("绝对写法", &dir.path().join("a.txt").to_string_lossy())
+            },
+            Entry {
+                id: 2,
+                ..file_entry("相对写法", ".\\a.txt")
+            },
+        ];
+        assert_ne!(
+            entries[0].target.duplicate_key(),
+            entries[1].target.duplicate_key(),
+            "两种写法在 raw 口径下必须不同，否则这个测试什么也没证"
+        );
+        let data = Export {
+            format_version: SCHEMA_VERSION,
+            collections: store.collections().unwrap(),
+            entries,
+            settings: store.settings().unwrap(),
+        };
+        validate_export(&data).expect("raw 口径确实放行，这就是被漏掉的那一批");
+        // The offender is the row that cannot be placed, which is the second spelling: the fold
+        // walks the batch in order, so the message always names a row the user can find.
+        assert_eq!(
+            store.export_clash(&data.entries).as_deref(),
+            Some("相对写法")
+        );
+    }
+    /// 只防新增. A library that already holds a colliding pair — which the shipped build could write
+    /// through the hole above — must keep opening: there is deliberately no repair path, so newly
+    /// refusing it would leave the user with a database they can neither open nor fix. `restore`
+    /// therefore stays lax, and the tightening lives in the import call site.
+    #[test]
+    fn a_library_that_already_holds_a_colliding_pair_still_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("collided.db");
+        let mut store = Store::open(&path).unwrap();
+        let collided = Export {
+            format_version: SCHEMA_VERSION,
+            collections: store.collections().unwrap(),
+            entries: vec![
+                Entry {
+                    id: 1,
+                    ..file_entry("甲", &dir.path().join("a.txt").to_string_lossy())
+                },
+                Entry {
+                    id: 2,
+                    ..file_entry("乙", ".\\a.txt")
+                },
+            ],
+            settings: store.settings().unwrap(),
+        };
+        store.restore(&collided).unwrap();
+        assert_eq!(
+            store.slots_of(&[]).unwrap().len(),
+            1,
+            "此刻两行确实共用一个槽位，测试铺的才是真的损伤"
+        );
+        drop(store);
+        let reopened = Store::open(&path).expect("已有撞车对的库必须照旧打得开");
+        assert_eq!(reopened.entries().unwrap().len(), 2);
+    }
+    /// The other half of the identity problem: the slot the column holds is the normalized one, not
+    /// the raw value, so a probe that asked about the raw value would answer about a string the
+    /// index never contains.
+    #[test]
+    fn every_duplicate_check_answers_with_the_key_it_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("identity.db")).unwrap();
+        let subject = file_entry("相对写法", ".\\a.txt");
+        store.save_entry(&subject).unwrap();
+        let stored = store.slots_of(&[]).unwrap();
+        assert!(
+            stored.contains(&(subject.collection_id, store.dup_key(&subject))),
+            "存进去的槽位必须就是判定用的那一个"
+        );
+        assert_ne!(
+            store.dup_key(&subject),
+            subject.target.duplicate_key(),
+            "存的是规范化过的键，raw 值只是它的一个输入"
+        );
+        let other = file_entry("绝对写法", &dir.path().join("a.txt").to_string_lossy());
+        assert!(
+            store.save_entry(&other).is_err(),
+            "写法不同的同一条目标也要认出来"
+        );
+    }
+    /// Choosing the category a batch already sits in is refused — the machine pass pins that
+    /// decision. What refused it until now was the duplicate scan, which then named one of the user's
+    /// own projects as a clash that was never one. The refusal stands; the reason has to be true.
+    #[test]
+    fn a_batch_dropped_into_its_own_category_is_refused_for_the_right_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("batch.db")).unwrap();
+        let mut first = file_entry("甲", &dir.path().join("a.txt").to_string_lossy());
+        let mut second = file_entry("乙", &dir.path().join("b.txt").to_string_lossy());
+        first.id = store.save_entry(&first).unwrap();
+        second.id = store.save_entry(&second).unwrap();
+        let ids = [first.id, second.id];
+        for copy in [false, true] {
+            let error = store
+                .batch_entries(&ids, Some(first.collection_id), copy)
+                .expect_err("留在原分类不算一次移动");
+            assert!(error.to_string().contains("已经在"), "{error}");
+            assert!(
+                !error.to_string().contains("重复"),
+                "{error} 会把人指向一个并不存在的重复项目"
+            );
+        }
+        assert_eq!(store.entries().unwrap().len(), 2, "拒绝不能动到数据");
+        // The honest guard must still let the ordinary case through.
+        let other = store.save_collection(None, Some(1), "另一分类").unwrap();
+        store
+            .batch_entries(&[second.id], Some(other), false)
+            .expect("跨分类移动是正常操作");
+    }
     #[test]
     fn window_state_never_enters_export_and_survives_restore() {
         let dir = tempfile::tempdir().unwrap();
@@ -1180,7 +1420,7 @@ mod tests {
         let mut e = entry();
         e.collection_id = tools;
         store.save_entry(&e).unwrap();
-        store.migrate_delete(1, dest, dir.path()).unwrap();
+        store.migrate_delete(1, dest).unwrap();
         let collections = store.collections().unwrap();
         assert!(!collections.iter().any(|c| c.id == 1), "源分组消失");
         let moved = collections.iter().find(|c| c.id == tools).unwrap();
@@ -1212,7 +1452,7 @@ mod tests {
         let dest = store.save_collection(None, None, "工作").unwrap();
         let before = store.collections().unwrap();
         let kept = before.iter().filter(|c| c.parent_id == Some(dest)).count();
-        store.migrate_delete(1, dest, dir.path()).unwrap();
+        store.migrate_delete(1, dest).unwrap();
         let after = store.collections().unwrap();
         assert!(
             !after.iter().any(|c| c.id == 1),
@@ -1236,7 +1476,7 @@ mod tests {
         let mut e = entry();
         e.collection_id = tools;
         store.save_entry(&e).unwrap();
-        store.migrate_delete(1, dest, dir.path()).unwrap();
+        store.migrate_delete(1, dest).unwrap();
         let moved = store
             .collections()
             .unwrap()
@@ -1257,9 +1497,9 @@ mod tests {
         let source_child = store.save_collection(None, Some(1), "子分类").unwrap();
         store.save_entry(&entry()).unwrap();
         let before = store.export().unwrap();
-        assert!(store.migrate_delete(1, 1, dir.path()).is_err());
-        assert!(store.migrate_delete(1, source_child, dir.path()).is_err());
-        assert!(store.migrate_delete(1, dest_child, dir.path()).is_err());
+        assert!(store.migrate_delete(1, 1).is_err());
+        assert!(store.migrate_delete(1, source_child).is_err());
+        assert!(store.migrate_delete(1, dest_child).is_err());
         let after = store.export().unwrap();
         assert_eq!(after.collections, before.collections);
         assert_eq!(after.entries, before.entries);

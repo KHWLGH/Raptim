@@ -490,14 +490,13 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
         s.main.set_inline_error("".into());
         let empty = !s.entries.iter().any(|e| e.collection_id == id)
             && !s.collections.iter().any(|c| c.parent_id == Some(id));
-        let base = s.data_dir.clone();
         let discard = s.main.get_delete_discard();
         let result = if empty {
             s.store.delete_collection(id)
         } else if discard {
             s.store.delete_collection_with_contents(id)
         } else if let Some(d) = s.main.get_delete_destinations().row_data(index as usize) {
-            s.store.migrate_delete(id, i64::from(d.id), &base)
+            s.store.migrate_delete(id, i64::from(d.id))
         } else {
             Err(Error::Invalid("没有可用迁移目标，至少保留一个分组".into()))
         };
@@ -646,9 +645,12 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                     s.launch_elevated(i64::from(id));
                 }
                 7 => {
+                    // Opened on purpose from the menu, so there is no failure class to consult;
+                    // `show_relocate` still refuses kinds that have no path to re-point.
                     s.show_relocate(
                         i64::from(id),
                         "重新定位会替换该项目指向的路径，参数、工作目录与窗口方式保持不变。",
+                        true,
                     );
                 }
                 4 => {
@@ -680,9 +682,11 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                     let base = s.data_dir.clone();
                     let weak = s.main.as_weak();
                     std::thread::spawn(move || {
-                        let result = diascia::paths::convert_target(&e.target, &base, false)
-                            .map_err(|e| e.to_string())
-                            .and_then(|target| platform::desktop_shortcut(&e.name, &target));
+                        // `resolve_for_shell`, not `convert_target`: a URL entry has no path to
+                        // absolutise, and the shortcut writer handles `url` and AppsFolder targets
+                        // itself. Going through the fallible convert failed every 网址 and 应用标识.
+                        let target = diascia::paths::resolve_for_shell(&e.target, &base);
+                        let result = platform::desktop_shortcut(&e.name, &target);
                         let message = result
                             .map(|path| format!("已创建：{}", path.display()))
                             .unwrap_or_else(|e| e);
@@ -757,10 +761,9 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
             return false;
         }
         let destination = if id <= 0 { s.group } else { i64::from(id) };
-        let base = s.data_dir.clone();
         let result = if let Some(source) = dragged_id(&data) {
             let category = s.category_for(destination);
-            s.store.move_to_collection(source, category, &base)
+            s.store.move_to_collection(source, category)
         } else if let Some(source) = data
             .user_data()
             .and_then(|v| v.downcast_ref::<DraggedCollection>().map(|v| v.0))

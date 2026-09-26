@@ -196,6 +196,11 @@ pub fn shell_context_menu(window: &slint::Window, path: &Path) -> Result<(), Str
         let mut child = std::ptr::null_mut();
         let folder: IShellFolder =
             SHBindToParent(pidl.0, Some(&mut child)).map_err(|e| e.to_string())?;
+        // `child` is not an allocation of its own: measured on Windows 11 it is `pidl + 440` every
+        // time, an interior pointer into the block above. The Shell's documentation for
+        // `SHBindToParent`'s `ppidlLast` says the caller frees it, and doing that here aborts the
+        // process with STATUS_HEAP_CORRUPTION. So this is deliberately not wrapped in `Pidl`, and
+        // `pidl` has to outlive every use of `child` below.
         let context: IContextMenu = folder
             .GetUIObjectOf(hwnd, &[child], None)
             .map_err(|e| e.to_string())?;
@@ -305,5 +310,60 @@ mod tests {
                 .unwrap()
                 .contains("URL=https://example.com/a?q=1")
         );
+    }
+    /// An 应用标识 must reach the writer and fail *inside* the Shell, not before it. A fake AUMID is
+    /// deliberate: it makes `SHParseDisplayName` fail on every machine, so the assertion pins the
+    /// failure's origin rather than the inventory of whatever is installed. The launcher used to
+    /// absolutise through a convert that answers "网址和应用标识没有文件路径" for exactly this kind,
+    /// so nothing here was ever reached.
+    #[test]
+    fn app_targets_reach_the_shell_instead_of_the_path_converter() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = create_shortcut_in(
+            dir.path(),
+            "计算器",
+            &Target::App {
+                aumid: "Diascia.Probe_1.0.0.0_neutral__000000000000!Entry".into(),
+            },
+        )
+        .expect_err("an uninstalled AUMID cannot resolve");
+        assert!(!error.contains("文件路径"), "{error}");
+        assert!(
+            !dir.path().join("计算器.lnk").exists(),
+            "a refused shortcut must not leave a file behind"
+        );
+    }
+    /// Measured rather than assumed: the child list `SHBindToParent` reports is an **interior pointer
+    /// into** the full list — `pidl + 440` on every run here — not an allocation of its own. Freeing
+    /// it the way the Shell documentation suggests aborts the process with `STATUS_HEAP_CORRUPTION`,
+    /// so this pins the shape: if a future Windows ever hands back a child from outside the block,
+    /// this test fails and the ownership question has to be revisited deliberately.
+    #[test]
+    fn the_child_id_list_lives_inside_the_full_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tool.exe");
+        std::fs::write(&file, b"").unwrap();
+        let _com = ComGuard::new().unwrap();
+        unsafe {
+            let mut full = std::ptr::null_mut();
+            SHParseDisplayName(
+                PCWSTR(wide(&file.to_string_lossy()).as_ptr()),
+                None,
+                &mut full,
+                0,
+                None,
+            )
+            .unwrap();
+            let full = Pidl(full);
+            let mut child = std::ptr::null_mut();
+            let folder: IShellFolder =
+                SHBindToParent(full.0, Some(&mut child)).expect("a real file has a parent folder");
+            assert!(
+                child > full.0 && (child as usize) - (full.0 as usize) < 4096,
+                "child {child:p} 落在 full {:p} 之外，那它就该由调用方释放了",
+                full.0
+            );
+            drop(folder);
+        }
     }
 }

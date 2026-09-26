@@ -39,15 +39,12 @@ pub fn conversion_preview(
     out
 }
 impl Store {
-    /// Validate the complete resulting data before the transaction, including normalized targets.
-    fn commit_commands(&mut self, data: &Export, base: &Path) -> Result<()> {
-        let mut keys = HashSet::new();
-        for e in &data.entries {
-            let target =
-                paths::convert_target(&e.target, base, false).unwrap_or_else(|_| e.target.clone());
-            if !keys.insert((e.collection_id, target.duplicate_key())) {
-                return Err(Error::Invalid(format!("目标分类已有重复项目：{}", e.name)));
-            }
+    /// Validate the complete resulting data before the transaction, through the same identity the
+    /// `dup_key` column is written from. This used to re-derive it locally, which let a move pass a
+    /// check whose own write then disagreed.
+    fn commit_commands(&mut self, data: &Export) -> Result<()> {
+        if let Some(name) = self.export_clash(&data.entries) {
+            return Err(Error::Invalid(format!("目标分类已有重复项目：{name}")));
         }
         self.restore(data)
     }
@@ -93,7 +90,7 @@ impl Store {
         }
         self.restore(&data)
     }
-    pub fn move_to_collection(&mut self, id: i64, destination: i64, base: &Path) -> Result<()> {
+    pub fn move_to_collection(&mut self, id: i64, destination: i64) -> Result<()> {
         let mut data = self.export()?;
         let end = data
             .entries
@@ -113,9 +110,9 @@ impl Store {
         }
         e.collection_id = destination;
         e.position = end;
-        self.commit_commands(&data, base)
+        self.commit_commands(&data)
     }
-    pub fn migrate_delete(&mut self, id: i64, destination: i64, base: &Path) -> Result<()> {
+    pub fn migrate_delete(&mut self, id: i64, destination: i64) -> Result<()> {
         let mut data = self.export()?;
         let source = data
             .collections
@@ -201,7 +198,7 @@ impl Store {
         }
         data.collections
             .retain(|c| c.id != id && !dropped.contains(&c.id));
-        self.commit_commands(&data, base)
+        self.commit_commands(&data)
     }
     pub fn sort_names(&mut self, selected: &HashSet<i64>) -> Result<()> {
         let mut data = self.export()?;

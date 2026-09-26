@@ -17,6 +17,9 @@ const STORED_LIMIT: usize = 200 * 1024;
 const SIDE_ATTEMPTS: usize = 4;
 /// Under this the icon is unreadable in the grid; over this it wastes database space.
 const SHORTEST_EDGE: u32 = 16;
+/// The largest edge a server is allowed to hand back before it is refused. Kept well above
+/// `LONGEST_EDGE` because the answer is downscaled, not rejected, between the two.
+const MAX_EDGE: u32 = 4096;
 const LONGEST_EDGE: u32 = 128;
 /// The edge a touch icon carries by convention when it declares no `sizes` of its own.
 const TOUCH_ICON_EDGE: u32 = 180;
@@ -45,8 +48,8 @@ pub fn fetch(url: &str) -> Vec<u8> {
     }
     let started = std::time::Instant::now();
     let mut candidates = match get(&page, PAGE_LIMIT) {
-        Some((kind, body)) if kind.to_ascii_lowercase().contains("html") => {
-            icon_links(&String::from_utf8_lossy(&body), &page)
+        Some(page_response) if page_response.ok() && page_response.is_html() => {
+            icon_links(&String::from_utf8_lossy(&page_response.body), &page)
         }
         _ => Vec::new(),
     };
@@ -60,8 +63,9 @@ pub fn fetch(url: &str) -> Vec<u8> {
         if started.elapsed() > ATTEMPT_BUDGET {
             break;
         }
-        if let Some((_, body)) = get(&candidate, IMAGE_LIMIT)
-            && let Some(png) = to_png(&body)
+        if let Some(answer) = get(&candidate, IMAGE_LIMIT)
+            && answer.ok()
+            && let Some(png) = to_png(&answer.body)
         {
             return png;
         }
@@ -73,13 +77,13 @@ pub fn fetch(url: &str) -> Vec<u8> {
 fn icon_links(html: &str, page: &Url) -> Vec<Url> {
     let mut found = Vec::new();
     for (names, values) in link_tags(html) {
-        let rel = attribute(&names, "rel").unwrap_or_default();
+        let rel = attribute(&names, &names, "rel").unwrap_or_default();
         if !rel.contains("icon") {
             continue;
         }
-        // `href` is read from the original casing: attribute names and `rel` are safe to
-        // lowercase, a resource path is not.
-        let Some(href) = attribute(&values, "href") else {
+        // `href` is read out of the original casing: the name is matched case-insensitively and
+        // `rel` is safe to lowercase, a resource path is not.
+        let Some(href) = attribute(&names, &values, "href") else {
             continue;
         };
         if let Ok(resolved) = page.join(href.trim())
@@ -114,22 +118,25 @@ fn link_tags(html: &str) -> Vec<(String, String)> {
     tags
 }
 
-/// Value of `name="…"`, `name='…'` or `name=…` inside one tag body.
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+/// Value of `name="…"`, `name='…'` or `name=…` inside one tag body. The attribute *name* is looked up
+/// in the case-folded copy — HTML spells names any way it likes — while the value is cut out of the
+/// original, because a resource path is case-sensitive. ASCII folding keeps byte lengths, which is
+/// what lets one set of offsets address both copies; that is also why `link_tags` keeps the pair.
+fn attribute<'a>(lower: &str, raw: &'a str, name: &str) -> Option<&'a str> {
     let mut cursor = 0usize;
-    while let Some(offset) = tag[cursor..].find(name) {
+    while let Some(offset) = lower[cursor..].find(name) {
         let start = cursor + offset;
         cursor = start + name.len();
         let boundary = start == 0
             || matches!(
-                tag.as_bytes()[start - 1],
+                lower.as_bytes()[start - 1],
                 b' ' | b'\t' | b'\n' | b'\r' | b'/'
             );
-        let rest = tag[cursor..].trim_start_matches([' ', '\t', '\n', '\r']);
-        if !boundary || !rest.starts_with('=') {
+        let equals = skip_space(lower, cursor);
+        if !boundary || !lower[equals..].starts_with('=') {
             continue;
         }
-        let value = rest[1..].trim_start_matches([' ', '\t', '\n', '\r']);
+        let value = &raw[skip_space(lower, equals + 1)..];
         let value = if let Some(value) = value.strip_prefix('"') {
             value.split('"').next()?
         } else if let Some(value) = value.strip_prefix('\'') {
@@ -143,11 +150,17 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     }
     None
 }
+/// The byte offset of the first non-whitespace character at or after `at`.
+fn skip_space(text: &str, at: usize) -> usize {
+    let rest = &text[at..];
+    at + rest.len() - rest.trim_start_matches([' ', '\t', '\n', '\r']).len()
+}
 
 /// The longest edge a `sizes` list promises, so a 180px touch icon beats a 16px one. `any` and
-/// unparsable lists promise nothing and are tried last.
-fn declared_edge(tag: &str) -> u32 {
-    let Some(sizes) = attribute(tag, "sizes") else {
+/// unparsable lists promise nothing and are tried last. Fed the case-folded copy: a sizes list is
+/// dimensions, not a path, so folding it is free.
+fn declared_edge(lower: &str) -> u32 {
+    let Some(sizes) = attribute(lower, lower, "sizes") else {
         return 0;
     };
     sizes
@@ -161,10 +174,21 @@ fn declared_edge(tag: &str) -> u32 {
 }
 
 /// Re-encode whatever the server called an icon into the PNG format every other icon source uses.
+/// The edge limits go to the decoder rather than to its output: a compressed image is a fraction of
+/// its own size, so checking the dimensions after decoding means the pixels were already allocated
+/// by the time the answer was "too big".
 fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
-    let decoded = image::load_from_memory(bytes).ok()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_EDGE);
+    limits.max_image_height = Some(MAX_EDGE);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader.decode().ok()?;
     let (width, height) = (decoded.width(), decoded.height());
-    if width.min(height) < SHORTEST_EDGE || width.max(height) > 4096 {
+    if width.min(height) < SHORTEST_EDGE {
         return None;
     }
     let image = decoded.into_rgba8();
@@ -184,9 +208,26 @@ fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     (png.len() <= STORED_LIMIT).then_some(png)
 }
 
+/// One answered request. The status line travels with the body because a body is not an icon just
+/// because the server named an image type on it: a 404 stub, a 500 trace page and a captive portal
+/// that answers 200 with HTML all pass a content-type test, and none of them is what was asked for.
+struct Response {
+    status: u16,
+    content_type: String,
+    body: Vec<u8>,
+}
+impl Response {
+    fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+    fn is_html(&self) -> bool {
+        self.content_type.to_ascii_lowercase().contains("html")
+    }
+}
+
 /// One plain GET with hard timeouts. Loopback never goes through a proxy, which is what a browser
 /// does as well and what keeps the local test server reachable.
-fn get(url: &Url, limit: usize) -> Option<(String, Vec<u8>)> {
+fn get(url: &Url, limit: usize) -> Option<Response> {
     let host = url.host_str()?;
     let secure = url.scheme() == "https";
     let port = url.port_or_known_default()?;
@@ -244,6 +285,13 @@ fn get(url: &Url, limit: usize) -> Option<(String, Vec<u8>)> {
         let _ = WinHttpAddRequestHeaders(request, &accepts, WINHTTP_ADDREQ_FLAG_ADD);
         WinHttpSendRequest(request, None, None, 0, 0, 0).ok()?;
         WinHttpReceiveResponse(request, std::ptr::null_mut()).ok()?;
+        // Read as text, not `WINHTTP_FLAG_NUMBER`: `header` decodes a UTF-16 buffer, which is what
+        // the string form of the status code is. An unreadable status counts as "not 2xx" (0), so a
+        // response this code cannot interpret never becomes an icon.
+        let status = header(request, WINHTTP_QUERY_STATUS_CODE)
+            .trim()
+            .parse()
+            .unwrap_or(0);
         let kind = header(request, WINHTTP_QUERY_CONTENT_TYPE);
         let mut body = Vec::new();
         loop {
@@ -266,7 +314,11 @@ fn get(url: &Url, limit: usize) -> Option<(String, Vec<u8>)> {
                 return None;
             }
         }
-        Some((kind, body))
+        Some(Response {
+            status,
+            content_type: kind,
+            body,
+        })
     }
 }
 
@@ -325,7 +377,18 @@ mod tests {
 
     /// A one-shot HTTP server on the loopback interface: the fetcher only makes sense end to end,
     /// and a real round trip is the only way to drive WinHTTP without inventing a fake stack.
-    type Routes = Vec<(String, String, Vec<u8>)>;
+    /// Routes carry a status because the fetcher has to answer for statuses, not just bodies: an
+    /// error page that names an image type must not become an icon.
+    type Routes = Vec<(String, String, u16, Vec<u8>)>;
+
+    fn reason(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            _ => "Diascia Probe",
+        }
+    }
 
     struct LocalServer {
         address: std::net::SocketAddr,
@@ -348,12 +411,13 @@ mod tests {
                         .lock()
                         .unwrap()
                         .iter()
-                        .find(|(route, _, _)| *route == path)
+                        .find(|(route, _, _, _)| *route == path)
                         .cloned();
                     let reply = match answer {
-                        Some((_, kind, body)) => {
+                        Some((_, kind, status, body)) => {
                             let mut reply = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 {status} {}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                reason(status),
                                 body.len()
                             )
                             .into_bytes();
@@ -370,10 +434,17 @@ mod tests {
             Self { address, routes }
         }
 
-        fn serve(&self, routes: &[(&str, &str, Vec<u8>)]) {
+        fn serve(&self, routes: &[(&str, &str, u16, Vec<u8>)]) {
             *self.routes.lock().unwrap() = routes
                 .iter()
-                .map(|(path, kind, body)| ((*path).to_string(), (*kind).to_string(), body.clone()))
+                .map(|(path, kind, status, body)| {
+                    (
+                        (*path).to_string(),
+                        (*kind).to_string(),
+                        *status,
+                        body.clone(),
+                    )
+                })
                 .collect();
         }
 
@@ -487,11 +558,12 @@ mod tests {
             (
                 "/docs/",
                 "text/html; charset=utf-8",
+                200,
                 br#"<html><head><link rel="icon" href="/static/site.png" sizes="64x64"></head>"#
                     .to_vec(),
             ),
-            ("/static/site.png", "image/png", png(64)),
-            ("/favicon.ico", "image/x-icon", png(32)),
+            ("/static/site.png", "image/png", 200, png(64)),
+            ("/favicon.ico", "image/x-icon", 200, png(32)),
         ]);
         // The dispatch every icon call site goes through, not only this module's entry point.
         let address = crate::model::Target::Url {
@@ -509,8 +581,8 @@ mod tests {
         );
 
         server.serve(&[
-            ("/docs/", "text/html", b"<html><head></head>".to_vec()),
-            ("/favicon.ico", "image/x-icon", png(32)),
+            ("/docs/", "text/html", 200, b"<html><head></head>".to_vec()),
+            ("/favicon.ico", "image/x-icon", 200, png(32)),
         ]);
         assert_eq!(
             edge(&fetched(&server.url("/docs/"))),
@@ -518,10 +590,57 @@ mod tests {
             "without a declared icon, /favicon.ico is tried"
         );
 
-        server.serve(&[("/docs/", "text/plain", b"not a page".to_vec())]);
+        server.serve(&[("/docs/", "text/plain", 200, b"not a page".to_vec())]);
         assert!(
             fetch(&server.url("/docs/")).is_empty(),
             "a non-HTML answer is not a page"
+        );
+    }
+
+    /// A status line is not a body. Naming an image type while saying 404 is exactly the shape of an
+    /// error page or a captive portal, and the fetcher used to read only the type.
+    #[test]
+    fn a_refused_status_is_not_an_icon_even_when_the_body_is_a_valid_png() {
+        let server = LocalServer::start();
+        server.serve(&[
+            ("/docs/", "text/html", 200, b"<html><head></head>".to_vec()),
+            ("/favicon.ico", "image/png", 404, png(32)),
+        ]);
+        assert!(
+            fetch(&server.url("/docs/")).is_empty(),
+            "404 上挂着一张能解码的 PNG，也不是图标"
+        );
+        // And the error page for the address itself is not a page to scan: parsed, it would offer a
+        // perfectly good 200 icon and the entry would come back with someone else's logo.
+        server.serve(&[
+            (
+                "/portal/",
+                "text/html",
+                500,
+                br#"<html><head><link rel="icon" href="/real.png"></head>"#.to_vec(),
+            ),
+            ("/real.png", "image/png", 200, png(64)),
+        ]);
+        assert!(
+            fetch(&server.url("/portal/")).is_empty(),
+            "5xx 的正文不能当页面来解析"
+        );
+    }
+
+    /// HTML spells attribute *names* any way it likes but a resource path is case-sensitive. The name
+    /// is matched on the case-folded copy and the value is cut out of the original at the same
+    /// offsets — folding the value would fix `<LINK HREF=…>` by breaking `/Case.png`.
+    #[test]
+    fn attribute_names_are_matched_case_insensitively_and_values_are_not() {
+        assert_eq!(
+            links(r#"<LINK REL="ICON" HREF="/UPPER.PNG">"#),
+            vec!["https://example.com/UPPER.PNG".to_string()],
+            "大写属性名的页面过去取不到任何候选图标"
+        );
+        assert_eq!(
+            links(r#"<link rel="icon" href=/Case.PNG sizes="64X16">"#),
+            vec!["https://example.com/Case.PNG".to_string()],
+            "未加引号的值保留大小写，折叠过的大小列表照样解析"
         );
     }
 }

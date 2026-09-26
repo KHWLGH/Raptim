@@ -212,6 +212,23 @@ pub(super) fn install(app: Rc<RefCell<App>>) {
         assert_eq!(ui.get_relocate_target(), "C:\\Regression\\missing-tool.exe");
         ui.invoke_escape();
         assert!(!ui.get_relocate_open(), "Esc 先关面板，不外泄成隐藏启动器");
+        // The error class, not just the target type, decides the offer. This is the same Program
+        // entry that was offered a panel two lines above: a declined elevation prompt on a file that
+        // is plainly present must leave the status line and nothing else.
+        ui.invoke_launch_finished(
+            serde_json::to_string(&Failure {
+                entry: tool,
+                message: "已取消管理员授权".into(),
+                relocatable: false,
+            })
+            .unwrap()
+            .into(),
+        );
+        assert!(
+            !ui.get_relocate_open(),
+            "取消授权不是「路径指不到」，不能弹重新定位面板"
+        );
+        assert_eq!(ui.get_status(), "已取消管理员授权");
         ui.invoke_item_action(tool as i32, 7);
         assert!(ui.get_relocate_open(), "右键菜单在提示消失后仍可进入");
         ui.invoke_file_selected(7, "C:\\Regression\\renamed-tool.exe".into());

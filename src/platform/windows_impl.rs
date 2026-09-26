@@ -47,6 +47,26 @@ impl Drop for TaskMemIdl {
     }
 }
 
+/// What one `WaitForMultipleObjects` return means for the summon waiter. The handles are ordered
+/// `[stop, event]`, so only index 0 ends the thread. Everything that is not index 1 — `WAIT_FAILED`
+/// included — is retried: a waiter that exits on a transient failure takes second-instance summoning
+/// down with it for the rest of the run, and nothing re-arms it.
+#[derive(PartialEq, Debug)]
+enum Wait {
+    Stop,
+    Summon,
+    Retry,
+}
+fn classify_wait(result: WAIT_EVENT) -> Wait {
+    if result == WAIT_OBJECT_0 {
+        Wait::Stop
+    } else if result == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+        Wait::Summon
+    } else {
+        Wait::Retry
+    }
+}
+
 pub struct Instance {
     _mutex: OwnedHandle,
     event: OwnedHandle,
@@ -94,12 +114,19 @@ impl Instance {
         self.waiter = Some(thread::spawn(move || unsafe {
             let handles = [HANDLE(stop as _), HANDLE(event as _)];
             loop {
-                let result = WaitForMultipleObjects(&handles, false, INFINITE);
-                if result != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
-                    break;
+                match classify_wait(WaitForMultipleObjects(&handles, false, INFINITE)) {
+                    Wait::Stop => break,
+                    Wait::Summon => {
+                        crate::metrics::record("secondary_received", 0.);
+                        notify(7, String::new());
+                    }
+                    // Back off rather than spin: if a call is failing it will keep failing, and a
+                    // hot loop here costs more than the summon it is waiting for.
+                    Wait::Retry => {
+                        crate::metrics::record("secondary_wait_failed", 0.);
+                        thread::sleep(std::time::Duration::from_millis(50));
+                    }
                 }
-                crate::metrics::record("secondary_received", 0.);
-                notify(7, String::new());
             }
         }));
     }
@@ -491,13 +518,20 @@ struct HotkeyRequest {
 pub struct Hotkey {
     thread_id: u32,
     join: Option<thread::JoinHandle<()>>,
-    enabled: bool,
-    spec: crate::hotkey::Shortcut,
+    /// The last `(shortcut label, enabled)` pair the worker confirmed. This is a log of what was
+    /// *requested*, not a belief about what the OS holds: `configure` clears it whenever the reply is
+    /// an error or never arrives, so the worst it can do is cause one redundant re-send. It used to
+    /// be the assumed registration, and a request that timed out left it behind — after which
+    /// `set_enabled(false)` compared against the stale value and could skip the unregistration the
+    /// OS still needed, leaving a "disabled" hotkey globally grabbed.
+    requested: Option<(String, bool)>,
     sender: mpsc::Sender<HotkeyRequest>,
 }
 impl Hotkey {
     pub fn new(notify: Notify, enabled: bool, shortcut: &str) -> Result<Self, String> {
-        let spec = crate::hotkey::parse(shortcut)?;
+        // Parsed here so an unreadable shortcut saved in the database still fails startup where it
+        // used to, rather than only surfacing as a toast.
+        crate::hotkey::parse(shortcut)?;
         let (tx, rx) = mpsc::sync_channel(1);
         let (sender, receiver) = mpsc::channel::<HotkeyRequest>();
         let worker_notify = notify.clone();
@@ -562,8 +596,7 @@ impl Hotkey {
         let mut hotkey = Self {
             thread_id: rx.recv().map_err(|e| e.to_string())?,
             join: Some(join),
-            enabled: false,
-            spec,
+            requested: None,
             sender,
         };
         if let Err(error) = hotkey.configure(shortcut, enabled) {
@@ -585,17 +618,36 @@ impl Hotkey {
             PostThreadMessageW(self.thread_id, HOTKEY_CONTROL, WPARAM(0), LPARAM(0))
                 .map_err(|e| e.to_string())?;
         }
-        rx.recv_timeout(std::time::Duration::from_secs(2))
-            .map_err(|e| e.to_string())??;
-        self.spec = spec;
-        self.enabled = enabled;
-        Ok(())
-    }
-    pub fn set_enabled(&mut self, enabled: bool) {
-        if self.enabled != enabled {
-            let label = self.spec.label.clone();
-            let _ = self.configure(&label, enabled);
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Ok(())) => {
+                self.requested = Some((shortcut.to_string(), enabled));
+                Ok(())
+            }
+            // The worker kept the previous binding.
+            Ok(Err(text)) => {
+                self.requested = None;
+                Err(text)
+            }
+            Err(e) => {
+                // The request stays queued and is applied whenever the pump reaches it, so this side
+                // must not remember an answer it never got: clearing the log makes the next call
+                // re-send instead of assuming the old pair still holds.
+                self.requested = None;
+                Err(e.to_string())
+            }
         }
+    }
+    /// Re-applies `shortcut` unless the worker already confirmed exactly that pair. Called from the
+    /// protection tick, so the confirmed pair is what keeps it off the worker's queue every 500 ms.
+    pub fn set_enabled(&mut self, shortcut: &str, enabled: bool) {
+        if self
+            .requested
+            .as_ref()
+            .is_some_and(|(label, on)| label == shortcut && *on == enabled)
+        {
+            return;
+        }
+        let _ = self.configure(shortcut, enabled);
     }
 }
 impl Drop for Hotkey {
@@ -2061,6 +2113,27 @@ mod instance_tests {
         );
         drop(instance);
         assert!(Instance::acquire(dir.path()).unwrap().is_some());
+    }
+    /// The waiter thread is never re-armed — `listen` runs once per process — so this table is the
+    /// whole policy for the rest of the run. Everything that is not one of the two handles has to
+    /// come back and wait again.
+    #[test]
+    fn only_the_stop_handle_ends_the_summon_waiter() {
+        assert_eq!(classify_wait(WAIT_OBJECT_0), Wait::Stop);
+        assert_eq!(
+            classify_wait(WAIT_EVENT(WAIT_OBJECT_0.0 + 1)),
+            Wait::Summon,
+            "index 1 is the summon event"
+        );
+        for other in [
+            WAIT_EVENT(u32::MAX),    // WAIT_FAILED
+            WAIT_EVENT(0x0000_0102), // WAIT_TIMEOUT
+            WAIT_EVENT(0x0000_0080), // WAIT_ABANDONED_0
+            WAIT_EVENT(0x0000_0100), // WAIT_IO_COMPLETION
+            WAIT_EVENT(7),
+        ] {
+            assert_eq!(classify_wait(other), Wait::Retry, "{other:?}");
+        }
     }
 }
 #[cfg(test)]

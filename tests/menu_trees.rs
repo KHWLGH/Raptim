@@ -207,6 +207,10 @@ fn file_only_rows_go_grey_over_a_url() {
         );
     }
     assert!(labelled(&url, "打开").enabled);
+    assert!(
+        labelled(&url, "创建桌面快捷方式").enabled,
+        "网址要能落一个 .url 到桌面，这一行不是文件路径专属"
+    );
     for kind in [0, 4] {
         ctx.target = Some(MenuEntry { id: 7, kind });
         assert!(
@@ -219,6 +223,22 @@ fn file_only_rows_go_grey_over_a_url() {
         !labelled(&menus::tree(1, &ctx), "使用管理员打开").enabled,
         "打包应用不走 ShellExecute 的 runas"
     );
+}
+
+/// Six kinds, one row: `create_shortcut_in` writes `.lnk` for every path kind, `.url` for 网址 and
+/// an AppsFolder link for 应用标识, so nothing may grey this out. The launcher used to absolutise
+/// through a convert that only answers "no file path" for the last two kinds, so the row was
+/// enabled everywhere and worked for four of six.
+#[test]
+fn desktop_shortcut_row_survives_every_kind() {
+    for kind in 0..=5 {
+        let mut ctx = fixture();
+        ctx.target = Some(MenuEntry { id: 7, kind });
+        assert!(
+            labelled(&menus::tree(1, &ctx), "创建桌面快捷方式").enabled,
+            "kind {kind} 的「创建桌面快捷方式」被置灰了"
+        );
+    }
 }
 
 #[test]

@@ -93,6 +93,13 @@ pub fn convert_target(target: &Target, base: &Path, relative: bool) -> Result<Ta
     }
     Ok(out)
 }
+/// The target as the Shell should see it: path kinds resolved against the database directory,
+/// Url and App passed through because they have no path to resolve. `convert_target(_, _, false)`
+/// can only fail for those two kinds, so every caller that wanted "absolutise if there is a path"
+/// used to spell this out with an `unwrap_or_else` that swallowed the error.
+pub fn resolve_for_shell(target: &Target, base: &Path) -> Target {
+    convert_target(target, base, false).unwrap_or_else(|_| target.clone())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +121,39 @@ mod tests {
             )
             .unwrap(),
             r".\app.exe"
+        );
+    }
+    #[test]
+    fn shell_resolution_absolutises_paths_and_passes_the_rest_through() {
+        let base = Path::new("C:\\Portable\\Diascia");
+        for passthrough in [
+            Target::Url {
+                url: "https://example.com/A.png".into(),
+            },
+            Target::App {
+                aumid: "Example.App_1.0!Entry".into(),
+            },
+        ] {
+            assert_eq!(resolve_for_shell(&passthrough, base), passthrough);
+        }
+        assert_eq!(
+            resolve_for_shell(
+                &Target::Program {
+                    path: ".\\Tools\\app.exe".into(),
+                    arguments: "--flag".into(),
+                    working_dir: ".\\Tools".into(),
+                    elevated: false,
+                    show: Default::default(),
+                },
+                base
+            ),
+            Target::Program {
+                path: "C:\\Portable\\Diascia\\Tools\\app.exe".into(),
+                arguments: "--flag".into(),
+                working_dir: "C:\\Portable\\Diascia\\Tools".into(),
+                elevated: false,
+                show: Default::default(),
+            }
         );
     }
     #[test]
