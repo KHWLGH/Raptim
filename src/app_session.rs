@@ -1,6 +1,8 @@
-// Included in the application module: window lifecycle and browsing state.
+// Window lifecycle and browsing state helpers for `App`.
+use super::*;
+
 impl App {
-    fn restore_protected_edge(&mut self) {
+    pub(super) fn restore_protected_edge(&mut self) {
         // Re-checked here: this collapses the window onto the edge strip and raises it, which is
         // still a covering topmost. Returning before `take` keeps the resume snapshot for a later,
         // genuine release (Strict -> Fullscreen is a de-escalation but not a release).
@@ -18,9 +20,9 @@ impl App {
             return;
         };
         let Some(edge) = state.edge.and_then(|e| match e {
-            0 => Some(diascia::docking::Edge::Left),
-            1 => Some(diascia::docking::Edge::Right),
-            2 => Some(diascia::docking::Edge::Top),
+            0 => Some(raptim::docking::Edge::Left),
+            1 => Some(raptim::docking::Edge::Right),
+            2 => Some(raptim::docking::Edge::Top),
             _ => None,
         }) else {
             return;
@@ -28,32 +30,32 @@ impl App {
         self.dock = Some((edge, rect));
         self.dock_work = Some(work);
         self.edge_motion = None;
-        self.motion_frame = None;
         self.edge_hidden = true;
+        self.edge_hold.clear();
         self.protected_edge_waiting = true;
         self.edge_progress = 1.;
         self.focus_hide.reset();
         self.edge_since = Instant::now();
-        let strip = if self.settings.edge_strip_visible {
-            self.settings.edge_strip_width_px as i32
-        } else {
-            0
-        };
+        self.sync_dock_overhang();
+        let strip = self.edge_strip_px();
+        let pad = self.dock_overhang_for(edge);
         platform::move_clipped(
             self.main.window(),
-            diascia::docking::hidden_position(edge, rect, strip),
+            raptim::docking::hidden_hwnd_position(edge, rect, strip, pad),
             work,
         );
         platform::topmost(self.main.window(), true);
+        self.sync_edge_appearance();
         if let Err(e) = platform::show_without_activation(self.main.window()) {
             self.status(e);
             return;
         }
+        self.apply_theme();
         windowing::invalidate(self.main.window());
         self.schedule_interaction();
     }
 
-    fn install_editor_drop(&mut self, generation: u64) {
+    pub(super) fn install_editor_drop(&mut self, generation: u64) {
         let Some(session) = self.editor.as_ref().filter(|s| s.generation == generation) else {
             return;
         };
@@ -67,7 +69,7 @@ impl App {
         let result =
             platform::drop_target::Registration::new(session.window.window(), move |event| {
                 if let platform::drop_target::DropEvent::Data(
-                    diascia::importing::ExternalDrop::Files(paths),
+                    raptim::importing::ExternalDrop::Files(paths),
                     _,
                     _,
                 ) = event
@@ -87,7 +89,6 @@ impl App {
             match result {
                 Ok(registration) => {
                     session._drop = Some(registration);
-                    diascia::metrics::record("editor_drop_ready", generation as f64);
                 }
                 Err(error) => {
                     session.drop_failed = true;
@@ -98,7 +99,7 @@ impl App {
             }
         }
     }
-    fn initialize_native_state(&mut self) {
+    pub(super) fn initialize_native_state(&mut self) {
         // The first show can precede winit's resumed event. Do not convert saved
         // DIP sizes or register OLE until the native window and its DPI exist.
         if !self.main.window().is_visible() || platform::geometry(self.main.window()).is_none() {
@@ -109,15 +110,20 @@ impl App {
             if self.settings.edge_hide
                 && let Some((r, work)) = platform::geometry(self.main.window())
             {
-                self.dock = diascia::docking::dock(r, work, 0);
+                self.dock = raptim::docking::dock(r, work, 0);
                 self.dock_work = Some(work);
+                self.sync_dock_overhang();
+                if self.dock.is_some() && !self.edge_hidden {
+                    self.edge_hold
+                        .arm(Instant::now(), platform::app_has_focus());
+                }
             }
             self.position_restored = true;
         }
         self.install_external_drop();
     }
 
-    fn install_external_drop(&mut self) {
+    pub(super) fn install_external_drop(&mut self) {
         if self.external_drop.is_some() {
             return;
         }
@@ -144,29 +150,16 @@ impl App {
                 DropEvent::Leave => ui.set_drop_hover(false),
             });
         }) {
-            Ok(r) => {
-                self.external_drop = Some(r);
-                diascia::metrics::record("external_drop_ready", 0.);
-            }
+            Ok(r) => self.external_drop = Some(r),
             Err(e) => self.status(format!("外部拖入不可用：{e}")),
         }
     }
 
-    /// The dataset stamp every memory or timing reading has to be compared against. Emitted both
-    /// after a full reload and on the idle timer, because icons now land through `replace_icon`
-    /// and would otherwise leave a stale size recorded for the whole run.
-    fn record_dataset(&self) {
-        diascia::metrics::record("entry_count", self.entries.len() as f64);
-        diascia::metrics::record(
-            "entry_blob_bytes",
-            self.entries.iter().map(|e| e.icon.len()).sum::<usize>() as f64,
-        );
-    }
     /// A backfilled or refreshed icon replaces one blob in place, then asks the band sweep to
     /// re-decode just that row. The previous shape ran `save_entry` plus a full `refresh()` per
     /// reply, so a 300-row startup backfill re-read the whole library about twenty times right
     /// after the first paint.
-    fn replace_icon(&mut self, id: i64, icon: Vec<u8>) -> bool {
+    pub(super) fn replace_icon(&mut self, id: i64, icon: Vec<u8>) -> bool {
         let index = match self.icon_index.get(&id) {
             Some(key) if self.entries.get(key.index).is_some_and(|e| e.id == id) => key.index,
             _ => return false,
@@ -178,13 +171,12 @@ impl App {
         self.entries[index].icon = icon;
         // The sweep keys its cache on the blob's fingerprint, so it has to follow the new bytes.
         if let Some(key) = self.icon_index.get_mut(&id) {
-            key.fingerprint = diascia::icons::fingerprint(&self.entries[index].icon);
+            key.fingerprint = raptim::icons::fingerprint(&self.entries[index].icon);
         }
         self.icon_cache.remove(&id);
         true
     }
-    fn update_visible_icons(&mut self) {
-        let started = Instant::now();
+    pub(super) fn update_visible_icons(&mut self) {
         let mut visible = std::collections::HashSet::new();
         let mut bands = vec![(
             self.main.get_items(),
@@ -217,34 +209,23 @@ impl App {
                 }
             }
         }
-        let requested = Instant::now();
         for &id in &visible {
-            if let Some(&diascia::icons::IconKey { fingerprint, index }) = self.icon_index.get(&id)
-            {
+            if let Some(&raptim::icons::IconKey { fingerprint, index }) = self.icon_index.get(&id) {
                 self.icon_cache
                     .request(id, fingerprint, &self.entries[index].icon);
             }
         }
-        diascia::metrics::record(
-            "icon_request_us",
-            requested.elapsed().as_micros().min(u16::MAX as u128) as f64,
-        );
         let changed: std::collections::HashSet<_> = self
             .icon_cache
             .drain(&self.icon_index, &visible)
             .into_iter()
             .collect();
         if visible == self.visible_icons && changed.is_empty() {
-            diascia::metrics::record(
-                "scroll_step_us",
-                started.elapsed().as_micros().min(u16::MAX as u128) as f64,
-            );
             return;
         }
         // Rows hold their icon reference until they leave the band, so the sweep covers the
         // previous band too.
         let previous = std::mem::take(&mut self.icon_bands);
-        let mut swept = 0u32;
         for (index, (model, ids, start, end)) in bands.iter().enumerate() {
             // A band with no history means its model was just rebuilt: `display_item` ran before
             // `visible_icons` was cleared, so those rows carry icons from the old band and every
@@ -271,26 +252,20 @@ impl App {
                         item.drag_icon = drag;
                         model.set_row_data(i, item);
                     }
-                    swept += 1;
                 }
             }
             self.icon_bands.push((*start, *end));
         }
-        diascia::metrics::record("sweep_rows", f64::from(swept));
-        diascia::metrics::record(
-            "scroll_step_us",
-            started.elapsed().as_micros().min(u16::MAX as u128) as f64,
-        );
         self.visible_icons = visible;
     }
-    fn schedule_interaction(&self) {
+    pub(super) fn schedule_interaction(&self) {
         self.interaction_timer.stop();
         let edge_animation = self.main.window().is_visible() && self.edge_motion.is_some();
         self.frame_clock.set_active(edge_animation);
         if edge_animation {
             return;
         }
-        let Some(delay) = diascia::session::interaction_interval(
+        let Some(delay) = raptim::session::interaction_interval(
             self.main.window().is_visible(),
             // The focus fade only runs in the undocked branch of tick_window, so a docked
             // launcher must not ask for the animation rate just because it lacks focus.
@@ -312,7 +287,6 @@ impl App {
             .start(slint::TimerMode::SingleShot, delay, move || {
                 if let Some(app) = weak.upgrade() {
                     let mut app = app.borrow_mut();
-                    diascia::metrics::record("interaction_tick", 1.);
                     if !app.collapsed_probe() {
                         app.tick_window(true);
                     }
@@ -320,12 +294,12 @@ impl App {
                 }
             });
     }
-    fn focus_hide_active(&self) -> bool {
+    pub(super) fn focus_hide_active(&self) -> bool {
         self.settings.hide_on_focus_loss
             && !platform::app_has_focus()
             && !self.auto_hide_guard().paused()
     }
-    fn save_window(&mut self, force: bool) {
+    pub(super) fn save_window(&mut self, force: bool) {
         if (!force && (self.drag.is_some() || self.edge_motion.is_some()))
             || !self.main.window().is_visible()
         {
@@ -336,7 +310,7 @@ impl App {
         };
         let rect = self.dock.map_or(actual, |(_, r)| r);
         let scale = self.main.window().scale_factor();
-        let candidate = diascia::session::WindowState {
+        let candidate = raptim::session::WindowState {
             always_on_top: self.saved_window.always_on_top,
             x: rect.x,
             y: rect.y,
@@ -344,9 +318,9 @@ impl App {
             height: rect.height as f32 / scale,
             monitor: platform::monitor_name(self.main.window()),
             edge: self.dock.map(|(e, _)| match e {
-                diascia::docking::Edge::Left => 0,
-                diascia::docking::Edge::Right => 1,
-                diascia::docking::Edge::Top => 2,
+                raptim::docking::Edge::Left => 0,
+                raptim::docking::Edge::Right => 1,
+                raptim::docking::Edge::Top => 2,
             }),
             group: self.group,
             category: self.collection,
@@ -379,7 +353,7 @@ impl App {
             }
         }
     }
-    fn remember_view(&mut self) {
+    pub(super) fn remember_view(&mut self) {
         let focus = self.main.get_selected_id();
         let index = self
             .main
@@ -394,7 +368,7 @@ impl App {
             .group_categories
             .insert(self.group, self.collection);
     }
-    fn restore_view(&self) {
+    pub(super) fn restore_view(&self) {
         let (scroll, focus, index) = self
             .browsing
             .views
@@ -414,7 +388,7 @@ impl App {
         };
         self.main.set_selected_id(id);
     }
-    fn displayed_ids(&self) -> Vec<i64> {
+    pub(super) fn displayed_ids(&self) -> Vec<i64> {
         let model = if self.main.get_search_open() {
             self.main.get_results()
         } else {
@@ -422,11 +396,11 @@ impl App {
         };
         model.iter().map(|e| i64::from(e.id)).collect()
     }
-    fn clear_batch(&mut self) {
+    pub(super) fn clear_batch(&mut self) {
         self.reset_batch_selection();
         self.main.set_batch_mode(false);
     }
-    fn reset_batch_selection(&mut self) {
+    pub(super) fn reset_batch_selection(&mut self) {
         // Every search keystroke arrives here. With nothing selected there is no row left to
         // un-check, and walking both models cloned every row of both just to re-derive the two
         // counters that are set a few lines below anyway.
@@ -441,7 +415,7 @@ impl App {
             self.update_selection();
         }
     }
-    fn update_selection(&self) {
+    pub(super) fn update_selection(&self) {
         for model in [self.main.get_items(), self.main.get_results()] {
             for i in 0..model.row_count() {
                 if let Some(mut item) = model.row_data(i) {
@@ -460,17 +434,20 @@ impl App {
             !ids.is_empty() && ids.iter().all(|id| self.browsing.selected.contains(id)),
         );
     }
-    fn batch_tree(&self) {
+    fn build_destination_nodes(
+        &self,
+        expanded: &std::collections::HashSet<i64>,
+    ) -> Vec<DestinationNode> {
         let mut nodes = Vec::new();
         for group in self.collections.iter().filter(|c| c.parent_id.is_none()) {
-            let expanded = self.batch_expanded.contains(&group.id);
+            let is_expanded = expanded.contains(&group.id);
             nodes.push(DestinationNode {
                 id: group.id as i32,
                 parent: 0,
                 name: group.name.clone().into(),
-                expanded,
+                expanded: is_expanded,
             });
-            if expanded {
+            if is_expanded {
                 nodes.extend(
                     self.collections
                         .iter()
@@ -484,39 +461,16 @@ impl App {
                 );
             }
         }
+        nodes
+    }
+    fn batch_tree(&self) {
+        let nodes = self.build_destination_nodes(&self.batch_expanded);
         self.main
             .set_batch_nodes(Rc::new(VecModel::from(nodes)).into());
     }
     /// The same group/category tree the organizer uses, driven by the editor's own expansion set.
     fn collection_tree(&mut self) {
-        let nodes: Vec<DestinationNode> = self
-            .collections
-            .iter()
-            .filter(|c| c.parent_id.is_none())
-            .flat_map(|group| {
-                let expanded = self.editor_expanded.contains(&group.id);
-                let mut row = vec![DestinationNode {
-                    id: group.id as i32,
-                    parent: 0,
-                    name: group.name.clone().into(),
-                    expanded,
-                }];
-                if expanded {
-                    row.extend(
-                        self.collections
-                            .iter()
-                            .filter(|c| c.parent_id == Some(group.id))
-                            .map(|c| DestinationNode {
-                                id: c.id as i32,
-                                parent: group.id as i32,
-                                name: c.name.clone().into(),
-                                expanded: false,
-                            }),
-                    );
-                }
-                row
-            })
-            .collect();
+        let nodes = self.build_destination_nodes(&self.editor_expanded);
         let count = nodes.len() as i32;
         let editor = match self.editor.as_ref() {
             Some(session) => session.window.clone_strong(),
@@ -525,7 +479,7 @@ impl App {
         editor.set_collection_nodes(Rc::new(VecModel::from(nodes)).into());
         editor.set_collection_cursor(editor.get_collection_cursor().clamp(0, (count - 1).max(0)));
     }
-    fn pick_collection(&mut self) {
+    pub(super) fn pick_collection(&mut self) {
         let current = self.collections.iter().find(|c| {
             c.id == i64::from(
                 self.editor
@@ -545,8 +499,19 @@ impl App {
             session.window.set_collection_open(true);
         }
         self.collection_tree();
+        if let Some(session) = self.editor.as_ref() {
+            let selected = session.window.get_collection_id();
+            let index = session
+                .window
+                .get_collection_nodes()
+                .iter()
+                .position(|n| n.id == selected)
+                .unwrap_or(0) as i32;
+            session.window.set_collection_cursor(index);
+            session.window.invoke_focus_collection_tree();
+        }
     }
-    fn collection_node(&mut self, id: i32) {
+    pub(super) fn collection_node(&mut self, id: i32) {
         let Some(session) = self.editor.as_ref() else {
             return;
         };
@@ -556,9 +521,7 @@ impl App {
             return;
         };
         if collection.parent_id.is_none() {
-            if self.editor_expanded.contains(&id) {
-                self.editor_expanded.remove(&id);
-            } else {
+            if !self.editor_expanded.remove(&id) {
                 self.editor_expanded.insert(id);
             }
             self.collection_tree();
@@ -569,41 +532,26 @@ impl App {
         window.set_collection_open(false);
         window.invoke_focus_name();
     }
-    fn collection_key(&mut self, direction: i32) {
+    pub(super) fn collection_key(&mut self, direction: i32) {
         let Some(session) = self.editor.as_ref() else {
             return;
         };
         let window = session.window.clone_strong();
         let nodes = window.get_collection_nodes();
-        let index = window.get_collection_cursor().max(0) as usize;
-        let Some(node) = nodes.row_data(index) else {
+        let Some(step) = step_destination_tree(&nodes, window.get_collection_cursor(), direction)
+        else {
             return;
         };
-        match direction {
-            -1 | 1 => {
-                let last = i32::try_from(nodes.row_count())
-                    .unwrap_or(1)
-                    .saturating_sub(1);
-                let next = (window.get_collection_cursor() + direction).clamp(0, last);
-                window.set_collection_cursor(next);
-                if let Some(row) = nodes.row_data(next as usize) {
-                    self.collection_node(row.id);
-                }
+        match step {
+            TreeKeyStep::Cursor { next, .. } => window.set_collection_cursor(next),
+            TreeKeyStep::ToggleGroup(id) | TreeKeyStep::ActivateLeaf(id) => {
+                self.collection_node(id);
             }
-            2 if node.parent == 0 => self.collection_node(node.id),
-            -2 if node.parent != 0 => {
-                if let Some(parent) = nodes.iter().position(|n| n.id == node.parent) {
-                    window.set_collection_cursor(parent as i32);
-                }
-            }
-            -2 if node.parent == 0 => self.collection_node(node.id),
-            0 => self.collection_node(node.id),
-            _ => {}
         }
     }
     /// Filtered list handed to the picker. Filtering stays here so the view only renders the
     /// result rather than testing every installed app on each keystroke.
-    fn refresh_app_list(&mut self) {
+    pub(super) fn refresh_app_list(&mut self) {
         if self.installed_apps.is_empty() {
             self.installed_apps = platform::installed_apps();
         }
@@ -628,7 +576,7 @@ impl App {
             .window
             .set_picker_shown(Rc::new(VecModel::from(shown)).into());
     }
-    fn open_app_picker(&mut self) {
+    pub(super) fn open_app_picker(&mut self) {
         if !self.allowed(ShowSource::Editor) {
             return;
         }
@@ -645,7 +593,7 @@ impl App {
         session.window.set_picker_open(true);
         session.window.invoke_focus_picker_filter();
     }
-    fn close_app_picker(&mut self) {
+    pub(super) fn close_app_picker(&mut self) {
         let Some(session) = &self.editor else {
             return;
         };
@@ -661,7 +609,7 @@ impl App {
             platform::focus(session.window.window());
         }
     }
-    fn choose_app(&mut self, aumid: String, name: String) {
+    pub(super) fn choose_app(&mut self, aumid: String, name: String) {
         self.close_app_picker();
         let Some(session) = &self.editor else {
             return;
@@ -676,7 +624,7 @@ impl App {
             self.extract_editor_icon();
         }
     }
-    fn batch_target(&mut self, action: i32) {
+    pub(super) fn batch_target(&mut self, action: i32) {
         if self.browsing.selected.is_empty() || !self.main.get_batch_mode() {
             return;
         }
@@ -697,7 +645,7 @@ impl App {
         self.main.set_batch_target_open(true);
         self.main.invoke_focus_batch_tree();
     }
-    fn batch_node(&mut self, id: i32) {
+    pub(super) fn batch_node(&mut self, id: i32) {
         let Some(node) = self.collections.iter().find(|n| n.id == i64::from(id)) else {
             return;
         };
@@ -720,44 +668,27 @@ impl App {
                 .unwrap_or(0) as i32,
         );
     }
-    fn batch_tree_key(&mut self, direction: i32) {
+    pub(super) fn batch_tree_key(&mut self, direction: i32) {
         let nodes = self.main.get_batch_nodes();
-        let index = self.main.get_batch_tree_index();
-        let Some(node) = nodes.row_data(index.max(0) as usize) else {
+        let Some(step) = step_destination_tree(&nodes, self.main.get_batch_tree_index(), direction)
+        else {
             return;
         };
-        match direction {
-            -1 | 1 => {
-                let next = (index + direction).clamp(0, nodes.row_count().saturating_sub(1) as i32);
+        match step {
+            TreeKeyStep::Cursor { next, row_id, leaf } => {
                 self.main.set_batch_tree_index(next);
-                if let Some(n) = nodes.row_data(next as usize)
-                    && n.parent != 0
-                {
-                    self.batch_node(n.id);
+                if leaf && matches!(direction, -1 | 1 | 2) {
+                    self.batch_node(row_id);
                 }
             }
-            2 if node.parent == 0 => {
-                if node.expanded {
-                    self.batch_tree_key(1);
-                } else {
-                    self.batch_node(node.id);
-                }
+            TreeKeyStep::ToggleGroup(id) => self.batch_node(id),
+            TreeKeyStep::ActivateLeaf(id) => {
+                self.batch_node(id);
+                self.batch_action(self.main.get_batch_action(), id);
             }
-            -2 if node.parent != 0 => {
-                self.main.set_batch_tree_index(
-                    nodes.iter().position(|n| n.id == node.parent).unwrap_or(0) as i32,
-                );
-            }
-            -2 if node.expanded => self.batch_node(node.id),
-            0 if node.parent == 0 => self.batch_node(node.id),
-            0 => {
-                self.batch_node(node.id);
-                self.batch_action(self.main.get_batch_action(), node.id);
-            }
-            _ => {}
         }
     }
-    fn batch_action(&mut self, action: i32, destination: i32) {
+    pub(super) fn batch_action(&mut self, action: i32, destination: i32) {
         if !self.main.get_batch_mode()
             || self.browsing.selected.is_empty()
             || !(0..=2).contains(&action)
@@ -789,5 +720,53 @@ impl App {
             }
             Err(e) => self.main.set_batch_error(e.to_string().into()),
         }
+    }
+}
+
+enum TreeKeyStep {
+    Cursor { next: i32, row_id: i32, leaf: bool },
+    ToggleGroup(i32),
+    ActivateLeaf(i32),
+}
+
+fn step_destination_tree(
+    nodes: &ModelRc<DestinationNode>,
+    cursor: i32,
+    direction: i32,
+) -> Option<TreeKeyStep> {
+    let index = cursor.max(0) as usize;
+    let node = nodes.row_data(index)?;
+    let last = i32::try_from(nodes.row_count())
+        .unwrap_or(1)
+        .saturating_sub(1);
+    match direction {
+        -1 | 1 => {
+            let next = (cursor + direction).clamp(0, last);
+            let target = nodes.row_data(next as usize)?;
+            Some(TreeKeyStep::Cursor {
+                next,
+                row_id: target.id,
+                leaf: target.parent != 0,
+            })
+        }
+        2 if node.parent == 0 => {
+            if node.expanded {
+                step_destination_tree(nodes, index as i32, 1)
+            } else {
+                Some(TreeKeyStep::ToggleGroup(node.id))
+            }
+        }
+        -2 if node.parent != 0 => nodes
+            .iter()
+            .position(|n| n.id == node.parent)
+            .map(|parent| TreeKeyStep::Cursor {
+                next: parent as i32,
+                row_id: node.parent,
+                leaf: false,
+            }),
+        -2 if node.expanded => Some(TreeKeyStep::ToggleGroup(node.id)),
+        0 if node.parent == 0 => Some(TreeKeyStep::ToggleGroup(node.id)),
+        0 => Some(TreeKeyStep::ActivateLeaf(node.id)),
+        _ => None,
     }
 }

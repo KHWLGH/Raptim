@@ -15,5 +15,6 @@ pub mod search;
 pub mod storage;
 pub mod windowing;
 
-pub mod metrics;
 pub mod session;
+
+slint::include_modules!();

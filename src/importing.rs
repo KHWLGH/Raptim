@@ -31,10 +31,17 @@ pub fn file_entries(paths: Vec<(PathBuf, i64)>) -> Result<Vec<Entry>> {
                         elevated: false,
                         show: ShowMode::default(),
                     },
-                    "lnk" | "url" => Target::Shortcut {
+                    "url" => match crate::platform::resolve_url_file(&path) {
+                        Some(url) => Target::Url { url },
+                        None => Target::Shortcut {
+                            path: value,
+                            show: ShowMode::default(),
+                        },
+                    },
+                    "lnk" => crate::platform::resolve_lnk_file(&path).unwrap_or(Target::Shortcut {
                         path: value,
                         show: ShowMode::default(),
-                    },
+                    }),
                     _ => Target::File { path: value },
                 }
             };
@@ -84,6 +91,33 @@ mod tests {
         );
         assert!(entries.iter().all(|e| e.collection_id == 7));
         assert!(file_entries(vec![(dir.path().join("missing"), 7)]).is_err());
+
+        let resolved_url = dir.path().join("bookmark.url");
+        std::fs::write(
+            &resolved_url,
+            "[InternetShortcut]\r\nURL=https://example.com\r\n",
+        )
+        .unwrap();
+        let resolved_lnk = crate::platform::create_shortcut_in(
+            dir.path(),
+            "工具",
+            &Target::Program {
+                path: "C:\\Windows\\System32\\notepad.exe".into(),
+                arguments: "--help".into(),
+                working_dir: "C:\\Windows".into(),
+                elevated: false,
+                show: ShowMode::Normal,
+            },
+        )
+        .unwrap();
+        let resolved = file_entries(vec![(resolved_url, 7), (resolved_lnk, 7)]).unwrap();
+        assert_eq!(resolved[0].target.kind_index(), 3);
+        assert_eq!(resolved[0].target.value(), "https://example.com");
+        assert_eq!(resolved[1].target.kind_index(), 0);
+        assert_eq!(
+            resolved[1].target.value(),
+            "C:\\Windows\\System32\\notepad.exe"
+        );
     }
 }
 

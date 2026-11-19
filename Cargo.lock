@@ -1022,31 +1022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diascia"
-version = "0.0.0"
-dependencies = [
- "arboard",
- "base64",
- "i-slint-core",
- "image",
- "pinyin",
- "png",
- "raw-window-handle",
- "rfd",
- "rusqlite",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "tempfile",
- "thiserror 2.0.20",
- "tray-icon",
- "url",
- "windows",
- "windows-core",
-]
-
-[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3991,6 +3966,30 @@ name = "range-alloc"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca45419789ae5a7899559e9512e58ca889e41f04f1f2445e9f4b290ceccd1d08"
+
+[[package]]
+name = "raptim"
+version = "0.0.0"
+dependencies = [
+ "arboard",
+ "base64",
+ "i-slint-core",
+ "image",
+ "pinyin",
+ "raw-window-handle",
+ "rfd",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tray-icon",
+ "url",
+ "windows",
+ "windows-core",
+]
 
 [[package]]
 name = "raw-window-handle"

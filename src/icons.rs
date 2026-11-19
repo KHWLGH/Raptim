@@ -212,7 +212,6 @@ impl Cache {
             };
             self.remove(&id);
         }
-        crate::metrics::record("icon_cache_bytes", self.bytes as f64);
         changed
     }
 }

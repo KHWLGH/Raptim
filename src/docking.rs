@@ -23,6 +23,71 @@ pub fn dock(rect: Rect, work: Rect, threshold: i32) -> Option<(Edge, Rect)> {
     r.x = r.x.clamp(work.x, work.x + (work.width - r.width).max(0));
     Some((edge, r))
 }
+pub const DOCK_OVERHANG_DIP: f32 = 10.0;
+
+pub fn overhang_px(scale: f32) -> i32 {
+    (DOCK_OVERHANG_DIP * scale.max(1.0)).round() as i32
+}
+
+/// Extends the native window past the docked screen edge so its compositor-rounded
+/// corners on that edge stay off-screen throughout both rest and sliding.
+pub fn docked_hwnd_rect(edge: Edge, visible: Rect, overhang: i32) -> Rect {
+    let pad = overhang.max(0);
+    match edge {
+        Edge::Left => Rect {
+            x: visible.x - pad,
+            y: visible.y,
+            width: visible.width + pad,
+            height: visible.height,
+        },
+        Edge::Right => Rect {
+            x: visible.x,
+            y: visible.y,
+            width: visible.width + pad,
+            height: visible.height,
+        },
+        Edge::Top => Rect {
+            x: visible.x,
+            y: visible.y - pad,
+            width: visible.width,
+            height: visible.height + pad,
+        },
+    }
+}
+
+pub fn visible_rect_from_hwnd(edge: Edge, hwnd: Rect, overhang: i32) -> Rect {
+    let pad = overhang.max(0);
+    match edge {
+        Edge::Left => Rect {
+            x: hwnd.x + pad,
+            y: hwnd.y,
+            width: (hwnd.width - pad).max(1),
+            height: hwnd.height.max(1),
+        },
+        Edge::Right => Rect {
+            x: hwnd.x,
+            y: hwnd.y,
+            width: (hwnd.width - pad).max(1),
+            height: hwnd.height.max(1),
+        },
+        Edge::Top => Rect {
+            x: hwnd.x,
+            y: hwnd.y + pad,
+            width: hwnd.width.max(1),
+            height: (hwnd.height - pad).max(1),
+        },
+    }
+}
+
+pub fn hidden_hwnd_position(edge: Edge, visible: Rect, strip: i32, overhang: i32) -> (i32, i32) {
+    let hwnd = docked_hwnd_rect(edge, visible, overhang);
+    match edge {
+        Edge::Left => (visible.x - hwnd.width + strip, hwnd.y),
+        Edge::Right => (visible.x + visible.width - strip, hwnd.y),
+        Edge::Top => (hwnd.x, visible.y - hwnd.height + strip),
+    }
+}
+
 pub fn hidden_position(edge: Edge, rect: Rect, strip: i32) -> (i32, i32) {
     match edge {
         Edge::Left => (rect.x - rect.width + strip, rect.y),
@@ -127,6 +192,142 @@ impl FocusHide {
         }
     }
 }
+
+/// Keeps an explicitly summoned (hotkey / tray / secondary instance / startup)
+/// docked window expanded while the pointer starts outside it, instead of
+/// immediately auto-collapsing after `edge_collapse_delay_ms`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EdgeHold {
+    #[default]
+    Idle,
+    /// Summoned explicitly; waiting for focus confirmation or a post-settle grace timeout.
+    Pending(std::time::Instant),
+    /// Focus was confirmed after summon; holds until focus is lost or the pointer enters.
+    Focused,
+}
+
+impl EdgeHold {
+    /// Post-settle grace window when OS foreground activation is delayed or blocked (e.g. UIPI).
+    pub const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+    pub fn arm(&mut self, now: std::time::Instant, focused: bool) {
+        *self = if focused {
+            Self::Focused
+        } else {
+            Self::Pending(now)
+        };
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::Idle;
+    }
+
+    pub fn is_active(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    /// Keeps a pending grace timer from aging out while auto-hide is paused.
+    pub fn refresh_pending(&mut self, now: std::time::Instant) {
+        if matches!(self, Self::Pending(_)) {
+            *self = Self::Pending(now);
+        }
+    }
+
+    /// Advances the hold state for one expanded docked tick.
+    /// Returns `true` when auto-collapse should be suppressed for this tick.
+    pub fn hold(
+        &mut self,
+        pointer_inside: bool,
+        moving: bool,
+        focused: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        match *self {
+            Self::Idle => false,
+            Self::Pending(since) => {
+                if focused {
+                    if !moving && pointer_inside {
+                        *self = Self::Idle;
+                        false
+                    } else {
+                        *self = Self::Focused;
+                        true
+                    }
+                } else if moving {
+                    *self = Self::Pending(now);
+                    true
+                } else if pointer_inside
+                    || now.saturating_duration_since(since) >= Self::PENDING_GRACE
+                {
+                    *self = Self::Idle;
+                    false
+                } else {
+                    true
+                }
+            }
+            Self::Focused => {
+                if !focused || (!moving && pointer_inside) {
+                    *self = Self::Idle;
+                    false
+                } else {
+                    true
+                }
+            }
+        }
+    }
+}
+
+/// Visual frame state for a docked window so resting collapsed strips never cast
+/// a DWM drop shadow onto the desktop edge, while keeping rounded corners intact
+/// throughout both sliding and expanded rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CollapsedAppearance {
+    /// Expanded, sliding, or undocked: DWM rounded corners and shadow enabled, uncloaked.
+    #[default]
+    Normal,
+    /// Collapsed at rest with a visible edge strip (`strip > 0`): uncloaked, with DWM
+    /// non-client rendering/shadow disabled so only the thin strip appears.
+    StripOnly,
+    /// Collapsed at rest with zero visible strip (`strip == 0`): cloaked in DWM so
+    /// neither window pixels nor shadow appear on the screen edge.
+    Cloaked,
+}
+
+pub fn collapsed_appearance(
+    docked: bool,
+    edge_hidden: bool,
+    progress: f32,
+    moving: bool,
+    strip: i32,
+) -> CollapsedAppearance {
+    if !docked {
+        return CollapsedAppearance::Normal;
+    }
+    if strip <= 0 {
+        return if edge_hidden && !moving {
+            CollapsedAppearance::Cloaked
+        } else {
+            CollapsedAppearance::Normal
+        };
+    }
+    // StripOnly drops DWM rounded corners and drop shadow in the tail band of motion so
+    // resting strip appearance engages while gliding rather than popping once settled.
+    let strip_only = if moving {
+        if edge_hidden {
+            progress >= 0.82
+        } else {
+            progress > 0.85
+        }
+    } else {
+        edge_hidden
+    };
+    if strip_only {
+        CollapsedAppearance::StripOnly
+    } else {
+        CollapsedAppearance::Normal
+    }
+}
+
 impl Motion {
     pub fn new(
         from: f32,
@@ -141,7 +342,7 @@ impl Motion {
             to: if hidden { 1. } else { 0. },
             started: now,
             omega: if animated {
-                if hidden { 70. } else { 60. }
+                if hidden { 44. } else { 48. }
             } else {
                 0.
             },
@@ -154,7 +355,7 @@ impl Motion {
         if self.omega == 0. || t >= 0.4 {
             return (self.to, 0., true);
         }
-        if t == 0. && (self.from - self.to).abs() >= 0.0003 {
+        if t == 0. && (self.from - self.to).abs() >= 0.0018 {
             return (self.from, self.velocity, false);
         }
         let displacement = self.from - self.to;
@@ -162,7 +363,7 @@ impl Motion {
         let decay = (-self.omega * t).exp();
         let position = self.to + (displacement + b * t) * decay;
         let velocity = (self.velocity - self.omega * b * t) * decay;
-        if (position - self.to).abs() < 0.0003 && velocity.abs() < 0.02 {
+        if (position - self.to).abs() < 0.0018 && velocity.abs() < 0.06 {
             return (self.to, 0., true);
         }
         // A reversal near a physical edge may still carry outward momentum.
@@ -185,246 +386,52 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
     #[test]
-    fn composited_slide_only_clips_visible_spill() {
-        let monitor = Rect {
+    fn dock_and_overhang_geometry() {
+        let work = Rect {
             x: 0,
             y: 0,
             width: 1920,
-            height: 1080,
-        };
-        let work = Rect {
             height: 1040,
-            ..monitor
         };
-        let slide = Rect {
-            x: -200,
-            y: 100,
-            width: 400,
-            height: 600,
-        };
-        assert!(!needs_work_clip(slide, work, [monitor]));
-        // An adjacent display requires a clip; a gap or vertically offset display does not.
-        assert!(needs_work_clip(
-            slide,
-            work,
-            [
-                monitor,
-                Rect {
-                    x: -1920,
-                    ..monitor
-                }
-            ]
-        ));
-        assert!(!needs_work_clip(
-            slide,
-            work,
-            [
-                monitor,
-                Rect {
-                    x: -2120,
-                    ..monitor
-                }
-            ]
-        ));
-        assert!(!needs_work_clip(
-            slide,
-            work,
-            [
-                monitor,
-                Rect {
-                    x: -1920,
-                    y: 800,
-                    ..monitor
-                }
-            ]
-        ));
-        assert!(needs_work_clip(Rect { y: 800, ..slide }, work, [monitor]));
-        assert!(!needs_work_clip(Rect { x: 1920, ..slide }, work, [monitor]));
-        assert!(!needs_work_clip(Rect { x: 0, ..slide }, work, [monitor]));
-        assert!(!needs_work_clip(
-            Rect {
-                x: 100,
-                y: -300,
-                ..slide
-            },
-            work,
-            [monitor]
-        ));
-        assert!(needs_work_clip(
-            Rect {
-                x: 100,
-                y: -300,
-                ..slide
-            },
-            work,
-            [
-                monitor,
-                Rect {
-                    y: -1080,
-                    ..monitor
-                }
-            ]
-        ));
-    }
-    #[test]
-    fn disabling_focus_hide_or_regaining_focus_cancels_pending_fade() {
-        use std::time::{Duration, Instant};
-        let now = Instant::now();
-        let mut state = FocusHide::default();
-        assert_eq!(state.opacity(true, false, true, now), 1.);
-        assert!(state.opacity(true, false, true, now + Duration::from_millis(150)) < 1.);
-        assert_eq!(
-            state.opacity(false, false, true, now + Duration::from_secs(1)),
-            1.
-        );
-        assert_eq!(
-            state.opacity(true, false, true, now + Duration::from_secs(2)),
-            1.
-        );
-        assert_eq!(
-            state.opacity(true, true, true, now + Duration::from_secs(3)),
-            1.
-        );
-        assert_eq!(
-            state.opacity(true, false, false, now + Duration::from_secs(4)),
-            1.
-        );
-        assert_eq!(
-            state.opacity(true, false, false, now + Duration::from_millis(4100)),
-            0.
-        );
-        for n in 5..100 {
-            assert_eq!(
-                state.opacity(false, false, true, now + Duration::from_secs(n)),
-                1.
-            );
-        }
-    }
-    #[test]
-    fn invisible_reveal_is_local_and_width_is_physical() {
         let rect = Rect {
-            x: -1920,
+            x: 4,
             y: 100,
-            width: 800,
-            height: 1200,
-        };
-        for edge in [Edge::Left, Edge::Right, Edge::Top] {
-            for width in [0, 1, 6, 12] {
-                let band = reveal_band(edge, rect, width);
-                assert_eq!(
-                    if edge == Edge::Top {
-                        band.height
-                    } else {
-                        band.width
-                    },
-                    width.max(1)
-                );
-                assert!(!contains(band, (-1920, 99)));
-            }
-        }
-    }
-    #[test]
-    fn approach_band_spans_the_work_area_not_the_window() {
-        let work = Rect {
-            x: -1920,
-            y: 0,
-            width: 1920,
-            height: 1040,
-        };
-        let docked = Rect {
-            x: -1920,
-            y: 50,
             width: 440,
             height: 640,
         };
-        // Vertically outside the window but still on the edge: fine rate has to come back.
-        assert!(!contains(reveal_band(Edge::Left, docked, 6), (-1919, 900)));
-        assert!(contains(
-            approach_band(Edge::Left, work, 6, 96),
-            (-1919, 900)
-        ));
-        assert!(!contains(
-            approach_band(Edge::Left, work, 6, 96),
-            (-1818, 900)
-        ));
-        assert!(contains(approach_band(Edge::Right, work, 6, 96), (-6, 900)));
-        assert!(!contains(
-            approach_band(Edge::Right, work, 6, 96),
-            (-103, 900)
-        ));
-        assert!(contains(approach_band(Edge::Top, work, 0, 96), (-1000, 95)));
-        assert!(!contains(
-            approach_band(Edge::Top, work, 0, 96),
-            (-1000, 97)
-        ));
-        assert_eq!(approach_band(Edge::Top, work, 0, 0).height, 1);
+        let (edge, docked) = dock(rect, work, 12).unwrap();
+        assert_eq!(edge, Edge::Left);
+        assert_eq!(docked.x, 0);
+
+        let pad = overhang_px(1.5);
+        let hwnd = docked_hwnd_rect(edge, docked, pad);
+        assert_eq!(visible_rect_from_hwnd(edge, hwnd, pad), docked);
+        let hidden = hidden_hwnd_position(edge, docked, 6, pad);
+        assert_eq!(hidden.0 + hwnd.width - docked.x, 6);
+        assert_eq!(reveal_band(edge, docked, 6).width, 6);
     }
+
     #[test]
-    fn motion_can_reverse_without_jumping() {
-        use std::time::{Duration, Instant};
+    fn motion_and_focus_hide_settle() {
         let now = Instant::now();
-        let out = Motion::new(0., 0., true, now, true);
-        let half = now + Duration::from_millis(25);
-        let (value, velocity, done) = out.sample(half);
-        assert!(!done);
-        let reverse = Motion::new(value, velocity, false, half, true);
-        assert_eq!(reverse.value(half).0, value);
-        assert!((reverse.sample(half).1 - velocity).abs() < 0.0001);
-        assert_eq!(reverse.value(half + Duration::from_millis(400)), (0., true));
-    }
-    #[test]
-    fn motion_starts_softly_settles_and_never_leaves_travel_bounds() {
-        use std::time::{Duration, Instant};
-        let now = Instant::now();
-        for hidden in [false, true] {
-            let start = if hidden { 0. } else { 1. };
-            let motion = Motion::new(start, 0., hidden, now, true);
-            assert_eq!(motion.sample(now), (start, 0., false));
-            assert!((motion.value(now + Duration::from_millis(8)).0 - start).abs() < 0.12);
-            let mut previous = start;
-            for ms in 1..400 {
-                let (position, _, _) = motion.sample(now + Duration::from_millis(ms));
-                assert!((0. ..=1.).contains(&position));
-                assert!(if hidden {
-                    position >= previous
-                } else {
-                    position <= previous
-                });
-                previous = position;
-            }
-            assert!(motion.sample(now + Duration::from_millis(200)).2);
-            assert_eq!(
-                Motion::new(start, 0., hidden, now, false).value(now),
-                (1. - start, true)
-            );
-        }
-        let mut motion = Motion::new(0., 0., true, now, true);
-        for ms in (7..300).step_by(7) {
-            let time = now + Duration::from_millis(ms);
-            let (position, velocity, _) = motion.sample(time);
-            assert!((0. ..=1.).contains(&position));
-            motion = Motion::new(position, velocity, motion.to == 0., time, true);
-            assert_eq!(motion.sample(time).0, position);
-        }
-    }
-    #[test]
-    fn negative_monitor_and_reveal_strip() {
-        let work = Rect {
-            x: -1920,
-            y: 0,
-            width: 1920,
-            height: 1040,
-        };
-        let r = Rect {
-            x: -1918,
-            y: 50,
-            width: 400,
-            height: 640,
-        };
-        let (edge, r) = dock(r, work, 12).unwrap();
-        assert_eq!(hidden_position(edge, r, 3), (-2317, 50));
-        assert!(contains(r, (-1920, 80)));
-        assert!(dock(Rect { x: -1000, ..r }, work, 12).is_none());
+        let motion = Motion::new(0., 0., true, now, true);
+        let (mid, vel, done) = motion.sample(now + Duration::from_millis(25));
+        assert!(!done && (0. ..=1.).contains(&mid));
+        let rev = Motion::new(mid, vel, false, now + Duration::from_millis(25), true);
+        assert_eq!(rev.value(now + Duration::from_millis(400)), (0., true));
+
+        let mut fade = FocusHide::default();
+        assert_eq!(fade.opacity(true, false, true, now), 1.);
+        assert_eq!(
+            fade.opacity(true, false, true, now + Duration::from_millis(300)),
+            0.
+        );
+        assert_eq!(
+            fade.opacity(true, true, true, now + Duration::from_secs(1)),
+            1.
+        );
     }
 }

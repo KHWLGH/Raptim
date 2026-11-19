@@ -6,11 +6,7 @@ use crate::{
 use std::{
     hash::{Hash, Hasher},
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     thread,
 };
 use windows::{
@@ -18,7 +14,7 @@ use windows::{
         Foundation::*,
         Graphics::{Dwm::*, Gdi::*},
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
-        System::{Com::*, ProcessStatus::*, Threading::*},
+        System::{Com::*, Threading::*},
         UI::{
             Accessibility::*, Controls::MARGINS, Input::KeyboardAndMouse::*, Shell::*,
             WindowsAndMessaging::*,
@@ -78,7 +74,7 @@ impl Instance {
     pub fn acquire(data_dir: &Path) -> Result<Option<Self>, String> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         data_dir.to_string_lossy().to_lowercase().hash(&mut hasher);
-        let prefix = format!("Local\\Diascia-{:016x}", hasher.finish());
+        let prefix = format!("Local\\Raptim-{:016x}", hasher.finish());
         let mutex_name = wide(&prefix);
         let event_name = wide(&format!("{prefix}-show"));
         unsafe {
@@ -116,16 +112,10 @@ impl Instance {
             loop {
                 match classify_wait(WaitForMultipleObjects(&handles, false, INFINITE)) {
                     Wait::Stop => break,
-                    Wait::Summon => {
-                        crate::metrics::record("secondary_received", 0.);
-                        notify(7, String::new());
-                    }
+                    Wait::Summon => notify(7, String::new()),
                     // Back off rather than spin: if a call is failing it will keep failing, and a
                     // hot loop here costs more than the summon it is waiting for.
-                    Wait::Retry => {
-                        crate::metrics::record("secondary_wait_failed", 0.);
-                        thread::sleep(std::time::Duration::from_millis(50));
-                    }
+                    Wait::Retry => thread::sleep(std::time::Duration::from_millis(50)),
                 }
             }
         }));
@@ -446,6 +436,20 @@ pub fn show_cmd(mode: ShowMode) -> SHOW_WINDOW_CMD {
     }
 }
 
+/// When a program entry leaves `working_dir` empty, default to its own parent directory (if it
+/// exists) rather than letting `ShellExecuteExW` inherit Raptim's current working directory.
+pub fn effective_working_dir(path: &str, working_dir: &str) -> String {
+    let trimmed = working_dir.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty() && parent.is_dir())
+        .map(|parent| parent.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Run on a worker thread: Shell extensions and unavailable network paths must not block UI.
 pub fn launch(target: &Target) -> Result<(), LaunchError> {
     target
@@ -468,14 +472,14 @@ pub fn launch(target: &Target) -> Result<(), LaunchError> {
         let target_string = wide(target.value());
         let (arguments, directory, elevated, shown) = match target {
             Target::Program {
+                path,
                 arguments,
                 working_dir,
                 elevated,
                 show,
-                ..
             } => (
                 wide(arguments),
-                wide(working_dir),
+                wide(&effective_working_dir(path, working_dir)),
                 *elevated,
                 show_cmd(*show),
             ),
@@ -585,7 +589,6 @@ impl Hotkey {
                         .as_ref()
                         .is_some_and(|(id, _)| *id as usize == message.wParam.0)
                 {
-                    crate::metrics::record("hotkey_received", 0.);
                     worker_notify(1, String::new());
                 }
             }
@@ -684,7 +687,6 @@ unsafe extern "system" fn foreground_event_proc(
     if interesting && id_object == OBJID_WINDOW.0 && id_child == 0 {
         FOREGROUND_NOTIFY.with(|slot| {
             if let Some(notify) = slot.borrow().as_ref() {
-                crate::metrics::record("foreground_received", 0.);
                 notify(14, String::new());
             }
         });
@@ -699,11 +701,16 @@ unsafe extern "system" fn display_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_DISPLAYCHANGE {
+    if matches!(
+        message,
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_THEMECHANGED
+    ) {
         FOREGROUND_NOTIFY.with(|slot| {
             if let Some(notify) = slot.borrow().as_ref() {
-                crate::metrics::record("display_changed", 0.);
-                notify(17, String::new());
+                notify(
+                    if message == WM_DISPLAYCHANGE { 17 } else { 21 },
+                    String::new(),
+                );
             }
         });
         return LRESULT(0);
@@ -711,7 +718,7 @@ unsafe extern "system" fn display_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-const DISPLAY_CLASS: PCWSTR = w!("Diascia.DisplayWatch");
+const DISPLAY_CLASS: PCWSTR = w!("Raptim.DisplayWatch");
 
 /// Delivers an immediate re-evaluation whenever the foreground window changes,
 /// instead of waiting for the polling timer.
@@ -808,7 +815,7 @@ impl Tray {
             menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
         };
         let menu = Menu::new();
-        let show = MenuItem::new("显示 Diascia", true, None);
+        let show = MenuItem::new("显示 Raptim", true, None);
         let restore = MenuItem::new("恢复窗口位置", true, None);
         let pause_hide = CheckMenuItem::new("暂停自动隐藏", true, false, None);
         let pause_protection = CheckMenuItem::new("暂停游戏勿扰", true, false, None);
@@ -871,27 +878,14 @@ impl Tray {
                 notify(3, String::new());
             }
         }));
-        // Original small flower mark; no concept-image assets are shipped.
-        let mut rgba = vec![0u8; 32 * 32 * 4];
-        for y in 0..32i32 {
-            for x in 0..32i32 {
-                let petal = [(11, 10), (21, 10), (8, 19), (24, 19), (16, 25)]
-                    .iter()
-                    .any(|(cx, cy)| (x - cx).pow(2) + (y - cy).pow(2) < 30);
-                let center = (x - 16).pow(2) + (y - 16).pow(2) < 15;
-                if petal || center {
-                    let p = ((y * 32 + x) * 4) as usize;
-                    rgba[p..p + 4].copy_from_slice(if center {
-                        &[255, 222, 120, 255]
-                    } else {
-                        &[172, 108, 210, 255]
-                    });
-                }
-            }
-        }
-        let icon = Icon::from_rgba(rgba, 32, 32).map_err(|e| e.to_string())?;
+        let tray_rgba = image::load_from_memory(include_bytes!("../../ui/icons/raptim-tray.png"))
+            .map_err(|e| e.to_string())?
+            .into_rgba8();
+        let (width, height) = tray_rgba.dimensions();
+        let icon =
+            Icon::from_rgba(tray_rgba.into_raw(), width, height).map_err(|e| e.to_string())?;
         let icon = TrayIconBuilder::new()
-            .with_tooltip("Diascia")
+            .with_tooltip("Raptim")
             .with_icon(icon)
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -907,6 +901,9 @@ impl Tray {
     pub fn set_states(&self, paused: bool, protection_bypassed: bool) {
         self.pause_hide.set_checked(paused);
         self.pause_protection.set_checked(protection_bypassed);
+    }
+    pub fn set_tooltip(&self, text: &str) {
+        let _ = self._icon.set_tooltip(Some(text));
     }
 }
 
@@ -930,11 +927,34 @@ pub fn set_owner(child: &slint::Window, parent: &slint::Window) {
 }
 
 pub fn focus(window: &slint::Window) {
+    if let Some(hwnd) = native_handle(window) {
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            // Prefer direct foreground activation when Windows already permits it (e.g.
+            // WM_HOTKEY / tray click), avoiding winit's synthetic Alt SendInput fallback.
+            if GetForegroundWindow() == hwnd || SetForegroundWindow(hwnd).as_bool() {
+                return;
+            }
+        }
+    }
     use slint::winit_030::WinitWindowAccessor;
     window.with_winit_window(|w| {
-        w.set_minimized(false);
         w.focus_window();
     });
+}
+
+/// Schedule a native WM_PAINT immediately, bypassing Slint's TimerBasedFrameThrottle
+/// (which otherwise sleeps one display refresh period before requesting a redraw).
+pub fn request_redraw_now(window: &slint::Window) -> bool {
+    use slint::winit_030::WinitWindowAccessor;
+    window
+        .with_winit_window(|w| {
+            w.request_redraw();
+            true
+        })
+        .unwrap_or(false)
 }
 
 /// Position in physical pixels on the parent's monitor, including negative origins.
@@ -982,6 +1002,45 @@ pub fn center_child(child: &slint::Window, parent: &slint::Window) {
         let (x, y) = centered_position(parent_rect, (size.width as i32, size.height as i32), work);
         child.set_position(slint::PhysicalPosition::new(x, y));
     }
+}
+pub fn set_bounds(window: &slint::Window, rect: crate::windowing::Rect) {
+    let width = rect.width.max(1);
+    let height = rect.height.max(1);
+    if let Some(hwnd) = native_handle(window) {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.x,
+                rect.y,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        return;
+    }
+    window.set_size(slint::PhysicalSize::new(width as u32, height as u32));
+    window.set_position(slint::PhysicalPosition::new(rect.x, rect.y));
+}
+pub fn set_size_no_activate(window: &slint::Window, width: i32, height: i32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    if let Some(hwnd) = native_handle(window) {
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                width,
+                height,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        return;
+    }
+    window.set_size(slint::PhysicalSize::new(width as u32, height as u32));
 }
 pub fn restore_position(window: &slint::Window) {
     let Some(hwnd) = native_handle(window) else {
@@ -1075,9 +1134,8 @@ unsafe fn set_prop_value(hwnd: HWND, name: &str, value: usize) {
 /// on a window that already has none is what makes corners and shadows jump.
 unsafe fn clear_region(hwnd: HWND) {
     unsafe {
-        if prop_value(hwnd, "Diascia.Region") != 0 {
-            set_prop_value(hwnd, "Diascia.Region", 0);
-            note_frame_write(1);
+        if prop_value(hwnd, "Raptim.Region") != 0 {
+            set_prop_value(hwnd, "Raptim.Region", 0);
             let _ = SetWindowRgn(hwnd, None, true);
         }
     }
@@ -1124,7 +1182,7 @@ struct LauncherDrag {
 unsafe fn clear_launcher_drag(hwnd: HWND) {
     unsafe {
         let pointer =
-            RemovePropW(hwnd, w!("Diascia.Drag")).unwrap_or_default().0 as *mut LauncherDrag;
+            RemovePropW(hwnd, w!("Raptim.Drag")).unwrap_or_default().0 as *mut LauncherDrag;
         if !pointer.is_null() {
             drop(Box::from_raw(pointer));
         }
@@ -1152,7 +1210,7 @@ pub fn begin_launcher_drag(window: &slint::Window) {
                 y: rect.top,
             },
         }));
-        if SetPropW(hwnd, w!("Diascia.Drag"), Some(HANDLE(pointer as _))).is_err() {
+        if SetPropW(hwnd, w!("Raptim.Drag"), Some(HANDLE(pointer as _))).is_err() {
             drop(Box::from_raw(pointer));
             return;
         }
@@ -1172,7 +1230,7 @@ unsafe extern "system" fn frame_proc(
     _: usize,
 ) -> LRESULT {
     unsafe {
-        let launcher = !GetPropW(hwnd, w!("Diascia.Launcher")).is_invalid();
+        let launcher = !GetPropW(hwnd, w!("Raptim.Launcher")).is_invalid();
         if launcher {
             match message {
                 WM_SYSCOMMAND if matches!(wparam.0 as u32 & 0xfff0, SC_MAXIMIZE | SC_MOVE) => {
@@ -1180,7 +1238,7 @@ unsafe extern "system" fn frame_proc(
                 }
                 WM_NCLBUTTONDBLCLK if wparam.0 as u32 == HTCAPTION => return LRESULT(0),
                 WM_MOUSEMOVE => {
-                    let pointer = GetPropW(hwnd, w!("Diascia.Drag")).0 as *const LauncherDrag;
+                    let pointer = GetPropW(hwnd, w!("Raptim.Drag")).0 as *const LauncherDrag;
                     if !pointer.is_null() {
                         let drag = &*pointer;
                         let mut cursor = POINT::default();
@@ -1199,7 +1257,7 @@ unsafe extern "system" fn frame_proc(
                     }
                 }
                 WM_LBUTTONUP | WM_CANCELMODE => {
-                    if !GetPropW(hwnd, w!("Diascia.Drag")).is_invalid() {
+                    if !GetPropW(hwnd, w!("Raptim.Drag")).is_invalid() {
                         clear_launcher_drag(hwnd);
                         let _ = ReleaseCapture();
                         // Winit/Slint must also see the release to reset their
@@ -1213,6 +1271,24 @@ unsafe extern "system" fn frame_proc(
         match message {
             WM_NCCALCSIZE | WM_NCPAINT => LRESULT(0),
             WM_NCACTIVATE => LRESULT(1),
+            WM_ERASEBKGND => LRESULT(1),
+            WM_STYLECHANGING if lparam.0 != 0 => {
+                // winit's set_visible / WindowFlags::apply_diff rewrites GWL_STYLE and
+                // GWL_EXSTYLE from its own flag cache (restoring WS_CAPTION and dropping
+                // WS_EX_TOOLWINDOW). Filter those writes before Windows applies them so
+                // showing or hiding a window never triggers a non-client frame/corner pop.
+                let styles = &mut *(lparam.0 as *mut STYLESTRUCT);
+                if wparam.0 as i32 == GWL_STYLE.0 {
+                    let mut style = (styles.styleNew & !WS_CAPTION.0) | WS_THICKFRAME.0;
+                    if launcher {
+                        style &= !WS_MAXIMIZEBOX.0;
+                    }
+                    styles.styleNew = style;
+                } else if wparam.0 as i32 == GWL_EXSTYLE.0 {
+                    styles.styleNew = (styles.styleNew & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
+                }
+                LRESULT(0)
+            }
             WM_NCDESTROY => {
                 clear_launcher_drag(hwnd);
                 let _ = RemoveWindowSubclass(hwnd, Some(frame_proc), id);
@@ -1230,37 +1306,36 @@ pub fn decorate(window: &slint::Window) {
     let Some(hwnd) = native_handle(window) else {
         return;
     };
-    use slint::winit_030::{
-        WinitWindowAccessor,
-        winit::window::{Theme, WindowButtons},
-    };
+    use slint::winit_030::{WinitWindowAccessor, winit::window::WindowButtons};
     unsafe {
         // Read before the remove: a work-area clip leaves DONOTROUND and a region behind, and
         // 2 is the only marker that says so.
-        let undoing_clip = prop_value(hwnd, "Diascia.EdgeClip") == 2;
-        let _ = RemovePropW(hwnd, w!("Diascia.EdgeClip"));
+        let undoing_clip = prop_value(hwnd, "Raptim.EdgeClip") == 2;
+        let _ = RemovePropW(hwnd, w!("Raptim.EdgeClip"));
         enable_custom_frame(hwnd);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let tool = (ex & !(WS_EX_APPWINDOW.0 as isize)) | WS_EX_TOOLWINDOW.0 as isize;
         if ex != tool {
-            note_frame_write(2);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool);
         }
-        if prop_value(hwnd, "Diascia.Buttons") == 0 {
-            set_prop_value(hwnd, "Diascia.Buttons", 1);
-            note_frame_write(3);
-            window.with_winit_window(|w| {
-                // 窗口隐藏到托盘/贴边即为关闭语义；最小化会让跳过任务栏的窗口无法找回。
-                // winit writes GWL_STYLE and re-frames the window to apply this.
-                w.set_enabled_buttons(WindowButtons::CLOSE);
-            });
+        if prop_value(hwnd, "Raptim.Buttons") == 0 {
+            set_prop_value(hwnd, "Raptim.Buttons", 1);
+            let already_close_only = window
+                .with_winit_window(|w| w.enabled_buttons() == WindowButtons::CLOSE)
+                .unwrap_or(false);
+            if !already_close_only {
+                window.with_winit_window(|w| {
+                    // 窗口隐藏到托盘/贴边即为关闭语义；最小化会让跳过任务栏的窗口无法找回。
+                    // winit writes GWL_STYLE and re-frames the window to apply this.
+                    w.set_enabled_buttons(WindowButtons::CLOSE);
+                });
+            }
         }
-        let dark = window
-            .with_winit_window(|w| w.theme() == Some(Theme::Dark))
-            .unwrap_or(false);
-        if prop_value(hwnd, "Diascia.Dark") != dark as usize + 1 {
-            set_prop_value(hwnd, "Diascia.Dark", dark as usize + 1);
-            note_frame_write(4);
+        // Only seed Raptim.Dark on first decoration so explicit Light/Dark overrides via
+        // `apply_window_theme` are never reverted by `winit::Window::theme()`.
+        if prop_value(hwnd, "Raptim.Dark") == 0 {
+            let dark = system_dark_mode();
+            set_prop_value(hwnd, "Raptim.Dark", dark as usize + 1);
             let immersive = windows::core::BOOL::from(dark);
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -1270,9 +1345,8 @@ pub fn decorate(window: &slint::Window) {
             );
         }
         // 1: the compositor rounds this window. 2: it cannot, so our own region does.
-        let frame = prop_value(hwnd, "Diascia.Frame");
+        let frame = prop_value(hwnd, "Raptim.Frame");
         if frame == 0 || undoing_clip || frame == 2 {
-            note_frame_write(5);
             let corner = DWMWCP_ROUND;
             let rounded = DwmSetWindowAttribute(
                 hwnd,
@@ -1284,13 +1358,24 @@ pub fn decorate(window: &slint::Window) {
             let policy = DWMNCRP_ENABLED;
             let _ =
                 DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as _, 4);
+            set_prop_value(hwnd, "Raptim.ShadowMuted", 0);
+            // Disable DWM's show/hide zoom transition so re-summoning maps immediately
+            // with DWMWCP_ROUND intact instead of animating a square snapshot and snapping
+            // to rounded corners after the transition completes.
+            let no_transitions = windows::core::BOOL::from(true);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &no_transitions as *const _ as _,
+                4,
+            );
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS::default());
             refresh_border(window);
             if rounded {
                 // Let the compositor anti-alias corners. An HRGN here disables DWM
                 // rounding and creates visibly jagged edges, especially at high DPI.
                 clear_region(hwnd);
-                set_prop_value(hwnd, "Diascia.Frame", 1);
+                set_prop_value(hwnd, "Raptim.Frame", 1);
             } else {
                 let size = window.size();
                 let diameter = (16. * window.scale_factor()).round() as i32;
@@ -1302,11 +1387,11 @@ pub fn decorate(window: &slint::Window) {
                     diameter,
                     diameter,
                 );
-                set_prop_value(hwnd, "Diascia.Region", 1);
+                set_prop_value(hwnd, "Raptim.Region", 1);
                 if SetWindowRgn(hwnd, Some(region), true) == 0 {
                     let _ = DeleteObject(region.into());
                 }
-                set_prop_value(hwnd, "Diascia.Frame", 2);
+                set_prop_value(hwnd, "Raptim.Frame", 2);
             }
         }
     }
@@ -1327,13 +1412,9 @@ pub fn skip_taskbar(window: &slint::Window) {
     if hidden {
         return;
     }
-    note_frame_write(6);
     window.with_winit_window(|w| w.set_skip_taskbar(true));
 }
-/// Re-apply the decoration after a resize, a scale-factor change or a theme change. This used to
-/// skip while a docked slide held its clip outline; `decorate` now answers "already applied" itself
-/// for every write, so the one case that genuinely must not be skipped - the non-client theme
-/// changing mid-slide - reaches it too.
+/// Re-apply the decoration after a resize, a scale-factor change or a theme change.
 pub fn refresh_geometry(window: &slint::Window) {
     decorate(window);
 }
@@ -1342,11 +1423,10 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
         let _ = SetWindowSubclass(hwnd, Some(frame_proc), 0xD1A5, 0);
         let old = GetWindowLongPtrW(hwnd, GWL_STYLE);
         let mut style = (old & !(WS_CAPTION.0 as isize)) | WS_THICKFRAME.0 as isize;
-        if !GetPropW(hwnd, w!("Diascia.Launcher")).is_invalid() {
+        if !GetPropW(hwnd, w!("Raptim.Launcher")).is_invalid() {
             style &= !(WS_MAXIMIZEBOX.0 as isize);
         }
         if old != style {
-            note_frame_write(7);
             SetWindowLongPtrW(hwnd, GWL_STYLE, style);
             let _ = SetWindowPos(
                 hwnd,
@@ -1363,7 +1443,6 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
 pub fn refresh_border(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
-            note_frame_write(8);
             // DWMWA_COLOR_NONE: no accent tint or active/inactive color changes.
             let color = COLORREF(0xfffffffe);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &color as *const _ as _, 4);
@@ -1410,7 +1489,7 @@ pub fn move_clipped(window: &slint::Window, position: (i32, i32), work: crate::w
     // Once a docked slide needs a work-area region, keep that same outline when
     // fully expanded. Swapping an aliased region for DWM on the last frame makes
     // corners and shadows pop. Undocking explicitly calls decorate().
-    let retained_clip = unsafe { GetPropW(hwnd, w!("Diascia.EdgeClip")).0 as usize == 2 };
+    let retained_clip = unsafe { GetPropW(hwnd, w!("Raptim.EdgeClip")).0 as usize == 2 };
     let clip = retained_clip
         || window
             .with_winit_window(|w| {
@@ -1432,35 +1511,30 @@ pub fn move_clipped(window: &slint::Window, position: (i32, i32), work: crate::w
             .unwrap_or(true);
     unsafe {
         // 1: off-desktop slide with compositor corners; 2: explicit work-area HRGN.
-        let previous = GetPropW(hwnd, w!("Diascia.EdgeClip")).0 as usize;
         let mut old = RECT::default();
-        if GetWindowRect(hwnd, &mut old).is_ok()
-            && (old.left, old.top) == position
-            && previous == 1
-            && !clip
-        {
-            return;
-        }
+        let moved = GetWindowRect(hwnd, &mut old).is_err() || (old.left, old.top) != position;
         if !clip {
-            let _ = SetPropW(hwnd, w!("Diascia.EdgeClip"), Some(HANDLE(1usize as _)));
+            let _ = SetPropW(hwnd, w!("Raptim.EdgeClip"), Some(HANDLE(1usize as _)));
         }
-        // Suppress intermediate paints until the destination region has been applied.
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            position.0,
-            position.1,
-            0,
-            0,
-            SWP_NOSIZE
-                | SWP_NOZORDER
-                | SWP_NOACTIVATE
-                | if clip {
-                    SWP_NOREDRAW
-                } else {
-                    SET_WINDOW_POS_FLAGS(0)
-                },
-        );
+        if moved {
+            // Suppress intermediate paints until the destination region has been applied.
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                position.0,
+                position.1,
+                0,
+                0,
+                SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOACTIVATE
+                    | if clip {
+                        SWP_NOREDRAW
+                    } else {
+                        SET_WINDOW_POS_FLAGS(0)
+                    },
+            );
+        }
     }
     if clip {
         clip_to_work_area(window, work);
@@ -1470,33 +1544,87 @@ pub fn move_clipped(window: &slint::Window, position: (i32, i32), work: crate::w
 pub fn finish_edge_motion(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
-            if GetPropW(hwnd, w!("Diascia.EdgeClip")).0 as usize == 1 {
-                let _ = RemovePropW(hwnd, w!("Diascia.EdgeClip"));
+            if GetPropW(hwnd, w!("Raptim.EdgeClip")).0 as usize == 1 {
+                let _ = RemovePropW(hwnd, w!("Raptim.EdgeClip"));
             }
         }
     }
 }
-/// (working set, private bytes) in KiB, for the opt-in metrics CSV. Recorded beside
-/// `entry_blob_bytes` so a memory reading always carries the dataset it was taken on.
-pub fn memory_kib() -> (u64, u64) {
-    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
-        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-        ..Default::default()
+/// Suppresses DWM shadows at rest on a collapsed docked window (either cloaking a
+/// 0-pixel hide or disabling NC rendering when only a thin strip remains visible).
+pub fn set_collapsed_appearance(
+    window: &slint::Window,
+    appearance: crate::docking::CollapsedAppearance,
+) {
+    use crate::docking::CollapsedAppearance;
+    let Some(hwnd) = native_handle(window) else {
+        return;
     };
-    let ok = unsafe {
-        K32GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            std::ptr::addr_of_mut!(counters).cast(),
-            counters.cb,
-        )
-    };
-    if ok.as_bool() {
-        (
-            counters.WorkingSetSize as u64 / 1024,
-            counters.PrivateUsage as u64 / 1024,
-        )
-    } else {
-        (0, 0)
+    unsafe {
+        let want_cloaked = appearance == CollapsedAppearance::Cloaked;
+        let mut want_muted = appearance == CollapsedAppearance::StripOnly;
+        let is_cloaked = prop_value(hwnd, "Raptim.Cloaked") == 1;
+        if want_cloaked && !is_cloaked {
+            let cloak = windows::core::BOOL::from(true);
+            if DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak as *const _ as _, 4).is_ok() {
+                set_prop_value(hwnd, "Raptim.Cloaked", 1);
+            } else {
+                want_muted = true;
+            }
+        }
+
+        let is_muted = prop_value(hwnd, "Raptim.ShadowMuted") == 1;
+        let edge_clipped = prop_value(hwnd, "Raptim.EdgeClip") == 2;
+        let region_fallback = prop_value(hwnd, "Raptim.Frame") == 2;
+        if want_muted && !is_muted {
+            if !edge_clipped {
+                let corner = DWMWCP_DONOTROUND;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &corner as *const _ as _,
+                    4,
+                );
+                let policy = DWMNCRP_DISABLED;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_NCRENDERING_POLICY,
+                    &policy as *const _ as _,
+                    4,
+                );
+                set_prop_value(hwnd, "Raptim.ShadowMuted", 1);
+            }
+        } else if !want_muted && is_muted {
+            set_prop_value(hwnd, "Raptim.ShadowMuted", 0);
+            if !edge_clipped && !region_fallback {
+                let corner = DWMWCP_ROUND;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &corner as *const _ as _,
+                    4,
+                );
+                let policy = DWMNCRP_ENABLED;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_NCRENDERING_POLICY,
+                    &policy as *const _ as _,
+                    4,
+                );
+                let border = COLORREF(0xfffffffe);
+                let _ =
+                    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as _, 4);
+                let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS::default());
+            }
+        }
+
+        if !want_cloaked && prop_value(hwnd, "Raptim.Cloaked") == 1 {
+            let cloak = windows::core::BOOL::from(false);
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak as *const _ as _, 4);
+            set_prop_value(hwnd, "Raptim.Cloaked", 0);
+            crate::windowing::invalidate(window);
+            request_redraw_now(window);
+        }
     }
 }
 /// Native clip prevents a sliding window leaking onto an adjacent display.
@@ -1504,19 +1632,17 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
     let Some(hwnd) = native_handle(window) else {
         return;
     };
-    crate::metrics::record("region_set", 1.);
     unsafe {
-        let first = GetPropW(hwnd, w!("Diascia.EdgeClip")).0 as usize != 2;
-        let _ = SetPropW(hwnd, w!("Diascia.EdgeClip"), Some(HANDLE(2usize as _)));
+        let first = GetPropW(hwnd, w!("Raptim.EdgeClip")).0 as usize != 2;
+        let _ = SetPropW(hwnd, w!("Raptim.EdgeClip"), Some(HANDLE(2usize as _)));
         // This path installs a region outside `decorate`, and `clear_region` only hands the shape
         // back to the compositor if it knows one is installed.
-        set_prop_value(hwnd, "Diascia.Region", 1);
+        set_prop_value(hwnd, "Raptim.Region", 1);
         let mut r = RECT::default();
         if GetWindowRect(hwnd, &mut r).is_err() {
             return;
         }
         if first {
-            note_frame_write(9);
             let corner = DWMWCP_DONOTROUND;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -1551,7 +1677,6 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
             let _ = CombineRgn(Some(region), Some(region), Some(rounded), RGN_AND);
             let _ = DeleteObject(rounded.into());
         }
-        note_frame_write(10);
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(region.into());
         }
@@ -1563,19 +1688,19 @@ pub fn set_opacity(window: &slint::Window, opacity: f32) {
     };
     unsafe {
         let alpha = (opacity.clamp(0., 1.) * 255.).round() as usize;
-        if GetPropW(hwnd, w!("Diascia.Alpha")).0 as usize == alpha + 1 {
+        if GetPropW(hwnd, w!("Raptim.Alpha")).0 as usize == alpha + 1 {
             return;
         }
-        let _ = SetPropW(hwnd, w!("Diascia.Alpha"), Some(HANDLE((alpha + 1) as _)));
+        let _ = SetPropW(hwnd, w!("Raptim.Alpha"), Some(HANDLE((alpha + 1) as _)));
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         if opacity >= 1.0 {
             if style & WS_EX_LAYERED.0 as isize != 0 {
-                note_frame_write(12);
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_LAYERED.0 as isize));
-                window.request_redraw();
+                if window.is_visible() {
+                    window.request_redraw();
+                }
             }
         } else {
-            note_frame_write(12);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
             let _ = SetLayeredWindowAttributes(
                 hwnd,
@@ -1631,7 +1756,6 @@ pub fn topmost(window: &slint::Window, enabled: bool) {
             // mid-slide, so the band is set directly here.
             return;
         }
-        note_frame_write(11);
         let _ = SetWindowPos(
             hwnd,
             Some(if enabled {
@@ -1651,7 +1775,7 @@ pub fn topmost(window: &slint::Window, enabled: bool) {
 pub fn launcher_window(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
-            let _ = SetPropW(hwnd, w!("Diascia.Launcher"), Some(HANDLE(1usize as _)));
+            let _ = SetPropW(hwnd, w!("Raptim.Launcher"), Some(HANDLE(1usize as _)));
         }
     }
     skip_taskbar(window);
@@ -1660,7 +1784,7 @@ pub fn launcher_window(window: &slint::Window) {
 /// Idempotent: safe on the first native event, and after a recreated HWND.
 pub fn ensure_launcher(window: &slint::Window) {
     if native_handle(window)
-        .is_some_and(|hwnd| unsafe { GetPropW(hwnd, w!("Diascia.Launcher")).is_invalid() })
+        .is_some_and(|hwnd| unsafe { GetPropW(hwnd, w!("Raptim.Launcher")).is_invalid() })
     {
         launcher_window(window);
     }
@@ -1686,64 +1810,75 @@ impl LauncherProbe {
             }
         };
         unsafe {
-            if GetPropW(hwnd, w!("Diascia.Launcher")).is_invalid() {
+            if GetPropW(hwnd, w!("Raptim.Launcher")).is_invalid() {
                 launcher_window(window);
             }
         }
     }
 }
-/// Counts the writes that make DWM rebuild a window's frame. The resulting *state* is not enough
-/// evidence: asking for a value the window already has is invisible to `frame_state` and still
-/// redraws the non-client area, which is exactly the bug this guards. The machine pass asserts a
-/// repeat summon leaves the counter where it found it.
-///
-/// Each write also reports its reason code to the metrics CSV (`frame_write`), so a human-run probe
-/// can tie a visible change to a specific call: 1 hand the shape back to the compositor, 2 rewrite
-/// the ex-style, 3 winit's button mask, 4 immersive dark mode, 5 the corner/NC-policy block,
-/// 6 winit's skip-taskbar, 7 the custom-frame style write, 8 the border colour, 9 square corners for
-/// a work-area clip, 10 the clip region itself, 11 the z-band, 12 `WS_EX_LAYERED` for opacity.
-static FRAME_WRITES: AtomicU64 = AtomicU64::new(0);
-
-pub fn frame_write_count() -> u64 {
-    FRAME_WRITES.load(Ordering::Relaxed)
+/// Reads Windows' app light/dark preference directly from the registry so collapsed
+/// or cloaked windows never depend on DWM/winit window-visibility state.
+pub fn system_dark_mode() -> bool {
+    use windows::Win32::System::Registry::*;
+    let mut value = 1u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        )
+    };
+    status == ERROR_SUCCESS && value == 0
 }
 
-fn note_frame_write(reason: u8) {
-    FRAME_WRITES.fetch_add(1, Ordering::Relaxed);
-    // The reason travels as the value, so one CSV column says both "a frame was rebuilt" and which
-    // call did it. Codes are listed on FRAME_WRITES.
-    crate::metrics::record("frame_write", reason as f64);
-}
-
-/// What the compositor currently reads off this window: the two style words, whether this process
-/// owns a window region, and the z-band. `ex_style` deliberately excludes `WS_EX_TOPMOST` because
-/// `topmost` reports that on its own, and a docked slide raises and re-lowers the window on
-/// purpose. The machine pass asserts the rest never changes while the window is only moving.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FrameState {
-    pub style: isize,
-    pub ex_style: isize,
-    pub region: bool,
-    pub topmost: bool,
-}
-
-pub fn frame_state(window: &slint::Window) -> Option<FrameState> {
-    let hwnd = native_handle(window)?;
-    unsafe {
-        let probe = CreateRectRgn(0, 0, 0, 0);
-        let installed = {
-            let code = GetWindowRgn(hwnd, probe);
-            code == SIMPLEREGION || code == COMPLEXREGION
-        };
-        let _ = DeleteObject(probe.into());
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        Some(FrameState {
-            style: GetWindowLongPtrW(hwnd, GWL_STYLE),
-            ex_style: ex & !(WS_EX_TOPMOST.0 as isize),
-            region: installed,
-            topmost: ex & WS_EX_TOPMOST.0 as isize != 0,
-        })
+pub fn resolve_dark_mode(theme_mode: u8) -> bool {
+    match theme_mode {
+        1 => false,
+        2 => true,
+        _ => system_dark_mode(),
     }
+}
+
+pub fn apply_window_theme(window: &slint::Window, theme_mode: u8, force_redraw: bool) -> bool {
+    let dark = resolve_dark_mode(theme_mode);
+    use slint::winit_030::{WinitWindowAccessor, winit::window::Theme};
+    let scheme = if dark {
+        i_slint_core::items::ColorScheme::Dark
+    } else {
+        i_slint_core::items::ColorScheme::Light
+    };
+    let inner = i_slint_core::window::WindowInner::from_pub(window);
+    let scheme_changed = inner.context().color_scheme(None) != scheme;
+    inner.context().set_color_scheme(scheme);
+    let mut hwnd_changed = false;
+    if let Some(hwnd) = native_handle(window) {
+        unsafe {
+            if prop_value(hwnd, "Raptim.Dark") != dark as usize + 1 {
+                set_prop_value(hwnd, "Raptim.Dark", dark as usize + 1);
+                hwnd_changed = true;
+                let immersive = windows::core::BOOL::from(dark);
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &immersive as *const _ as _,
+                    4,
+                );
+            }
+        }
+    }
+    if scheme_changed || hwnd_changed || force_redraw {
+        let _ = window.with_winit_window(|w| {
+            w.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
+        });
+        crate::windowing::invalidate(window);
+        request_redraw_now(window);
+    }
+    scheme_changed || hwnd_changed
 }
 
 pub fn geometry(
@@ -1790,6 +1925,14 @@ pub fn app_has_focus() -> bool {
 pub fn window_active(window: &slint::Window) -> bool {
     native_handle(window).is_some_and(|hwnd| unsafe { GetForegroundWindow() == hwnd })
 }
+pub fn autostart_command(exe: &Path, data_dir: &Path) -> String {
+    let clean_dir = crate::paths::normal_path(data_dir);
+    format!(
+        "\"{}\" --data-dir \"{}\" --silent",
+        exe.display(),
+        clean_dir.display()
+    )
+}
 pub fn set_autostart(enabled: bool, data_dir: &Path) -> Result<(), String> {
     use windows::Win32::System::Registry::*;
     unsafe {
@@ -1809,18 +1952,14 @@ pub fn set_autostart(enabled: bool, data_dir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
         let result = if enabled {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let command = wide(&format!(
-                "\"{}\" --data-dir \"{}\"",
-                exe.display(),
-                data_dir.display()
-            ));
+            let command = wide(&autostart_command(&exe, data_dir));
             let bytes =
                 std::slice::from_raw_parts(command.as_ptr() as *const u8, command.len() * 2);
-            RegSetValueExW(key, w!("Diascia"), Some(0), REG_SZ, Some(bytes))
+            RegSetValueExW(key, w!("Raptim"), Some(0), REG_SZ, Some(bytes))
                 .ok()
                 .map_err(|e| e.to_string())
         } else {
-            let code = RegDeleteValueW(key, w!("Diascia"));
+            let code = RegDeleteValueW(key, w!("Raptim"));
             if code == ERROR_FILE_NOT_FOUND {
                 Ok(())
             } else {
@@ -1830,6 +1969,98 @@ pub fn set_autostart(enabled: bool, data_dir: &Path) -> Result<(), String> {
         let _ = RegCloseKey(key);
         result
     }
+}
+/// Check whether the Windows `Run` entry and Task Manager approval match the saved preference.
+pub fn autostart_mismatch(data_dir: &Path, expected_enabled: bool) -> Option<String> {
+    use windows::Win32::System::Registry::*;
+    if !expected_enabled {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let expected = autostart_command(&exe, data_dir);
+    unsafe {
+        let mut run_key = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+            Some(0),
+            KEY_QUERY_VALUE,
+            &mut run_key,
+        )
+        .is_err()
+        {
+            return Some("开机启动项未写入系统注册表，请重新开关生效".into());
+        }
+        let mut reg_type = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        let query = RegQueryValueExW(
+            run_key,
+            w!("Raptim"),
+            None,
+            Some(&mut reg_type),
+            None,
+            Some(&mut size),
+        );
+        let actual = if query.is_ok() && reg_type == REG_SZ && size >= 2 {
+            let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+            let mut read = size;
+            if RegQueryValueExW(
+                run_key,
+                w!("Raptim"),
+                None,
+                None,
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut read),
+            )
+            .is_ok()
+            {
+                let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+                Some(String::from_utf16_lossy(&buf[..end]))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let _ = RegCloseKey(run_key);
+        let Some(actual) = actual else {
+            return Some("开机启动项未写入系统注册表，请重新开关生效".into());
+        };
+        if !actual.trim().eq_ignore_ascii_case(expected.trim()) {
+            return Some("程序路径、数据目录或静默参数已变更，请重新开关「开机启动」更新".into());
+        }
+        let mut approved = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run"),
+            Some(0),
+            KEY_QUERY_VALUE,
+            &mut approved,
+        )
+        .is_ok()
+        {
+            let mut buf = [0u8; 16];
+            let mut read = buf.len() as u32;
+            let mut kind = REG_VALUE_TYPE::default();
+            if RegQueryValueExW(
+                approved,
+                w!("Raptim"),
+                None,
+                Some(&mut kind),
+                Some(buf.as_mut_ptr()),
+                Some(&mut read),
+            )
+            .is_ok()
+                && read >= 1
+                && (buf[0] & 1 == 1)
+            {
+                let _ = RegCloseKey(approved);
+                return Some("系统任务管理器已禁用开机启动，请在任务管理器启用或重新开关".into());
+            }
+            let _ = RegCloseKey(approved);
+        }
+    }
+    None
 }
 /// Extract the Windows Shell icon (including shortcut resolution) and save PNG pixels.
 pub fn shell_icon(path: &Path) -> Vec<u8> {
@@ -1995,7 +2226,155 @@ mod fluent_menu;
 mod shell_actions;
 #[path = "web_icon.rs"]
 mod web_icon;
-pub use shell_actions::{create_shortcut_in, desktop_shortcut, shell_context_menu};
+pub use shell_actions::{
+    create_shortcut_in, desktop_shortcut, known_folder_path, resolve_lnk_file, resolve_url_file,
+    shell_context_menu,
+};
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredApp {
+    pub name: String,
+    pub detail: String,
+    pub target: Target,
+    pub icon_source: Option<std::path::PathBuf>,
+}
+
+fn is_noise_shortcut(name: &str, target: &Target) -> bool {
+    let low_name = name.to_lowercase();
+    let low_val = target.value().to_lowercase();
+    [
+        "uninstall",
+        "uninst",
+        "卸载",
+        "readme",
+        "读我",
+        "帮助",
+        "manual",
+        "license",
+        "用户协议",
+    ]
+    .iter()
+    .any(|kw| low_name.contains(kw))
+        || low_val.contains("unins0")
+        || low_val.contains("uninstall")
+}
+
+fn collect_shortcuts_in(
+    dir: &Path,
+    depth: u8,
+    self_exe: &str,
+    seen_keys: &mut std::collections::HashSet<String>,
+    out: &mut Vec<DiscoveredApp>,
+) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if ft.is_dir() && !ft.is_symlink() {
+            collect_shortcuts_in(&path, depth + 1, self_exe, seen_keys, out);
+            continue;
+        }
+        if !ft.is_file() {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(ext.as_str(), "lnk" | "url") {
+            continue;
+        }
+        let Some(name) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let target = if ext == "url" {
+            match resolve_url_file(&path) {
+                Some(url) => Target::Url { url },
+                None => Target::Shortcut {
+                    path: path.to_string_lossy().into_owned(),
+                    show: ShowMode::Normal,
+                },
+            }
+        } else {
+            resolve_lnk_file(&path).unwrap_or_else(|| Target::Shortcut {
+                path: path.to_string_lossy().into_owned(),
+                show: ShowMode::Normal,
+            })
+        };
+        if target.validate().is_err() || is_noise_shortcut(&name, &target) {
+            continue;
+        }
+        if !self_exe.is_empty()
+            && target
+                .value()
+                .replace('/', "\\")
+                .eq_ignore_ascii_case(self_exe)
+        {
+            continue;
+        }
+        if seen_keys.insert(target.duplicate_key()) {
+            let detail = target.value().to_string();
+            out.push(DiscoveredApp {
+                name,
+                detail,
+                target,
+                icon_source: Some(path),
+            });
+        }
+    }
+}
+
+/// Discover installed applications from Start Menu shortcuts and packaged AppsFolder entries.
+pub fn discover_installed_entries() -> Vec<DiscoveredApp> {
+    let self_exe = std::env::current_exe()
+        .map(|p| {
+            crate::paths::normal_path(&p)
+                .to_string_lossy()
+                .replace('/', "\\")
+        })
+        .unwrap_or_default();
+    let mut seen_keys = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for folder in [&FOLDERID_CommonPrograms, &FOLDERID_Programs] {
+        if let Ok(dir) = known_folder_path(folder) {
+            collect_shortcuts_in(&dir, 0, &self_exe, &mut seen_keys, &mut out);
+        }
+    }
+    let seen_names: std::collections::HashSet<String> =
+        out.iter().map(|d| d.name.to_lowercase()).collect();
+    for (aumid, name) in installed_apps() {
+        let target = Target::App {
+            aumid: aumid.clone(),
+        };
+        if seen_names.contains(&name.to_lowercase()) || target.validate().is_err() {
+            continue;
+        }
+        if seen_keys.insert(target.duplicate_key()) {
+            out.push(DiscoveredApp {
+                name,
+                detail: aumid,
+                target,
+                icon_source: None,
+            });
+        }
+    }
+    out.sort_by_key(|a| a.name.to_lowercase());
+    out
+}
 pub fn show_menu(
     window: &slint::Window,
     items: &[crate::menus::MenuItem],
@@ -2027,8 +2406,6 @@ pub fn restore_saved(window: &slint::Window, state: &crate::session::WindowState
     let target_scale = monitor
         .as_ref()
         .map_or(window.scale_factor(), |m| m.scale_factor() as f32);
-    crate::metrics::record("restore_monitor_scale", target_scale as f64);
-    crate::metrics::record("restore_window_scale", window.scale_factor() as f64);
     let origin = monitor.map(|m| m.position());
     let work = origin
         .and_then(|p| work_area_at((p.x, p.y)))
@@ -2047,6 +2424,9 @@ pub fn restore_saved(window: &slint::Window, state: &crate::session::WindowState
             Some(2) => y = work.y,
             _ => {}
         }
+        // Move to the destination monitor first so winit adjusts DPI and minimum-size constraints
+        // before resizing across monitors with different scale factors.
+        window.set_position(slint::PhysicalPosition::new(x, y));
         window.set_size(slint::PhysicalSize::new(width as u32, height as u32));
         window.set_position(slint::PhysicalPosition::new(x, y));
     }
@@ -2056,7 +2436,7 @@ pub fn restore_saved(window: &slint::Window, state: &crate::session::WindowState
 pub mod drop_target;
 
 #[cfg(test)]
-mod protection_tests {
+mod tests {
     use super::*;
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
@@ -2069,78 +2449,28 @@ mod protection_tests {
     }
 
     #[test]
-    fn fullscreen_rect_matches_exact_and_within_tolerance() {
+    fn working_dir_fallback_and_fullscreen_rect_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("tool.exe");
+        std::fs::write(&exe, b"").unwrap();
+        assert_eq!(
+            effective_working_dir(&exe.to_string_lossy(), ""),
+            dir.path().to_string_lossy()
+        );
+        assert_eq!(
+            effective_working_dir(&exe.to_string_lossy(), "  C:\\Custom  "),
+            "C:\\Custom"
+        );
+
         let screen = rect(0, 0, 2560, 1440);
         assert!(fullscreen_rect(rect(0, 0, 2560, 1440), screen, 8));
         assert!(fullscreen_rect(rect(-4, 3, 2564, 1436), screen, 8));
-        assert!(fullscreen_rect(rect(-16, 16, 2576, 1424), screen, 24));
-    }
-
-    #[test]
-    fn fullscreen_rect_rejects_small_gaps_and_overruns() {
-        let screen = rect(0, 0, 2560, 1440);
-        assert!(!fullscreen_rect(rect(-9, 0, 2560, 1440), screen, 8));
         assert!(!fullscreen_rect(rect(0, 40, 2560, 1440), screen, 24));
-        assert!(!fullscreen_rect(rect(-100, 0, 2660, 1440), screen, 24));
         assert!(!fullscreen_rect(rect(0, 0, 1280, 720), screen, 8));
     }
 
     #[test]
-    fn fullscreen_rect_uses_secondary_monitor_origin() {
-        let screen = rect(-1920, 0, 0, 1080);
-        assert!(fullscreen_rect(rect(-1920, 0, 0, 1080), screen, 8));
-        assert!(!fullscreen_rect(rect(0, 0, 1920, 1080), screen, 8));
-    }
-}
-
-#[cfg(test)]
-mod instance_tests {
-    use super::*;
-    #[test]
-    fn secondary_event_is_delivered_without_polling_and_waiter_stops() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut instance = Instance::acquire(dir.path()).unwrap().unwrap();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        instance.listen(Arc::new(move |code, _| {
-            let _ = sender.send(code);
-        }));
-        assert!(Instance::acquire(dir.path()).unwrap().is_none());
-        assert_eq!(
-            receiver
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap(),
-            7
-        );
-        drop(instance);
-        assert!(Instance::acquire(dir.path()).unwrap().is_some());
-    }
-    /// The waiter thread is never re-armed — `listen` runs once per process — so this table is the
-    /// whole policy for the rest of the run. Everything that is not one of the two handles has to
-    /// come back and wait again.
-    #[test]
-    fn only_the_stop_handle_ends_the_summon_waiter() {
-        assert_eq!(classify_wait(WAIT_OBJECT_0), Wait::Stop);
-        assert_eq!(
-            classify_wait(WAIT_EVENT(WAIT_OBJECT_0.0 + 1)),
-            Wait::Summon,
-            "index 1 is the summon event"
-        );
-        for other in [
-            WAIT_EVENT(u32::MAX),    // WAIT_FAILED
-            WAIT_EVENT(0x0000_0102), // WAIT_TIMEOUT
-            WAIT_EVENT(0x0000_0080), // WAIT_ABANDONED_0
-            WAIT_EVENT(0x0000_0100), // WAIT_IO_COMPLETION
-            WAIT_EVENT(7),
-        ] {
-            assert_eq!(classify_wait(other), Wait::Retry, "{other:?}");
-        }
-    }
-}
-#[cfg(test)]
-mod app_list_tests {
-    use super::*;
-    #[test]
-    fn only_app_ids_survive_the_apps_folder_filter() {
+    fn app_option_and_wait_classification() {
         assert_eq!(
             app_option("计算器", r"shell:AppsFolder\Package_1.0_x64!App"),
             Some(("Package_1.0_x64!App".into(), "计算器".into()))
@@ -2149,51 +2479,10 @@ mod app_list_tests {
             app_option("缺少入口", r"shell:AppsFolder\Package_1.0_x64"),
             None
         );
-        assert_eq!(app_option("文件夹自身", r"shell:AppsFolder"), None);
-        assert_eq!(app_option("  ", r"shell:AppsFolder\Package!App"), None);
-        assert_eq!(
-            app_option("桌面", r"C:\Users\Public\Desktop"),
-            None,
-            "filesystem children are not app entries"
-        );
-    }
-    #[test]
-    fn apps_folder_enumeration_stays_parseable_or_returns_nothing() {
-        // How many packaged apps exist is machine-dependent; what must hold either way is that
-        // every returned id is accepted by the launch path that will consume it.
-        let apps = installed_apps();
-        assert!(!apps.is_empty(), "expected packaged apps on this machine");
-        for (aumid, name) in apps {
-            assert!(aumid.contains('!'), "{aumid}");
-            assert!(!name.trim().is_empty());
-            assert!(
-                Target::App {
-                    aumid: aumid.clone()
-                }
-                .validate()
-                .is_ok(),
-                "{aumid}"
-            );
-        }
-    }
-    /// AppsFolder icons are what tell two packaged apps apart in the grid, so a silent fallback to
-    /// the generic placeholder has to fail here instead of looking like a missing icon in the UI.
-    #[test]
-    fn apps_folder_icons_are_extracted_per_app() {
-        let apps = installed_apps();
-        let mut sizes = std::collections::HashSet::new();
-        for (aumid, _) in apps.iter().take(6) {
-            let png = app_icon(aumid);
-            let image = image::load_from_memory(&png)
-                .unwrap_or_else(|e| panic!("{aumid}: {} bytes are not an icon ({e})", png.len()));
-            assert!(image.width() >= 32, "{aumid} {}", image.width());
-            assert!(image.height() >= 32, "{aumid} {}", image.height());
-            sizes.insert(png.len());
-        }
-        assert!(
-            sizes.len() > 1,
-            "every app resolved to the same image: generic fallback"
-        );
-        assert!(app_icon("no-entry-separator").is_empty());
+        assert_eq!(app_option("桌面", r"C:\Users\Public\Desktop"), None);
+
+        assert_eq!(classify_wait(WAIT_OBJECT_0), Wait::Stop);
+        assert_eq!(classify_wait(WAIT_EVENT(WAIT_OBJECT_0.0 + 1)), Wait::Summon);
+        assert_eq!(classify_wait(WAIT_EVENT(u32::MAX)), Wait::Retry);
     }
 }

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use diascia::{
+use raptim::{
+    AppOption, BrokenOption, DestinationNode, DiscoverOption, EditorWindow, Item, MainWindow,
+    NavItem, Palette, ScopeNode, SettingsWindow,
     launch::Failure,
     model::*,
     platform,
@@ -18,11 +20,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
-slint::include_modules!();
-include!("ui_commands.rs");
-include!("app_session.rs");
-#[cfg(test)]
-mod app_regression;
+mod app_session;
+mod ui_commands;
 
 struct EditorSession {
     _drop: Option<platform::drop_target::Registration>,
@@ -38,13 +37,21 @@ struct EditorSession {
 struct DraggedEntry(i64);
 #[derive(Clone, Copy)]
 struct DraggedCollection(i64);
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct BrokenEntry {
+    id: i64,
+    name: String,
+    target: String,
+    reason: String,
+    relocatable: bool,
+}
 fn dragged_id(data: &slint::DataTransfer) -> Option<i64> {
     data.user_data()?
         .downcast_ref::<DraggedEntry>()
         .map(|v| v.0)
 }
 struct App {
-    protection_resume: diascia::session::ProtectionResume,
+    protection_resume: raptim::session::ProtectionResume,
     editor_generation: u64,
     batch_expanded: std::collections::HashSet<i64>,
     editor_expanded: std::collections::HashSet<i64>,
@@ -68,19 +75,20 @@ struct App {
     _foreground: platform::ForegroundWatch,
     tray: platform::Tray,
     last_evaluated: Instant,
-    notices: std::cell::RefCell<diascia::session::NoticeQueue>,
+    notices: std::cell::RefCell<raptim::session::NoticeQueue>,
     _instance: platform::Instance,
     initial: Option<Export>,
     data_epoch: u64,
-    saved_window: diascia::session::WindowState,
-    window_candidate: Option<(diascia::session::WindowState, Instant)>,
-    browsing: diascia::session::Browsing,
+    saved_window: raptim::session::WindowState,
+    window_candidate: Option<(raptim::session::WindowState, Instant)>,
+    browsing: raptim::session::Browsing,
     editor: Option<EditorSession>,
     settings_ui: Deferred<SettingsWindow>,
     settings_open: bool,
     installed_apps: Vec<(String, String)>,
     drag: Option<((i32, i32), (i32, i32))>,
-    dock: Option<(diascia::docking::Edge, windowing::Rect)>,
+    dock: Option<(raptim::docking::Edge, windowing::Rect)>,
+    dock_overhang: Option<(raptim::docking::Edge, i32)>,
     edge_hidden: bool,
     /// Set by `collapsed_probe` when the pointer is outside the approach margin, so the next
     /// interaction tick can run at half rate.
@@ -88,13 +96,13 @@ struct App {
     protected_edge_waiting: bool,
     dock_work: Option<windowing::Rect>,
     edge_progress: f32,
-    edge_motion: Option<diascia::docking::Motion>,
-    motion_frame: Option<Instant>,
-    focus_hide: diascia::docking::FocusHide,
+    edge_motion: Option<raptim::docking::Motion>,
+    focus_hide: raptim::docking::FocusHide,
+    edge_hold: raptim::docking::EdgeHold,
     edge_since: Instant,
-    search_index: diascia::search::SearchIndex,
-    icon_cache: diascia::icons::Cache,
-    icon_index: std::collections::HashMap<i64, diascia::icons::IconKey>,
+    search_index: raptim::search::SearchIndex,
+    icon_cache: raptim::icons::Cache,
+    icon_index: std::collections::HashMap<i64, raptim::icons::IconKey>,
     visible_icons: std::collections::HashSet<i64>,
     items_signature: Vec<ItemSignature>,
     results_signature: Vec<ItemSignature>,
@@ -110,7 +118,7 @@ struct App {
     /// underneath, and that happens in `refresh`.
     eligible: Option<((i32, i64, i64), std::collections::HashSet<i64>)>,
     scope_selection: std::collections::HashSet<i64>,
-    conversion_preview: Option<diascia::commands::ConversionPreview>,
+    conversion_preview: Option<raptim::commands::ConversionPreview>,
     delete_collection_id: i64,
     /// Entry the relocate panel is pointing at; 0 when nothing is armed. Kept on the Rust side
     /// so the panel's display properties stay strings and no id crosses the Slint int boundary.
@@ -126,6 +134,10 @@ struct App {
     icon_epoch: u64,
     icon_pending: bool,
     saving_editor: bool,
+    silent_startup: bool,
+    discovered_apps: Vec<platform::DiscoveredApp>,
+    discovered_checked: Vec<bool>,
+    broken_items: Vec<BrokenEntry>,
 }
 fn strings(values: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
     Rc::new(VecModel::from(
@@ -167,8 +179,8 @@ impl App {
         self.policy.protection() == Protection::Normal
             && (self.saved_window.always_on_top || self.main.get_pinned())
     }
-    fn auto_hide_guard(&self) -> diascia::policy::AutoHideGuard {
-        diascia::policy::AutoHideGuard {
+    fn auto_hide_guard(&self) -> raptim::policy::AutoHideGuard {
+        raptim::policy::AutoHideGuard {
             editor: self
                 .editor
                 .as_ref()
@@ -186,6 +198,107 @@ impl App {
                 || windowing::has_popup(self.main.window()),
         }
     }
+    fn dock_overhang_for(&self, edge: raptim::docking::Edge) -> i32 {
+        match self.dock_overhang {
+            Some((applied, pad)) if applied == edge => pad,
+            _ => 0,
+        }
+    }
+    fn sync_dock_overhang(&mut self) {
+        let scale = self.main.window().scale_factor();
+        let wanted = if self.settings.edge_hide {
+            self.dock
+                .map(|(edge, _)| (edge, raptim::docking::overhang_px(scale)))
+        } else {
+            None
+        };
+        let prev = self.dock_overhang;
+        let size_matches = match (wanted, self.dock) {
+            (Some((edge, pad)), Some((dock_edge, visible))) if edge == dock_edge => {
+                let expected = raptim::docking::docked_hwnd_rect(edge, visible, pad);
+                let size = self.main.window().size();
+                size.width as i32 == expected.width && size.height as i32 == expected.height
+            }
+            (None, _) => prev.is_none(),
+            _ => false,
+        };
+        if wanted == prev && size_matches {
+            return;
+        }
+        self.dock_overhang = wanted;
+        self.main.set_dock_edge(match wanted {
+            Some((raptim::docking::Edge::Left, _)) => 0,
+            Some((raptim::docking::Edge::Right, _)) => 1,
+            Some((raptim::docking::Edge::Top, _)) => 2,
+            None => -1,
+        });
+        self.main
+            .set_dock_overhang(wanted.map_or(0., |(_, pad)| pad as f32 / scale));
+        self.sync_edge_ui();
+        if let Some((edge, pad)) = wanted
+            && let Some((dock_edge, visible)) = self.dock
+            && dock_edge == edge
+        {
+            let hwnd = raptim::docking::docked_hwnd_rect(edge, visible, pad);
+            if self.edge_hidden || self.edge_motion.is_some() {
+                platform::set_size_no_activate(self.main.window(), hwnd.width, hwnd.height);
+            } else {
+                platform::set_bounds(self.main.window(), hwnd);
+                if let Some(work) = self.dock_work {
+                    platform::move_clipped(self.main.window(), (hwnd.x, hwnd.y), work);
+                }
+            }
+            windowing::invalidate(self.main.window());
+            platform::request_redraw_now(self.main.window());
+        } else if let Some((old_edge, old_pad)) = prev
+            && let Some((actual, work)) = platform::geometry(self.main.window())
+        {
+            let mut visible = raptim::docking::visible_rect_from_hwnd(old_edge, actual, old_pad);
+            visible.x = visible
+                .x
+                .clamp(work.x, work.x + (work.width - visible.width).max(0));
+            visible.y = visible
+                .y
+                .clamp(work.y, work.y + (work.height - visible.height).max(0));
+            platform::set_bounds(self.main.window(), visible);
+            windowing::invalidate(self.main.window());
+            platform::request_redraw_now(self.main.window());
+        }
+    }
+    fn edge_strip_px(&self) -> i32 {
+        if self.settings.edge_strip_visible {
+            self.settings.edge_strip_width_px as i32
+        } else {
+            0
+        }
+    }
+    fn sync_edge_ui(&self) {
+        let scale = self.main.window().scale_factor().max(0.5);
+        self.main.set_edge_progress(self.edge_progress);
+        self.main
+            .set_edge_strip_size(self.edge_strip_px() as f32 / scale);
+    }
+    fn apply_theme(&self) {
+        let mode = self.settings.theme_mode;
+        let changed = platform::apply_window_theme(self.main.window(), mode, false);
+        if let Some(ui) = self.settings_ui.get() {
+            platform::apply_window_theme(ui.window(), mode, changed);
+        }
+        if let Some(editor) = &self.editor {
+            platform::apply_window_theme(editor.window.window(), mode, changed);
+        }
+    }
+    fn sync_edge_appearance(&self) {
+        self.sync_edge_ui();
+        let appearance = raptim::docking::collapsed_appearance(
+            self.dock.is_some() && self.settings.edge_hide,
+            self.edge_hidden,
+            self.edge_progress,
+            self.edge_motion.is_some(),
+            self.edge_strip_px(),
+        );
+        platform::set_collapsed_appearance(self.main.window(), appearance);
+    }
     /// Appearance only: un-fade and slide the window back to its docked rectangle. Refuses to
     /// touch the window while any protection holds, so a background tick can never reveal it.
     fn reveal_edge(&mut self) {
@@ -194,19 +307,29 @@ impl App {
         }
         let displaced = self.edge_hidden || self.edge_progress > 0.;
         self.edge_motion = None;
-        self.motion_frame = None;
         self.edge_progress = 0.;
+        self.edge_hidden = false;
         self.focus_hide.reset();
         platform::set_opacity(self.main.window(), 1.);
-        if displaced && let Some((_, r)) = self.dock {
-            self.main
-                .window()
-                .set_position(slint::PhysicalPosition::new(r.x, r.y));
+        self.sync_edge_appearance();
+        if displaced && let Some((edge, r)) = self.dock {
+            let pad = self.dock_overhang_for(edge);
+            let hwnd = raptim::docking::docked_hwnd_rect(edge, r, pad);
+            if pad > 0
+                && let Some(work) = self.dock_work
+            {
+                platform::move_clipped(self.main.window(), (hwnd.x, hwnd.y), work);
+                platform::finish_edge_motion(self.main.window());
+            } else {
+                self.main
+                    .window()
+                    .set_position(slint::PhysicalPosition::new(hwnd.x, hwnd.y));
+            }
             platform::decorate(self.main.window());
             windowing::invalidate(self.main.window());
+            self.apply_theme();
             platform::topmost(self.main.window(), self.wants_topmost());
         }
-        self.edge_hidden = false;
     }
     /// A user-initiated summon. Clearing `protected_edge_waiting` means "the collapsed recovery
     /// state is consumed", which only this path is allowed to decide.
@@ -218,9 +341,10 @@ impl App {
     /// Deterministic collapsed state, used when protection interrupts an in-flight slide.
     fn settle_edge_hidden(&mut self) {
         self.edge_motion = None;
-        self.motion_frame = None;
         self.edge_progress = 1.;
         self.edge_hidden = true;
+        self.edge_hold.clear();
+        self.sync_edge_appearance();
     }
     /// Applies the current temporary pin, then refreshes the tray check marks.
     fn apply_pin(&mut self) {
@@ -250,6 +374,9 @@ impl App {
             self.settle_edge_hidden();
             return;
         }
+        if hidden {
+            self.edge_hold.clear();
+        }
         self.protected_edge_waiting = false;
         if self.edge_hidden == hidden && self.edge_motion.is_some() {
             return;
@@ -260,13 +387,17 @@ impl App {
             .map_or((self.edge_progress, 0., true), |motion| motion.sample(now));
         self.edge_progress = position;
         self.edge_hidden = hidden;
-        self.edge_motion = Some(diascia::docking::Motion::new(
+        self.edge_motion = Some(raptim::docking::Motion::new(
             position,
             velocity,
             hidden,
             now,
             platform::animations_enabled(),
         ));
+        self.sync_edge_appearance();
+        if !hidden {
+            self.apply_theme();
+        }
         // Keep the same z-order throughout the slide; restore the user's level
         // only once the reveal has settled.
         platform::topmost(self.main.window(), true);
@@ -279,6 +410,7 @@ impl App {
         if !self.main.window().is_visible() || self.policy.protection() != Protection::Normal {
             self.drag = None;
             self.edge_motion = None;
+            self.edge_hold.clear();
             self.focus_hide.reset();
             return;
         }
@@ -289,19 +421,20 @@ impl App {
             if !platform::mouse_down() {
                 self.drag = None;
                 if self.settings.edge_hide
-                    && let Some((r, work)) = platform::geometry(self.main.window())
+                    && let Some((raw, work)) = platform::geometry(self.main.window())
                 {
-                    self.dock = diascia::docking::dock(
+                    let r = if let Some((edge, pad)) = self.dock_overhang {
+                        raptim::docking::visible_rect_from_hwnd(edge, raw, pad)
+                    } else {
+                        raw
+                    };
+                    self.dock = raptim::docking::dock(
                         r,
                         work,
                         (14. * self.main.window().scale_factor()) as i32,
                     );
                     self.dock_work = Some(work);
-                    if let Some((_, r)) = self.dock {
-                        self.main
-                            .window()
-                            .set_position(slint::PhysicalPosition::new(r.x, r.y));
-                    }
+                    self.sync_dock_overhang();
                 }
                 self.edge_since = now;
             }
@@ -329,29 +462,55 @@ impl App {
         let cursor = platform::cursor();
         if self.edge_progress == 0.
             && self.edge_motion.is_none()
-            && let Some((_, old)) = self.dock
+            && let Some((edge, old)) = self.dock
             && let Some((actual, work)) = platform::geometry(self.main.window())
-            && (actual.x != old.x || actual.y != old.y)
         {
-            self.dock = diascia::docking::dock(actual, work, 0);
-            self.dock_work = Some(work);
-            self.edge_since = now;
+            let expected =
+                raptim::docking::docked_hwnd_rect(edge, old, self.dock_overhang_for(edge));
+            if actual.x != expected.x || actual.y != expected.y {
+                let visible = raptim::docking::visible_rect_from_hwnd(
+                    edge,
+                    actual,
+                    self.dock_overhang_for(edge),
+                );
+                self.dock = raptim::docking::dock(visible, work, 0);
+                self.dock_work = Some(work);
+                self.edge_since = now;
+                self.sync_dock_overhang();
+            }
         }
         if let Some((edge, old)) = self.dock {
             let size = self.main.window().size();
+            let scale = self.main.window().scale_factor();
+            let applied_pad = self.dock_overhang_for(edge);
+            let wanted_pad = if self.settings.edge_hide {
+                raptim::docking::overhang_px(scale)
+            } else {
+                0
+            };
+            let expected = raptim::docking::docked_hwnd_rect(edge, old, applied_pad);
             if let Some(work) =
                 platform::work_area_at((old.x + old.width / 2, old.y + old.height / 2))
                 && (Some(work) != self.dock_work
-                    || size.width as i32 != old.width
-                    || size.height as i32 != old.height)
+                    || size.width as i32 != expected.width
+                    || size.height as i32 != expected.height
+                    || applied_pad != wanted_pad)
             {
-                let waiting = self.protected_edge_waiting;
-                if !waiting {
+                let stay_hidden = self.protected_edge_waiting || self.edge_hidden;
+                if !stay_hidden {
                     self.reveal_edge();
                 }
+                let raw_w = size.width as i32;
+                let raw_h = size.height as i32;
+                let (vis_w, vis_h) = match edge {
+                    raptim::docking::Edge::Left | raptim::docking::Edge::Right => {
+                        ((raw_w - applied_pad).max(1), raw_h.max(1))
+                    }
+                    raptim::docking::Edge::Top => (raw_w.max(1), (raw_h - applied_pad).max(1)),
+                };
                 let mut rect = windowing::Rect {
-                    width: size.width as i32,
-                    height: size.height as i32,
+                    width: vis_w.min(work.width.max(1)),
+                    height: vis_h.min(work.height.max(1)),
                     ..old
                 };
                 rect.x = rect
@@ -361,27 +520,26 @@ impl App {
                     .y
                     .clamp(work.y, work.y + (work.height - rect.height).max(0));
                 match edge {
-                    diascia::docking::Edge::Left => rect.x = work.x,
-                    diascia::docking::Edge::Right => rect.x = work.x + work.width - rect.width,
-                    diascia::docking::Edge::Top => rect.y = work.y,
+                    raptim::docking::Edge::Left => rect.x = work.x,
+                    raptim::docking::Edge::Right => rect.x = work.x + work.width - rect.width,
+                    raptim::docking::Edge::Top => rect.y = work.y,
                 }
                 self.dock = Some((edge, rect));
                 self.dock_work = Some(work);
-                if waiting {
-                    let strip = if self.settings.edge_strip_visible {
-                        self.settings.edge_strip_width_px as i32
-                    } else {
-                        0
-                    };
+                self.sync_dock_overhang();
+                let pad = self.dock_overhang_for(edge);
+                if stay_hidden {
+                    let strip = self.edge_strip_px();
                     platform::move_clipped(
                         self.main.window(),
-                        diascia::docking::hidden_position(edge, rect, strip),
+                        raptim::docking::hidden_hwnd_position(edge, rect, strip, pad),
                         work,
                     );
+                    self.sync_edge_appearance();
                 } else {
-                    self.main
-                        .window()
-                        .set_position(slint::PhysicalPosition::new(rect.x, rect.y));
+                    let hwnd = raptim::docking::docked_hwnd_rect(edge, rect, pad);
+                    platform::set_bounds(self.main.window(), hwnd);
+                    platform::move_clipped(self.main.window(), (hwnd.x, hwnd.y), work);
                     platform::decorate(self.main.window());
                 }
             }
@@ -392,11 +550,12 @@ impl App {
             || (self.edge_progress == 0.
                 && platform::mouse_down()
                 && platform::geometry(self.main.window())
-                    .is_some_and(|(rect, _)| diascia::docking::contains(rect, cursor)));
+                    .is_some_and(|(rect, _)| raptim::docking::contains(rect, cursor)));
         if paused {
             if self.edge_progress > 0. || self.edge_motion.is_some() {
                 self.animate_edge(false);
             } else {
+                self.edge_hold.refresh_pending(now);
                 self.edge_since = now;
                 return;
             }
@@ -407,28 +566,29 @@ impl App {
             if !self.settings.edge_hide {
                 self.reveal_edge();
                 self.dock = None;
+                self.edge_hold.clear();
+                self.sync_dock_overhang();
                 platform::decorate(self.main.window());
                 return;
             }
-            let strip = if self.settings.edge_strip_visible {
-                self.settings.edge_strip_width_px as i32
-            } else {
-                0
-            };
-            let band = diascia::docking::reveal_band(edge, r, strip);
+            let strip = self.edge_strip_px();
+            let band = raptim::docking::reveal_band(edge, r, strip);
+            let pointer_inside = raptim::docking::contains(r, cursor);
             if paused {
+                self.edge_hold.refresh_pending(now);
                 self.edge_since = now;
             } else if self.edge_hidden {
-                if diascia::docking::contains(band, cursor)
+                self.edge_hold.clear();
+                if raptim::docking::contains(band, cursor)
                     || (self.edge_motion.is_some()
                         && platform::geometry(self.main.window()).is_some_and(|(actual, _)| {
-                            diascia::docking::contains(actual, cursor)
+                            raptim::docking::contains(actual, cursor)
                                 && self
                                     .dock_work
-                                    .is_some_and(|work| diascia::docking::contains(work, cursor))
+                                    .is_some_and(|work| raptim::docking::contains(work, cursor))
                         }))
                 {
-                    if self.edge_since.elapsed() >= Duration::from_millis(40)
+                    if self.edge_since.elapsed() >= Duration::from_millis(24)
                         && self.allowed(ShowSource::Hotkey)
                     {
                         self.animate_edge(false);
@@ -437,41 +597,58 @@ impl App {
                 } else {
                     self.edge_since = now;
                 }
-            } else if diascia::docking::contains(r, cursor) {
-                self.edge_since = now;
-            } else if self.edge_motion.is_some() {
-                // A recall must finish before starting the leave deadline.
-                self.edge_since = now;
-            } else if self.edge_since.elapsed() >= Duration::from_millis(150) {
-                self.animate_edge(true);
-                self.edge_since = now;
+            } else {
+                let holding = self.edge_hold.is_active()
+                    && self.edge_hold.hold(
+                        pointer_inside,
+                        self.edge_motion.is_some(),
+                        platform::app_has_focus(),
+                        now,
+                    );
+                if pointer_inside || holding || self.edge_motion.is_some() {
+                    // Stay open while the pointer is inside, an explicit summon holds focus,
+                    // or a reveal slide is still finishing.
+                    self.edge_since = now;
+                } else if self.edge_since.elapsed()
+                    >= Duration::from_millis(u64::from(self.settings.edge_collapse_delay_ms))
+                {
+                    self.animate_edge(true);
+                    self.edge_since = now;
+                }
             }
             if advance_motion && let Some(motion) = self.edge_motion {
-                if let Some(previous) = self.motion_frame.replace(now) {
-                    diascia::metrics::record(
-                        "animation_frame_ms",
-                        now.duration_since(previous).as_secs_f64() * 1000.,
-                    );
-                }
-                let (value, done) = motion.value(now);
-                self.edge_progress = value;
-                let end = diascia::docking::hidden_position(edge, r, strip);
-                let x = (r.x as f32 + (end.0 - r.x) as f32 * value).round() as i32;
-                let y = (r.y as f32 + (end.1 - r.y) as f32 * value).round() as i32;
+                let pad = self.dock_overhang_for(edge);
+                let start = raptim::docking::docked_hwnd_rect(edge, r, pad);
+                let end = raptim::docking::hidden_hwnd_position(edge, r, strip, pad);
+                let (value, sampled_done) = motion.value(now);
+                let target_pos = if self.edge_hidden {
+                    end
+                } else {
+                    (start.x, start.y)
+                };
+                let x = (start.x as f32 + (end.0 - start.x) as f32 * value).round() as i32;
+                let y = (start.y as f32 + (end.1 - start.y) as f32 * value).round() as i32;
+                let done =
+                    sampled_done || ((x, y) == target_pos && (value - motion.to).abs() < 0.015);
+                self.edge_progress = if done { motion.to } else { value };
+                let pos = if done { target_pos } else { (x, y) };
                 if let Some(work) = self.dock_work {
-                    platform::move_clipped(self.main.window(), (x, y), work);
+                    platform::move_clipped(self.main.window(), pos, work);
                 }
                 if done {
-                    self.motion_frame = None;
                     self.edge_motion = None;
                     if !self.edge_hidden {
                         platform::finish_edge_motion(self.main.window());
                         platform::topmost(self.main.window(), self.wants_topmost());
-                        windowing::invalidate(self.main.window());
                     }
+                }
+                self.sync_edge_appearance();
+                if self.edge_progress > 0.60 || done {
+                    platform::request_redraw_now(self.main.window());
                 }
             }
         } else {
+            self.edge_hold.clear();
             let opacity = self.focus_hide.opacity(
                 self.settings.hide_on_focus_loss,
                 platform::app_has_focus(),
@@ -516,14 +693,10 @@ impl App {
             self.edge_since = now;
             return true;
         }
-        let strip = if self.settings.edge_strip_visible {
-            self.settings.edge_strip_width_px as i32
-        } else {
-            0
-        };
+        let strip = self.edge_strip_px();
         let cursor = platform::cursor();
-        if diascia::docking::contains(diascia::docking::reveal_band(edge, rect, strip), cursor) {
-            if self.edge_since.elapsed() >= Duration::from_millis(40)
+        if raptim::docking::contains(raptim::docking::reveal_band(edge, rect, strip), cursor) {
+            if self.edge_since.elapsed() >= Duration::from_millis(24)
                 && self.allowed(ShowSource::Hotkey)
             {
                 self.animate_edge(false);
@@ -533,8 +706,8 @@ impl App {
             self.edge_since = now;
             let work = self.dock_work.unwrap_or(rect);
             let approach =
-                diascia::docking::approach_band(edge, work, strip, Self::APPROACH_MARGIN_PX);
-            self.collapsed_far = !diascia::docking::contains(approach, cursor);
+                raptim::docking::approach_band(edge, work, strip, Self::APPROACH_MARGIN_PX);
+            self.collapsed_far = !raptim::docking::contains(approach, cursor);
         }
         true
     }
@@ -543,7 +716,7 @@ impl App {
         let Some(entry) = self.editor_draft() else {
             return;
         };
-        match diascia::paths::convert_target(&entry.target, &self.data_dir, relative) {
+        match raptim::paths::convert_target(&entry.target, &self.data_dir, relative) {
             Ok(target) => {
                 if let Some(session) = &self.editor {
                     session.window.set_target(target.value().into());
@@ -629,7 +802,6 @@ impl App {
         self.main.set_status(text.into());
     }
     fn refresh(&mut self) -> Result<()> {
-        let started = Instant::now();
         if let Some(initial) = self.initial.take() {
             self.collections = initial.collections;
             self.entries = initial.entries;
@@ -639,10 +811,8 @@ impl App {
             self.entries = self.store.entries()?;
         }
         self.search_index.sync(&self.entries);
-        self.record_dataset();
         let ids: std::collections::HashSet<_> = self.entries.iter().map(|e| e.id).collect();
         self.icon_cache.retain(&ids);
-        let keyed = Instant::now();
         self.icon_index = self
             .entries
             .iter()
@@ -650,14 +820,13 @@ impl App {
             .map(|(index, e)| {
                 (
                     e.id,
-                    diascia::icons::IconKey {
-                        fingerprint: diascia::icons::fingerprint(&e.icon),
+                    raptim::icons::IconKey {
+                        fingerprint: raptim::icons::fingerprint(&e.icon),
                         index,
                     },
                 )
             })
             .collect();
-        diascia::metrics::record("icon_index_ms", keyed.elapsed().as_secs_f64() * 1000.);
         self.eligible = None;
         self.collection_names = self
             .collections
@@ -673,10 +842,7 @@ impl App {
                 (c.id, name)
             })
             .collect();
-        // `n` in the probe table is the refresh count, so no separate counter is needed.
-        let rebuilt = self.rebuild_navigation();
-        diascia::metrics::record("refresh_ms", started.elapsed().as_secs_f64() * 1000.);
-        rebuilt
+        self.rebuild_navigation()
     }
     fn rebuild_navigation(&mut self) -> Result<()> {
         if !self
@@ -779,7 +945,7 @@ impl App {
                 Default::default()
             },
             checked: self.browsing.selected.contains(&e.id),
-            tooltip_path: diascia::paths::display_target(&e.target, &self.data_dir).into(),
+            tooltip_path: raptim::paths::display_target(&e.target, &self.data_dir).into(),
             tooltip_notes: e.notes.clone().into(),
             id: e.id as i32,
             name: e.name.clone().into(),
@@ -803,7 +969,7 @@ impl App {
                 .entries
                 .iter()
                 .filter(|e| {
-                    diascia::session::SearchScope::from(scope).includes(
+                    raptim::session::SearchScope::from(scope).includes(
                         e.collection_id,
                         &self.collections,
                         self.group,
@@ -848,23 +1014,17 @@ impl App {
         }
     }
     fn evaluate(&mut self) {
-        let started = Instant::now();
         let mut signals = platform::collect_signals(&self.settings, &mut self.protection_cache);
         signals.auxiliary_open = self.auto_hide_guard().auxiliary_open();
         signals.bypass = self.policy.bypass();
         let hold = signals.hold_release();
         self.apply_protection(decide(signals), Instant::now(), hold);
-        self.last_evaluated = started;
-        diascia::metrics::record(
-            "evaluate_us",
-            started.elapsed().as_micros().min(u16::MAX as u128) as f64,
-        );
+        self.last_evaluated = Instant::now();
     }
     /// Win-event and display broadcasts are only hints that something may have changed, and a
     /// fullscreen video can deliver them far faster than a shell query costs.
     fn evaluate_suggested(&mut self) {
         if self.last_evaluated.elapsed() < Duration::from_millis(120) {
-            diascia::metrics::record("evaluate_dropped", 1.);
             return;
         }
         self.evaluate();
@@ -873,7 +1033,7 @@ impl App {
         let previous = self.policy.protection();
         let changed = self.policy.update(signal, now, hold);
         if changed {
-            diascia::diagnostics::protection(
+            raptim::diagnostics::protection(
                 "transition",
                 "",
                 &format!("{:?}", self.policy.protection()),
@@ -925,7 +1085,7 @@ impl App {
         if !allowed {
             // Release builds discard stderr, so the block reason has to reach the log to be
             // diagnosable at all.
-            diascia::diagnostics::protection(
+            raptim::diagnostics::protection(
                 "blocked",
                 &format!("{source:?}"),
                 &format!("{:?}", self.policy.protection()),
@@ -934,22 +1094,39 @@ impl App {
         }
         allowed
     }
+    fn dismiss_search_state(&mut self) {
+        if !self.main.get_search_open() {
+            return;
+        }
+        self.main.set_search_open(false);
+        self.main.set_query("".into());
+        self.search_was_open = false;
+        self.render_search();
+        self.main.invoke_restore_grid_focus();
+    }
     fn hide_all(&mut self) {
         self.protected_edge_waiting = false;
         self.protection_resume.cancel();
+        self.main.set_keyboard_focus(false);
+        self.dismiss_search_state();
         self.hide_windows();
     }
     fn hide_windows(&mut self) {
         self.save_window(true);
+        self.edge_hold.clear();
         self.interaction_timer.stop();
         self.frame_clock.set_active(false);
         windowing::close_popups(self.main.window());
         if let Some(ui) = self.settings_ui.get() {
             windowing::close_popups(ui.window());
         }
+        let _ = self.main.hide();
+        platform::set_collapsed_appearance(
+            self.main.window(),
+            raptim::docking::CollapsedAppearance::Normal,
+        );
         platform::set_opacity(self.main.window(), 1.);
         platform::topmost(self.main.window(), false);
-        let _ = self.main.hide();
         if let Some(ui) = self.settings_ui.get() {
             let _ = ui.hide();
         }
@@ -965,17 +1142,61 @@ impl App {
         self.main.invoke_close_popups();
     }
     fn show_main(&mut self, source: ShowSource) {
+        let silent = std::mem::take(&mut self.silent_startup);
         if !self.allowed(source) {
+            return;
+        }
+        if source == ShowSource::Startup && silent {
+            if self.settings.edge_hide
+                && let Some(edge) = self.saved_window.edge.and_then(|e| match e {
+                    0 => Some(raptim::docking::Edge::Left),
+                    1 => Some(raptim::docking::Edge::Right),
+                    2 => Some(raptim::docking::Edge::Top),
+                    _ => None,
+                })
+            {
+                platform::restore_saved(self.main.window(), &self.saved_window);
+                if let Some((rect, work)) = platform::geometry(self.main.window()) {
+                    self.dock = Some((edge, rect));
+                    self.dock_work = Some(work);
+                    self.edge_motion = None;
+                    self.edge_hidden = true;
+                    self.edge_hold.clear();
+                    self.edge_progress = 1.;
+                    self.position_restored = true;
+                    self.focus_hide.reset();
+                    self.edge_since = Instant::now();
+                    self.sync_dock_overhang();
+                    let strip = self.edge_strip_px();
+                    let pad = self.dock_overhang_for(edge);
+                    platform::move_clipped(
+                        self.main.window(),
+                        raptim::docking::hidden_hwnd_position(edge, rect, strip, pad),
+                        work,
+                    );
+                    platform::topmost(self.main.window(), true);
+                    platform::launcher_window(self.main.window());
+                    self.sync_edge_appearance();
+                    let _ = platform::show_without_activation(self.main.window());
+                    self.apply_theme();
+                    self.install_external_drop();
+                    windowing::invalidate(self.main.window());
+                    self.schedule_interaction();
+                }
+            }
             return;
         }
         let visible_edge = self.main.window().is_visible()
             && self.dock.is_some()
             && (self.edge_progress > 0. || self.edge_motion.is_some());
-        if !self.main.window().is_visible()
-            && let Err(e) = windowing::show(self.main.window())
-        {
-            self.status(e);
-            return;
+        if !self.main.window().is_visible() {
+            if platform::native_ready(self.main.window()) {
+                platform::topmost(self.main.window(), self.wants_topmost());
+            }
+            if let Err(e) = windowing::show(self.main.window()) {
+                self.status(e);
+                return;
+            }
         }
         self.initialize_native_state();
         if visible_edge && !self.auto_hide_guard().auxiliary_open() {
@@ -985,7 +1206,6 @@ impl App {
             self.user_summon_edge();
         }
         self.schedule_interaction();
-        diascia::metrics::record("show_requested", source as u8 as f64);
         platform::launcher_window(self.main.window());
         platform::topmost(
             self.main.window(),
@@ -993,12 +1213,17 @@ impl App {
         );
         platform::focus(self.main.window());
         self.focus_hide.reset();
+        if self.dock.is_some() && self.settings.edge_hide && !self.edge_hidden {
+            self.edge_hold
+                .arm(Instant::now(), platform::app_has_focus());
+        }
         if self.settings_open {
             let _ = windowing::show_child(self.settings_ui.window(), self.main.window());
         }
         if let Some(editor) = &self.editor {
             let _ = windowing::show_child(editor.window.window(), self.main.window());
         }
+        self.apply_theme();
     }
     fn show_settings(&mut self) {
         if !self.allowed(ShowSource::Settings) {
@@ -1008,11 +1233,11 @@ impl App {
         if self.settings_ui.get().is_none() {
             match create_settings(
                 &self.weak_self.upgrade().expect("live application"),
+                self.main.as_weak(),
                 &self.data_dir,
             ) {
                 Ok(ui) => {
                     let _ = self.settings_ui.0.set(ui);
-                    self.sync_settings_ui();
                 }
                 Err(e) => {
                     self.status(e);
@@ -1020,11 +1245,14 @@ impl App {
                 }
             }
         }
+        self.sync_settings_ui();
         self.show_main(ShowSource::Settings);
         self.settings_open = true;
         if let Err(error) = windowing::show_child(self.settings_ui.window(), self.main.window()) {
             self.settings_open = false;
             self.status(error);
+        } else {
+            self.apply_theme();
         }
     }
     fn close_settings(&mut self) {
@@ -1041,11 +1269,15 @@ impl App {
     }
     fn sync_main_settings(&self) {
         self.main.set_double_click(self.settings.double_click);
+        self.main.set_type_to_search(self.settings.type_to_search);
         self.main.set_icon_size(i32::from(self.settings.icon_size));
         self.main.set_list_view(self.settings.list_view);
         self.main.set_hover_switch(self.settings.hover_switch);
         self.main
             .set_hover_delay(self.settings.hover_delay_ms as i32);
+        self.sync_edge_ui();
+        self.tray
+            .set_tooltip(&format!("Raptim · {}", self.settings.hotkey));
     }
     fn sync_settings_ui(&self) {
         self.sync_main_settings();
@@ -1055,9 +1287,18 @@ impl App {
         self.settings_ui
             .set_hotkey_text(self.settings.hotkey.clone().into());
         self.settings_ui.set_protected_error("".into());
+        self.settings_ui
+            .set_theme_mode(i32::from(self.settings.theme_mode));
         self.settings_ui.set_autostart(self.settings.autostart);
+        self.settings_ui.set_autostart_warning(
+            platform::autostart_mismatch(&self.data_dir, self.settings.autostart)
+                .unwrap_or_default()
+                .into(),
+        );
         self.settings_ui
             .set_double_click(self.settings.double_click);
+        self.settings_ui
+            .set_type_to_search(self.settings.type_to_search);
         self.settings_ui.set_edge_hide(self.settings.edge_hide);
         self.settings_ui
             .set_keep_topmost(self.saved_window.always_on_top);
@@ -1066,6 +1307,8 @@ impl App {
         self.settings_ui
             .set_edge_strip_width(self.settings.edge_strip_width_px as i32);
         self.settings_ui
+            .set_edge_collapse_delay(self.settings.edge_collapse_delay_ms as i32);
+        self.settings_ui
             .set_hide_on_focus_loss(self.settings.hide_on_focus_loss);
         self.settings_ui
             .set_hover_switch(self.settings.hover_switch);
@@ -1073,7 +1316,6 @@ impl App {
             .set_hover_delay(self.settings.hover_delay_ms as i32);
         self.settings_ui
             .set_relative_paths(self.settings.relative_paths);
-        self.sync_main_settings();
         self.settings_ui
             .set_hide_after_launch(self.settings.hide_after_launch);
         self.settings_ui
@@ -1083,15 +1325,20 @@ impl App {
             .set_fullscreen_protection(self.settings.fullscreen_protection);
         self.settings_ui
             .set_protected_apps(strings(self.settings.protected_apps.clone()));
+        self.settings_ui
+            .set_has_error_log(raptim::diagnostics::error_log_path().is_some_and(|p| p.exists()));
     }
     fn settings_value(&self) -> Settings {
         let mut draft = self.settings.clone();
         draft.hotkey = self.settings_ui.get_hotkey_text().to_string();
+        draft.theme_mode = self.settings_ui.get_theme_mode().clamp(0, 2) as u8;
         draft.autostart = self.settings_ui.get_autostart();
         draft.double_click = self.settings_ui.get_double_click();
+        draft.type_to_search = self.settings_ui.get_type_to_search();
         draft.edge_hide = self.settings_ui.get_edge_hide();
         draft.edge_strip_visible = self.settings_ui.get_edge_strip_visible();
         draft.edge_strip_width_px = self.settings_ui.get_edge_strip_width() as u32;
+        draft.edge_collapse_delay_ms = self.settings_ui.get_edge_collapse_delay() as u32;
         draft.hide_on_focus_loss = self.settings_ui.get_hide_on_focus_loss();
         draft.hover_switch = self.settings_ui.get_hover_switch();
         draft.hover_delay_ms = self.settings_ui.get_hover_delay() as u32;
@@ -1133,7 +1380,7 @@ impl App {
             return;
         }
         let draft = self.settings_value();
-        if let Err(e) = diascia::storage::validate_settings(&draft) {
+        if let Err(e) = raptim::storage::validate_settings(&draft) {
             if field == 1 {
                 // Roll the list back so an invalid entry cannot leak into the
                 // next settings_value read from another field's apply.
@@ -1175,11 +1422,22 @@ impl App {
                 if !draft.edge_hide {
                     self.protection_resume.cancel();
                     self.dock = None;
+                    self.edge_hold.clear();
                 }
                 self.settings = draft;
-                diascia::diagnostics::set_protection_log(self.settings.protection_log);
+                self.sync_dock_overhang();
+                if !self.settings.edge_hide {
+                    platform::decorate(self.main.window());
+                }
+                raptim::diagnostics::set_protection_log(self.settings.protection_log);
                 self.settings_ui.set_hotkey_error("".into());
+                self.settings_ui.set_autostart_warning(
+                    platform::autostart_mismatch(&self.data_dir, self.settings.autostart)
+                        .unwrap_or_default()
+                        .into(),
+                );
                 self.sync_main_settings();
+                self.apply_theme();
                 self.settings_ui.set_status("".into());
                 self.evaluate();
             }
@@ -1253,7 +1511,7 @@ impl App {
         let Some(entry) = self.entries.iter().find(|e| e.id == id) else {
             return;
         };
-        let mut target = diascia::paths::resolve_for_shell(&entry.target, &self.data_dir);
+        let mut target = raptim::paths::resolve_for_shell(&entry.target, &self.data_dir);
         if elevated {
             target = match target {
                 Target::Program {
@@ -1346,6 +1604,10 @@ impl App {
         self.store.update_targets_checked(&[updated], &[original])?;
         self.relocate_pending = 0;
         self.main.set_relocate_open(false);
+        self.broken_items.retain(|item| item.id != id);
+        if self.main.get_broken_open() {
+            self.sync_broken_ui();
+        }
         self.report_refresh();
         Ok(())
     }
@@ -1406,7 +1668,7 @@ impl App {
         };
         if entry.id == 0
             && self.settings.relative_paths
-            && let Ok(target) = diascia::paths::convert_target(&entry.target, &self.data_dir, true)
+            && let Ok(target) = raptim::paths::convert_target(&entry.target, &self.data_dir, true)
         {
             entry.target = target;
         }
@@ -1416,10 +1678,16 @@ impl App {
             }
             return;
         }
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|session| !session.icon_attempted && session.icon.is_empty())
+        let fetch_url_icon = matches!(entry.target, Target::Url { .. })
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|session| !session.icon_attempted && session.icon.is_empty());
+        if !fetch_url_icon
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|session| !session.icon_attempted && session.icon.is_empty())
         {
             self.saving_editor = true;
             if let Some(session) = &self.editor {
@@ -1429,9 +1697,13 @@ impl App {
             return;
         }
         match self.store.save_entry(&entry) {
-            Ok(_) => {
+            Ok(saved_id) => {
+                let target = entry.target.clone();
                 self.drop_editor();
                 self.report_refresh();
+                if fetch_url_icon {
+                    self.fill_icons(vec![(saved_id, target)]);
+                }
                 if self.quitting {
                     self.request_quit();
                 }
@@ -1453,6 +1725,18 @@ impl App {
             }
         }
         if self.file_dialog_open {
+            return;
+        }
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|session| session.window.get_discard_confirm())
+        {
+            if let Some(session) = &self.editor {
+                session.window.set_discard_confirm(false);
+                session.window.invoke_focus_name();
+            }
+            self.quitting = false;
             return;
         }
         if self
@@ -1502,7 +1786,6 @@ impl App {
     fn request_quit(&mut self) {
         self.protection_resume.cancel();
         self.save_window(true);
-        diascia::metrics::flush();
         if self.importing || !self.pending_files.is_empty() {
             self.status("正在收录文件，请完成后再退出");
             return;
@@ -1565,12 +1848,13 @@ impl App {
                     .pick_file(),
                 1 => dialog.add_filter("程序", &["exe"]).pick_file(),
                 2 => dialog
-                    .add_filter("Diascia 导出", &["json"])
-                    .set_file_name("diascia-export.json")
+                    .add_filter("Raptim 导出", &["json"])
+                    .set_file_name("raptim-export.json")
                     .save_file(),
                 7 if folder => dialog.pick_folder(),
                 7 => dialog.pick_file(),
-                _ => dialog.add_filter("Diascia 导出", &["json"]).pick_file(),
+                8 => dialog.pick_folder(),
+                _ => dialog.add_filter("Raptim 导出", &["json"]).pick_file(),
             };
             let value = path
                 .map(|p| p.to_string_lossy().to_string())
@@ -1589,13 +1873,11 @@ impl App {
         let path = PathBuf::from(&value);
         match kind {
             6 => {
-                let icon = diascia::icons::from_file(&path)?;
+                let icon = raptim::icons::from_file(&path)?;
                 self.icon_epoch += 1;
                 self.icon_pending = false;
                 if let Some(session) = &mut self.editor {
-                    session
-                        .window
-                        .set_entry_icon(diascia::icons::display(&icon));
+                    session.window.set_entry_icon(raptim::icons::display(&icon));
                     session.icon = icon;
                 }
             }
@@ -1616,11 +1898,34 @@ impl App {
                                 .into(),
                         );
                     }
-                    if path.extension().is_some_and(|e| {
+                    let is_shortcut = path.extension().is_some_and(|e| {
                         e.eq_ignore_ascii_case("lnk") || e.eq_ignore_ascii_case("url")
-                    }) {
+                    });
+                    if !session.window.get_editing() {
+                        let detected = if path.is_dir() {
+                            2
+                        } else if is_shortcut {
+                            4
+                        } else if path.extension().is_some_and(|e| {
+                            e.eq_ignore_ascii_case("exe")
+                                || e.eq_ignore_ascii_case("bat")
+                                || e.eq_ignore_ascii_case("cmd")
+                                || e.eq_ignore_ascii_case("msi")
+                                || e.eq_ignore_ascii_case("com")
+                        }) {
+                            0
+                        } else {
+                            1
+                        };
+                        session.window.set_kind(detected);
+                    } else if is_shortcut {
                         session.window.set_kind(4);
                     }
+                }
+            }
+            8 => {
+                if let Some(session) = &self.editor {
+                    session.window.set_working_dir(value.into());
                 }
             }
             1 => {
@@ -1651,7 +1956,7 @@ impl App {
                     return Err(Error::Invalid("导出文件超过 32 MB".into()));
                 }
                 let data: Export = serde_json::from_slice(&bytes)?;
-                diascia::storage::validate_export(&data)?;
+                raptim::storage::validate_export(&data)?;
                 // `validate_export` answers about the raw value, so an export stays legal whatever
                 // directory it was written on. This answers about the identity the rows are about to
                 // be indexed under: two spellings of one file pass the first gate and land on a
@@ -1703,7 +2008,7 @@ impl App {
         let paths = std::mem::take(&mut self.pending_files);
         let weak = self.main.as_weak();
         std::thread::spawn(move || {
-            let result = diascia::importing::file_entries(paths).map_err(|e| e.to_string());
+            let result = raptim::importing::file_entries(paths).map_err(|e| e.to_string());
             let value = serde_json::to_string(&result).expect("serializable import result");
             let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_files_ready(value.into()));
         });
@@ -1734,6 +2039,7 @@ impl App {
         self.browsing.group_categories.clear();
         self.settings = self.store.settings()?;
         self.sync_settings_ui();
+        self.apply_theme();
         self.refresh()?;
         self.pending_import = None;
         self.settings_ui.set_restore_confirm(false);
@@ -1741,6 +2047,371 @@ impl App {
         self.evaluate();
         Ok(())
     }
+    fn should_poll_tick(&self) -> bool {
+        self.main.window().is_visible()
+            || self
+                .settings_ui
+                .get()
+                .is_some_and(|ui| ui.window().is_visible())
+            || self
+                .editor
+                .as_ref()
+                .is_some_and(|e| e.window.window().is_visible())
+            || self.policy.protection() != Protection::Normal
+            || self.protected_edge_waiting
+    }
+    fn toggle_hotkey_visibility(&mut self) {
+        let can_toggle_off = self.main.window().is_visible()
+            && !self.edge_hidden
+            && self.edge_progress == 0.
+            && self.edge_motion.is_none()
+            && platform::app_has_focus()
+            && self.editor.is_none()
+            && !self.settings_open
+            && !self.file_dialog_open
+            && !self.main.get_interacting()
+            && self.main.get_inline_kind() == 0;
+        if can_toggle_off {
+            if self.dock.is_some() && self.settings.edge_hide && !self.main.get_pinned() {
+                self.dismiss_search_state();
+                self.main.set_keyboard_focus(false);
+                self.animate_edge(true);
+                self.edge_since = Instant::now();
+                self.schedule_interaction();
+            } else {
+                self.hide_all();
+            }
+        } else {
+            self.show_main(ShowSource::Hotkey);
+        }
+    }
+    fn step_category(&mut self, step: i32) {
+        if !self.finish_inline() {
+            return;
+        }
+        let mut ordered = Vec::new();
+        for group in self.collections.iter().filter(|c| c.parent_id.is_none()) {
+            for cat in self
+                .collections
+                .iter()
+                .filter(|c| c.parent_id == Some(group.id))
+            {
+                ordered.push((group.id, cat.id));
+            }
+        }
+        if ordered.len() <= 1 {
+            return;
+        }
+        let current = ordered
+            .iter()
+            .position(|&(g, c)| g == self.group && c == self.collection)
+            .unwrap_or(0);
+        let next = if step >= 0 {
+            (current + 1) % ordered.len()
+        } else {
+            (current + ordered.len() - 1) % ordered.len()
+        };
+        let (group, category) = ordered[next];
+        self.remember_view();
+        self.reset_batch_selection();
+        self.group = group;
+        self.collection = category;
+        self.browsing.group_categories.insert(group, category);
+        self.main.set_keyboard_focus(false);
+        if let Err(e) = self.rebuild_navigation() {
+            self.status(e);
+        }
+    }
+    fn begin_discover_apps(&mut self) {
+        if self.main.get_busy() {
+            return;
+        }
+        if !self.finish_inline() {
+            return;
+        }
+        self.user_summon_edge();
+        self.discovered_apps.clear();
+        self.discovered_checked.clear();
+        self.main
+            .set_discover_target_name(self.collection_name(self.collection));
+        self.main.set_discover_filter("".into());
+        self.main.set_discover_items(ModelRc::default());
+        self.main.set_discover_selected_count(0);
+        self.main.set_discover_loading(true);
+        self.main.set_discover_open(true);
+        self.main.invoke_focus_discover_filter();
+
+        let existing: std::collections::HashSet<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.collection_id == self.collection)
+            .map(|e| raptim::paths::resolve_for_shell(&e.target, &self.data_dir).duplicate_key())
+            .collect();
+        let data_dir = self.data_dir.clone();
+        let weak = self.main.as_weak();
+        std::thread::spawn(move || {
+            let mut apps = platform::discover_installed_entries();
+            apps.retain(|app| {
+                let key = raptim::paths::resolve_for_shell(&app.target, &data_dir).duplicate_key();
+                !existing.contains(&key)
+            });
+            let payload = serde_json::to_string(&apps).unwrap_or_else(|_| "[]".into());
+            let _ =
+                weak.upgrade_in_event_loop(move |ui| ui.invoke_native_event(18, payload.into()));
+        });
+    }
+    fn render_discover_list(&mut self) {
+        let needle = self.main.get_discover_filter().trim().to_lowercase();
+        let mut options = Vec::new();
+        let mut selected_count = 0i32;
+        for (index, app) in self.discovered_apps.iter().enumerate() {
+            if !needle.is_empty()
+                && !app.name.to_lowercase().contains(&needle)
+                && !app.detail.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            let checked = self.discovered_checked.get(index).copied().unwrap_or(false);
+            if checked {
+                selected_count += 1;
+            }
+            options.push(DiscoverOption {
+                checked,
+                index: index as i32,
+                name: app.name.clone().into(),
+                detail: app.detail.clone().into(),
+                kind: app.target.kind_index(),
+            });
+        }
+        self.main.set_discover_selected_count(selected_count);
+        self.main
+            .set_discover_items(Rc::new(VecModel::from(options)).into());
+    }
+    fn toggle_discovered(&mut self, idx: i32) {
+        let Ok(index) = usize::try_from(idx) else {
+            return;
+        };
+        if let Some(flag) = self.discovered_checked.get_mut(index) {
+            *flag = !*flag;
+            self.render_discover_list();
+        }
+    }
+    fn select_all_discovered(&mut self, checked: bool) {
+        let needle = self.main.get_discover_filter().trim().to_lowercase();
+        for (index, app) in self.discovered_apps.iter().enumerate() {
+            if (needle.is_empty()
+                || app.name.to_lowercase().contains(&needle)
+                || app.detail.to_lowercase().contains(&needle))
+                && let Some(flag) = self.discovered_checked.get_mut(index)
+            {
+                *flag = checked;
+            }
+        }
+        self.render_discover_list();
+    }
+    fn import_discovered(&mut self) {
+        if self.discovered_apps.is_empty() {
+            return;
+        }
+        let needle = self.main.get_discover_filter().trim().to_lowercase();
+        let mut new_entries = Vec::new();
+        for (index, app) in self.discovered_apps.iter().enumerate() {
+            if !self.discovered_checked.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            if !needle.is_empty()
+                && !app.name.to_lowercase().contains(&needle)
+                && !app.detail.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            let mut target = app.target.clone();
+            if self.settings.relative_paths
+                && let Ok(rel) = raptim::paths::convert_target(&target, &self.data_dir, true)
+            {
+                target = rel;
+            }
+            new_entries.push(Entry {
+                id: 0,
+                collection_id: self.collection,
+                name: app.name.clone(),
+                aliases: String::new(),
+                notes: String::new(),
+                target,
+                position: 0,
+                icon: Vec::new(),
+            });
+        }
+        if new_entries.is_empty() {
+            self.status("请先勾选要导入的软件");
+            return;
+        }
+        match self.store.add_entries(&new_entries) {
+            Ok((added, skipped)) => {
+                self.main.set_discover_open(false);
+                self.main.invoke_focus_browser();
+                self.report_refresh();
+                let wanted: Vec<_> = self
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        e.collection_id == self.collection
+                            && e.icon.is_empty()
+                            && !matches!(e.target, Target::Url { .. })
+                    })
+                    .map(|e| (e.id, e.target.clone()))
+                    .collect();
+                self.fill_icons(wanted);
+                self.status(if skipped > 0 {
+                    format!("已导入 {added} 项，跳过 {skipped} 项重复")
+                } else {
+                    format!("已导入 {added} 项软件")
+                });
+            }
+            Err(e) => self.status(e),
+        }
+    }
+    fn begin_broken_check(&mut self) {
+        if !self.finish_inline() {
+            return;
+        }
+        self.user_summon_edge();
+        self.broken_items.clear();
+        self.main.set_broken_items(ModelRc::default());
+        self.main.set_broken_loading(true);
+        self.main.set_broken_open(true);
+        let entries = self.entries.clone();
+        let data_dir = self.data_dir.clone();
+        let epoch = self.data_epoch;
+        let weak = self.main.as_weak();
+        std::thread::spawn(move || {
+            let installed: std::collections::HashSet<String> = platform::installed_apps()
+                .into_iter()
+                .map(|(aumid, _)| aumid.to_lowercase())
+                .collect();
+            let mut found = Vec::new();
+            for entry in entries {
+                let resolved = raptim::paths::resolve_for_shell(&entry.target, &data_dir);
+                let reason = match &resolved {
+                    Target::Url { .. } => None,
+                    Target::App { aumid } => {
+                        if installed.contains(&aumid.to_lowercase()) {
+                            None
+                        } else {
+                            Some("未找到对应的已安装应用")
+                        }
+                    }
+                    Target::Folder { path } => {
+                        let p = std::path::Path::new(path);
+                        let low = path.to_ascii_lowercase();
+                        if low.starts_with("shell:") || low.starts_with("::{") || p.is_dir() {
+                            None
+                        } else {
+                            Some("目标文件夹不存在")
+                        }
+                    }
+                    Target::Program { path, .. }
+                    | Target::File { path }
+                    | Target::Shortcut { path, .. } => {
+                        let p = std::path::Path::new(path);
+                        let low = path.to_ascii_lowercase();
+                        let on_path =
+                            matches!(resolved, Target::Program { .. }) && command_exists(path);
+                        if low.starts_with("shell:")
+                            || low.starts_with("::{")
+                            || p.exists()
+                            || on_path
+                        {
+                            None
+                        } else {
+                            Some("目标文件或快捷方式不存在")
+                        }
+                    }
+                };
+                if let Some(reason) = reason {
+                    found.push(BrokenEntry {
+                        id: entry.id,
+                        name: entry.name,
+                        target: entry.target.value().to_string(),
+                        reason: reason.to_string(),
+                        relocatable: entry.target.relocatable(),
+                    });
+                }
+            }
+            let payload = serde_json::to_string(&(epoch, found)).unwrap_or_default();
+            let _ =
+                weak.upgrade_in_event_loop(move |ui| ui.invoke_native_event(19, payload.into()));
+        });
+    }
+    fn sync_broken_ui(&self) {
+        let items: Vec<_> = self
+            .broken_items
+            .iter()
+            .map(|b| BrokenOption {
+                id: b.id as i32,
+                name: b.name.clone().into(),
+                target: b.target.clone().into(),
+                reason: b.reason.clone().into(),
+                relocatable: b.relocatable,
+            })
+            .collect();
+        self.main
+            .set_broken_items(Rc::new(VecModel::from(items)).into());
+    }
+    fn remove_broken_entry(&mut self, id: i64) {
+        if self.editor.as_ref().is_some_and(|e| e.original.id == id) {
+            self.status("请先关闭此项目的编辑窗口");
+            return;
+        }
+        if let Err(e) = self.store.delete_entry(id) {
+            self.status(e);
+            return;
+        }
+        self.broken_items.retain(|item| item.id != id);
+        self.sync_broken_ui();
+        if self.main.get_selected_id() == id as i32 {
+            self.main.set_selected_id(0);
+        }
+        self.report_refresh();
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    let trimmed = command.trim().trim_matches('"');
+    if trimmed.is_empty()
+        || trimmed.contains('\\')
+        || trimmed.contains('/')
+        || trimmed.contains(':')
+    {
+        return false;
+    }
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let has_ext = std::path::Path::new(trimmed).extension().is_some();
+    let exts: Vec<String> = if has_ext {
+        vec![String::new()]
+    } else {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    };
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &exts {
+            let candidate = if ext.is_empty() {
+                dir.join(trimmed)
+            } else {
+                dir.join(format!("{trimmed}{ext}"))
+            };
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
@@ -1763,6 +2434,7 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
             session.window.set_error("请先保存或取消当前编辑".into());
         }
         let _ = windowing::show_child(session.window.window(), state.main.window());
+        state.apply_theme();
         return;
     }
     state.drop_editor();
@@ -1796,7 +2468,7 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
             return;
         }
     };
-    ui.set_entry_icon(diascia::icons::display(&entry.icon));
+    ui.set_entry_icon(raptim::icons::display(&entry.icon));
     ui.set_entry_name(entry.name.clone().into());
     ui.set_target(entry.target.value().into());
     ui.set_aliases(entry.aliases.clone().into());
@@ -1867,6 +2539,7 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
     bind!(on_save, |s: &mut App| s.save_editor());
     bind!(on_cancel, |s: &mut App| s.cancel_editor());
     bind!(on_browse, |s: &mut App| s.dialog(0));
+    bind!(on_browse_working_dir, |s: &mut App| s.dialog(8));
     bind!(on_browse_icon, |s: &mut App| s.dialog(6));
     bind!(on_reset_icon, |s: &mut App| s.extract_editor_icon());
     let weak = Rc::downgrade(app);
@@ -1908,13 +2581,26 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
     let native_weak = state.main.as_weak();
     let generation = state.editor_generation;
     let weak = ui.as_weak();
+    let compose_weak = ui.as_weak();
     install_keys(
         ui.window(),
+        state.main.as_weak(),
         move |key| {
-            if key == slint::winit_030::winit::keyboard::NamedKey::Escape {
-                if let Some(ui) = weak.upgrade() {
-                    ui.invoke_cancel();
-                }
+            use slint::winit_030::winit::keyboard::{Key, NamedKey};
+            let Some(ui) = weak.upgrade() else {
+                return false;
+            };
+            if key.logical == &Key::Named(NamedKey::Escape) {
+                ui.invoke_cancel();
+                true
+            } else if key.modifiers.control_key()
+                && !key.modifiers.alt_key()
+                && key.logical == &Key::Named(NamedKey::Enter)
+                && !ui.get_discard_confirm()
+                && !ui.get_collection_open()
+                && !ui.get_picker_open()
+            {
+                ui.invoke_save();
                 true
             } else {
                 false
@@ -1937,8 +2623,12 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
                 ui.set_window_active(*active);
             }
         },
-        |_| {},
-        false,
+        move |active| {
+            if let Some(ui) = compose_weak.upgrade() {
+                ui.set_composing(active);
+            }
+        },
+        None,
     );
     ui.window().set_size(slint::LogicalSize::new(520., 650.));
     state.editor = Some(EditorSession {
@@ -1953,6 +2643,8 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
     });
     if let Err(e) = windowing::show_child(ui.window(), state.main.window()) {
         state.status(e);
+    } else {
+        state.apply_theme();
     }
     let weak = state.main.as_weak();
     slint::Timer::single_shot(Duration::ZERO, move || {
@@ -1969,33 +2661,91 @@ fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
     }
 }
 
-/// Debug-only evidence trail for real input-method behaviour, which no automated test here can
-/// produce. Release builds have no console, so this is a development affordance only.
-fn ime_trace(what: &str, active: bool) {
-    if cfg!(debug_assertions) && std::env::var_os("DIASCIA_IME_TRACE").is_some() {
-        eprintln!("[ime] {what} composing={active}");
+struct KeyAction<'a> {
+    logical: &'a slint::winit_030::winit::keyboard::Key,
+    modifiers: slint::winit_030::winit::keyboard::ModifiersState,
+}
+
+fn type_search_char<'a>(key: &'a KeyAction<'a>) -> Option<&'a str> {
+    if key.modifiers.control_key() || key.modifiers.alt_key() || key.modifiers.super_key() {
+        return None;
     }
+    let slint::winit_030::winit::keyboard::Key::Character(text) = key.logical else {
+        return None;
+    };
+    if text.is_empty() || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    Some(text.as_str())
+}
+
+fn apply_common_winit_event(
+    window: &slint::Window,
+    event: &slint::winit_030::winit::event::WindowEvent,
+    main_weak: &slint::Weak<MainWindow>,
+    full_frame_pending: &mut bool,
+    modifiers: &mut slint::winit_030::winit::keyboard::ModifiersState,
+) -> Option<slint::winit_030::EventResult> {
+    use slint::winit_030::{EventResult, winit::event::WindowEvent};
+    match event {
+        WindowEvent::ModifiersChanged(value) => *modifiers = value.state(),
+        WindowEvent::ThemeChanged(_) => {
+            let _ = main_weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(21, "".into()));
+            return Some(EventResult::PreventDefault);
+        }
+        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+            platform::refresh_geometry(window);
+            *full_frame_pending = true;
+        }
+        WindowEvent::RedrawRequested => {
+            windowing::prepare_tooltips(window);
+            if *full_frame_pending {
+                *full_frame_pending = false;
+                windowing::mark_full_frame(window);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn apply_ime_signal(
+    composition: &mut raptim::gestures::CompositionGuard,
+    value: &slint::winit_030::winit::event::Ime,
+) -> bool {
+    use raptim::gestures::ImeSignal;
+    use slint::winit_030::winit::event::Ime;
+    let signal = match value {
+        Ime::Preedit(_, cursor) => ImeSignal::Preedit {
+            has_cursor: cursor.is_some(),
+        },
+        Ime::Commit(_) => ImeSignal::Commit,
+        Ime::Enabled | Ime::Disabled => ImeSignal::Disabled,
+    };
+    composition.apply(signal)
 }
 
 fn install_keys(
     window: &slint::Window,
-    action: impl Fn(slint::winit_030::winit::keyboard::NamedKey) -> bool + 'static,
+    main_weak: slint::Weak<MainWindow>,
+    action: impl Fn(&KeyAction) -> bool + 'static,
     event_action: impl Fn(&slint::winit_030::winit::event::WindowEvent) + 'static,
     compose_sink: impl Fn(bool) + 'static,
-    guard_drag: bool,
+    drag_guard: Option<slint::Weak<MainWindow>>,
 ) {
     use slint::winit_030::{
         EventResult, WinitWindowAccessor,
         winit::{
-            event::{ElementState, Ime, WindowEvent},
-            keyboard::{Key, NamedKey},
+            event::{ElementState, WindowEvent},
+            keyboard::{Key, ModifiersState, NamedKey},
         },
     };
-    let mut gesture = diascia::gestures::DragGuard::default();
+    let guard_drag = drag_guard.is_some();
+    let mut gesture = raptim::gestures::DragGuard::default();
     let mut pointer = (0., 0.);
     let mut full_frame_pending = false;
-    let mut composition = diascia::gestures::CompositionGuard::default();
-    let mut control = false;
+    let mut composition = raptim::gestures::CompositionGuard::default();
+    let mut modifiers = ModifiersState::empty();
     let mut launcher = platform::LauncherProbe::default();
     window.on_winit_window_event(move |window, event| {
         if guard_drag {
@@ -2008,64 +2758,67 @@ fn install_keys(
                 WindowEvent::CursorMoved { position, .. } => {
                     let p = position.to_logical::<f64>(window.scale_factor() as f64);
                     pointer = (p.x, p.y);
-                    if gesture.suppress_move(pointer, Instant::now()) { return EventResult::PreventDefault; }
+                    if gesture.suppress_move(pointer, Instant::now()) {
+                        return EventResult::PreventDefault;
+                    }
                 }
-                WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                    if *state == ElementState::Pressed && pointer.1 >= 44. {
+                WindowEvent::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    let top = drag_guard
+                        .as_ref()
+                        .and_then(|w| w.upgrade())
+                        .map_or(44., |ui| {
+                            44. + if ui.get_dock_edge() == 2 {
+                                f64::from(ui.get_dock_overhang())
+                            } else {
+                                0.
+                            }
+                        });
+                    if *state == ElementState::Pressed && pointer.1 >= top {
                         gesture.press(pointer, Instant::now());
                     } else if *state == ElementState::Released && gesture.release() {
                         window.dispatch_event(slint::platform::WindowEvent::PointerExited);
                     }
                 }
-                WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. } => { gesture.reset(); }
+                WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. } => {
+                    gesture.reset();
+                }
                 _ => {}
             }
         }
+        if let Some(result) = apply_common_winit_event(
+            window,
+            event,
+            &main_weak,
+            &mut full_frame_pending,
+            &mut modifiers,
+        ) {
+            return result;
+        }
         match event {
-            WindowEvent::ModifiersChanged(modifiers) => control = modifiers.state().control_key(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } | WindowEvent::ThemeChanged(_) => {
-                platform::refresh_geometry(window);
-                // The size is still settling here, so the full repaint waits for this frame.
-                full_frame_pending = true;
-            }
-            WindowEvent::RedrawRequested => {
-                windowing::prepare_tooltips(window);
-                if full_frame_pending {
-                    full_frame_pending = false;
-                    windowing::mark_full_frame(window);
-                }
-            }
             WindowEvent::Ime(value) => {
-                use diascia::gestures::ImeSignal;
-                let signal = match value {
-                    Ime::Preedit(_, cursor) => ImeSignal::Preedit { has_cursor: cursor.is_some() },
-                    Ime::Commit(_) => ImeSignal::Commit,
-                    Ime::Enabled | Ime::Disabled => ImeSignal::Disabled,
-                };
-                compose_sink(composition.apply(signal));
-                ime_trace("transition", composition.active());
+                compose_sink(apply_ime_signal(&mut composition, value));
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed =>
-            {
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if composition.active() {
                     // Enter belongs to the candidate window while composing; characters must
                     // still reach the focused editor, which is the only commit-text channel.
-                    let swallowed = matches!(event.logical_key, Key::Named(NamedKey::Enter));
-                    if swallowed {
-                        ime_trace("Enter", true);
-                        return EventResult::PreventDefault;
-                    }
-                    return EventResult::Propagate;
+                    return if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
+                        EventResult::PreventDefault
+                    } else {
+                        EventResult::Propagate
+                    };
                 }
                 if windowing::has_popup(window) {
                     return EventResult::Propagate;
                 }
-                if control && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("a")) && action(slint::winit_030::winit::keyboard::NamedKey::Select) { return EventResult::PreventDefault; }
-                if control && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("f")) && action(slint::winit_030::winit::keyboard::NamedKey::Find) { return EventResult::PreventDefault; }
-                if let Key::Named(key) = event.logical_key
-                    && action(key)
-                {
+                if action(&KeyAction {
+                    logical: &event.logical_key,
+                    modifiers,
+                }) {
                     return EventResult::PreventDefault;
                 }
             }
@@ -2075,94 +2828,91 @@ fn install_keys(
     });
 }
 
-fn install_settings_keys(ui: &SettingsWindow) {
+fn install_settings_keys(ui: &SettingsWindow, main_weak: slint::Weak<MainWindow>) {
     use slint::winit_030::{
         EventResult, WinitWindowAccessor,
         winit::{
-            event::{ElementState, Ime, WindowEvent},
+            event::{ElementState, WindowEvent},
             keyboard::{Key, NamedKey, PhysicalKey},
         },
     };
     let weak = ui.as_weak();
     let mut modifiers = slint::winit_030::winit::keyboard::ModifiersState::empty();
-    let mut composition = diascia::gestures::CompositionGuard::default();
+    let mut composition = raptim::gestures::CompositionGuard::default();
     let mut full_frame_pending = false;
     ui.window().on_winit_window_event(move |window, event| {
+        if let Some(result) = apply_common_winit_event(
+            window,
+            event,
+            &main_weak,
+            &mut full_frame_pending,
+            &mut modifiers,
+        ) {
+            return result;
+        }
         match event {
             WindowEvent::Focused(active) => {
                 if let Some(ui) = weak.upgrade() {
                     ui.set_window_active(*active);
                 }
             }
-            WindowEvent::RedrawRequested => {
-                windowing::prepare_tooltips(window);
-                if full_frame_pending {
-                    full_frame_pending = false;
-                    windowing::mark_full_frame(window);
-                }
-            }
-            WindowEvent::Resized(_)
-            | WindowEvent::ScaleFactorChanged { .. }
-            | WindowEvent::ThemeChanged(_) => {
-                platform::refresh_geometry(window);
-                full_frame_pending = true;
-            }
-            WindowEvent::ModifiersChanged(value) => modifiers = value.state(),
             WindowEvent::Ime(value) => {
-                use diascia::gestures::ImeSignal;
-                let signal = match value {
-                    Ime::Preedit(_, cursor) => ImeSignal::Preedit {
-                        has_cursor: cursor.is_some(),
-                    },
-                    Ime::Commit(_) => ImeSignal::Commit,
-                    Ime::Enabled | Ime::Disabled => ImeSignal::Disabled,
-                };
-                let active = composition.apply(signal);
+                let active = apply_ime_signal(&mut composition, value);
                 if let Some(ui) = weak.upgrade() {
                     ui.set_composing(active);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if let Some(ui) = weak.upgrade()
-                    && ui.get_recording_hotkey()
-                {
-                    // A key pressed while composing belongs to the input method, not to the
-                    // shortcut being recorded.
-                    if composition.active() {
-                        ime_trace("recording key ignored", true);
-                        return EventResult::PreventDefault;
-                    }
-                    if event.logical_key == Key::Named(NamedKey::Escape) {
-                        ui.invoke_captured_hotkey("".into());
-                        return EventResult::PreventDefault;
-                    }
-                    let name = match event.physical_key {
-                        PhysicalKey::Code(code) => {
-                            diascia::hotkey::physical_name(&format!("{code:?}"))
+                if let Some(ui) = weak.upgrade() {
+                    if ui.get_recording_hotkey() {
+                        // A key pressed while composing belongs to the input method, not to the
+                        // shortcut being recorded.
+                        if composition.active() {
+                            return EventResult::PreventDefault;
                         }
-                        _ => None,
-                    };
-                    let Some(name) = name else {
+                        if event.logical_key == Key::Named(NamedKey::Escape) {
+                            ui.invoke_captured_hotkey("".into());
+                            return EventResult::PreventDefault;
+                        }
+                        let name = match event.physical_key {
+                            PhysicalKey::Code(code) => {
+                                raptim::hotkey::physical_name(&format!("{code:?}"))
+                            }
+                            _ => None,
+                        };
+                        let Some(name) = name else {
+                            return EventResult::PreventDefault;
+                        };
+                        // Query at keydown as well: some layouts consume Alt/Ctrl modifier events.
+                        let native_modifiers = platform::key_modifiers();
+                        let mut parts = vec![];
+                        if modifiers.control_key() || native_modifiers & 2 != 0 {
+                            parts.push("Ctrl".to_string());
+                        }
+                        if modifiers.alt_key() || native_modifiers & 1 != 0 {
+                            parts.push("Alt".to_string());
+                        }
+                        if modifiers.shift_key() || native_modifiers & 4 != 0 {
+                            parts.push("Shift".to_string());
+                        }
+                        if modifiers.super_key() || native_modifiers & 8 != 0 {
+                            parts.push("Win".to_string());
+                        }
+                        parts.push(name);
+                        ui.invoke_captured_hotkey(parts.join("+").into());
                         return EventResult::PreventDefault;
-                    };
-                    // Query at keydown as well: some layouts consume Alt/Ctrl modifier events.
-                    let native_modifiers = platform::key_modifiers();
-                    let mut parts = vec![];
-                    if modifiers.control_key() || native_modifiers & 2 != 0 {
-                        parts.push("Ctrl".to_string());
                     }
-                    if modifiers.alt_key() || native_modifiers & 1 != 0 {
-                        parts.push("Alt".to_string());
+                    if !composition.active()
+                        && event.logical_key == Key::Named(NamedKey::Escape)
+                        && !windowing::has_popup(window)
+                    {
+                        if ui.get_restore_confirm() {
+                            ui.set_restore_confirm(false);
+                        } else {
+                            ui.invoke_cancel();
+                        }
+                        return EventResult::PreventDefault;
                     }
-                    if modifiers.shift_key() || native_modifiers & 4 != 0 {
-                        parts.push("Shift".to_string());
-                    }
-                    if modifiers.super_key() || native_modifiers & 8 != 0 {
-                        parts.push("Win".to_string());
-                    }
-                    parts.push(name);
-                    ui.invoke_captured_hotkey(parts.join("+").into());
-                    return EventResult::PreventDefault;
                 }
             }
             _ => {}
@@ -2174,12 +2924,15 @@ fn install_settings_keys(ui: &SettingsWindow) {
 fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut data_dir = None;
     let mut portable = false;
+    let mut silent = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--data-dir" {
             data_dir = Some(PathBuf::from(args.next().ok_or("--data-dir 需要目录")?));
         } else if arg == "--portable" {
             portable = true;
+        } else if arg == "--silent" {
+            silent = true;
         } else {
             return Err(format!("未知参数：{}", arg.to_string_lossy()).into());
         }
@@ -2187,27 +2940,36 @@ fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if portable && data_dir.is_some() {
         return Err("--portable 与 --data-dir 不能同时使用".into());
     }
-    run_at(match data_dir {
-        Some(path) => path,
-        None => std::env::current_exe()?
-            .parent()
-            .ok_or("无法确定程序目录")?
-            .to_path_buf(),
-    })
+    run_at_with_mode(
+        match data_dir {
+            Some(path) => path,
+            None => std::env::current_exe()?
+                .parent()
+                .ok_or("无法确定程序目录")?
+                .to_path_buf(),
+        },
+        silent,
+    )
 }
 
-fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn is_permission_error(message: &str) -> bool {
+    let low = message.to_lowercase();
+    low.contains("access is denied")
+        || low.contains("permission denied")
+        || low.contains("readonly")
+        || low.contains("read-only")
+        || low.contains("拒绝访问")
+        || low.contains("只读")
+}
+
+fn run_at_with_mode(
+    data_dir: PathBuf,
+    silent_startup: bool,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Startup timeline. Each mark records ms since `run_at` began, on the same origin as every
-    // other row; the probe subtracts neighbours to get the per-phase cost.
-    let clock = Instant::now();
-    macro_rules! mark {
-        ($name:literal) => {
-            diascia::metrics::record($name, clock.elapsed().as_secs_f64() * 1000.)
-        };
-    }
     std::fs::create_dir_all(&data_dir)?;
     let data_dir = data_dir.canonicalize()?;
-    diascia::diagnostics::attach(&data_dir);
+    raptim::diagnostics::attach(&data_dir);
     // Release builds have no console, so a worker-thread panic is otherwise silent. Still print
     // to stderr: the test harness relies on the default rendering of a failing panic.
     std::panic::set_hook(Box::new(|info| {
@@ -2222,46 +2984,42 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<非字符串 panic>".into());
         eprintln!("panic at {location}: {payload}");
-        diascia::diagnostics::error("panic", &format!("{location} {payload}"));
+        raptim::diagnostics::error("panic", &format!("{location} {payload}"));
     }));
     let Some(mut instance) = platform::Instance::acquire(&data_dir).map_err(Error::Invalid)? else {
         return Ok(());
     };
-    mark!("startup_prepare_ms");
-    let mut store = Store::open(&data_dir.join("diascia.db"))?;
+    let mut store = Store::open(&data_dir.join("raptim.db"))?;
     let initial = store.take_initial()?;
     let settings = initial.settings.clone();
-    diascia::diagnostics::set_protection_log(settings.protection_log);
+    raptim::diagnostics::set_protection_log(settings.protection_log);
     let saved_window = store.window_state()?;
-    mark!("startup_store_ms");
-    diascia::metrics::record("database_ready", 0.);
     let selector = slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("software".into())
         .with_winit_window_attributes_hook(|attributes| {
-            use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
-            attributes.with_skip_taskbar(true).with_drag_and_drop(false)
+            use slint::winit_030::winit::{
+                platform::windows::{CornerPreference, WindowAttributesExtWindows},
+                window::WindowButtons,
+            };
+            attributes
+                .with_transparent(false)
+                .with_enabled_buttons(WindowButtons::CLOSE)
+                .with_skip_taskbar(true)
+                .with_drag_and_drop(false)
+                .with_undecorated_shadow(false)
+                .with_corner_preference(CornerPreference::Round)
+                .with_border_color(None)
         });
-    #[cfg(test)]
-    let selector = selector.with_winit_event_loop_builder({
-        use slint::winit_030::winit::platform::windows::EventLoopBuilderExtWindows;
-        let mut builder = slint::winit_030::winit::event_loop::EventLoop::with_user_event();
-        builder.with_any_thread(true);
-        builder
-    });
     selector.select()?;
-    mark!("startup_backend_ms");
     let main = MainWindow::new()?;
-    mark!("startup_window_ms");
     let mut policy = DisplayPolicy::default();
     let signals = platform::collect_signals(&settings, &mut platform::ProtectionCache::default());
     policy.update(decide(signals), Instant::now(), signals.hold_release());
-    mark!("startup_signals_ms");
     let native_epoch = Arc::new(AtomicU64::new(policy.ticket()));
     let epoch = native_epoch.clone();
     let weak = main.as_weak();
     let notify: platform::Notify = Arc::new(move |code, text| {
-        diascia::metrics::record("native_received", code as f64);
         let text = if matches!(code, 1 | 3 | 4 | 6 | 7) {
             epoch.load(Ordering::SeqCst).to_string()
         } else {
@@ -2273,7 +3031,6 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         .map_err(Error::Invalid)?;
     #[cfg(debug_assertions)]
     eprintln!("hotkey worker ready");
-    mark!("startup_hotkey_ms");
     instance.listen(notify.clone());
     let foreground = platform::ForegroundWatch::new(notify.clone()).map_err(Error::Invalid)?;
     let frame_clock = platform::FrameClock::new(notify.clone()).map_err(Error::Invalid)?;
@@ -2318,19 +3075,20 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         settings_open: false,
         drag: None,
         dock: None,
+        dock_overhang: None,
         edge_hidden: false,
         collapsed_far: false,
         protected_edge_waiting: false,
         dock_work: None,
         edge_progress: 0.,
         edge_motion: None,
-        motion_frame: None,
         focus_hide: Default::default(),
+        edge_hold: Default::default(),
         edge_since: Instant::now(),
         search_index: Default::default(),
         icon_cache: {
             let weak = main.as_weak();
-            diascia::icons::Cache::new(move || {
+            raptim::icons::Cache::new(move || {
                 let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(9, "".into()));
             })
         },
@@ -2359,21 +3117,18 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         icon_epoch: 0,
         icon_pending: false,
         saving_editor: false,
+        silent_startup,
+        discovered_apps: Vec::new(),
+        discovered_checked: Vec::new(),
+        broken_items: Vec::new(),
     }));
     app.borrow_mut().weak_self = Rc::downgrade(&app);
-    // Everything up to here is building the App state, including the decode worker's thread spawn.
-    mark!("startup_app_ms");
     macro_rules! bind { ($ui:ident, $callback:ident, |$s:ident $(,$arg:ident)*| $body:block) => { { let weak = Rc::downgrade(&app); $ui.$callback(move |$($arg),*| { if let Some(app) = weak.upgrade() { #[allow(unused_mut)] let mut $s = app.borrow_mut(); $body } }); } }; }
     bind!(main, on_search, |s, _query| {
-        let started = Instant::now();
         s.reset_batch_selection();
         s.main.set_selected_id(0);
         s.render_search();
         s.update_visible_icons();
-        diascia::metrics::record(
-            "search_render_us",
-            started.elapsed().as_micros().min(u16::MAX as u128) as f64,
-        );
     });
     main.on_make_drag(|id| {
         let mut data = slint::DataTransfer::default();
@@ -2476,9 +3231,7 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
                     s.saving_editor = false;
                     return;
                 }
-                session
-                    .window
-                    .set_entry_icon(diascia::icons::display(&icon));
+                session.window.set_entry_icon(raptim::icons::display(&icon));
                 session.icon = icon;
                 session.window.set_saving(false);
             }
@@ -2497,7 +3250,7 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
                 if s.settings.relative_paths {
                     for entry in &mut entries {
                         if let Ok(t) =
-                            diascia::paths::convert_target(&entry.target, &s.data_dir, true)
+                            raptim::paths::convert_target(&entry.target, &s.data_dir, true)
                         {
                             entry.target = t;
                         }
@@ -2616,6 +3369,8 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
     bind!(main, on_drag_start, |s| {
         s.reveal_edge();
         s.dock = None;
+        s.edge_hold.clear();
+        s.sync_dock_overhang();
         platform::decorate(s.main.window());
         let p = s.main.window().position();
         s.drag = Some((platform::cursor(), (p.x, p.y)));
@@ -2632,7 +3387,7 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             return;
         }
         if let Some(mut entry) = s.entries.iter().find(|e| e.id == i64::from(id)).cloned() {
-            match diascia::paths::convert_target(&entry.target, &s.data_dir, relative) {
+            match raptim::paths::convert_target(&entry.target, &s.data_dir, relative) {
                 Ok(target) => {
                     entry.target = target;
                     if let Err(e) = s.store.save_entry(&entry) {
@@ -2671,16 +3426,16 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             s.collection
         };
         s.main.set_drop_hover(false);
-        match serde_json::from_str::<diascia::importing::ExternalDrop>(&payload) {
-            Ok(diascia::importing::ExternalDrop::Files(paths)) => {
+        match serde_json::from_str::<raptim::importing::ExternalDrop>(&payload) {
+            Ok(raptim::importing::ExternalDrop::Files(paths)) => {
                 if paths.is_empty() {
                     s.status("每次最多添加 500 项");
                 } else if let Err(e) = s.queue_files(paths, destination) {
                     s.status(e);
                 }
             }
-            Ok(diascia::importing::ExternalDrop::Text(text)) => {
-                match diascia::importing::url_entries(&text, destination)
+            Ok(raptim::importing::ExternalDrop::Text(text)) => {
+                match raptim::importing::url_entries(&text, destination)
                     .and_then(|entries| s.store.add_entries(&entries))
                 {
                     Ok((added, duplicates)) => {
@@ -2789,7 +3544,13 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         s.request_quit();
     });
     bind!(main, on_escape, |s| {
-        if s.main.get_relocate_open() {
+        if s.main.get_discover_open() {
+            s.main.set_discover_open(false);
+            s.main.invoke_focus_browser();
+        } else if s.main.get_broken_open() {
+            s.main.set_broken_open(false);
+            s.main.invoke_focus_browser();
+        } else if s.main.get_relocate_open() {
             s.main.set_relocate_open(false);
             s.main.invoke_focus_browser();
         } else if s.main.get_batch_target_open() {
@@ -2812,15 +3573,46 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             s.clear_batch();
             s.update_selection();
         } else if s.main.get_search_open() {
-            s.main.set_search_open(false);
-            s.main.set_query("".into());
-            s.main.invoke_restore_grid_focus();
-            s.render_items();
+            s.dismiss_search_state();
+            s.update_visible_icons();
         } else if s.main.get_selected_id() != 0 {
             s.main.set_selected_id(0);
+            s.main.set_keyboard_focus(false);
         } else {
             s.hide_all();
         }
+    });
+    bind!(main, on_discover_apps, |s| {
+        s.begin_discover_apps();
+    });
+    bind!(main, on_discover_refilter, |s| {
+        s.render_discover_list();
+    });
+    bind!(main, on_discover_toggle, |s, idx| {
+        s.toggle_discovered(idx);
+    });
+    bind!(main, on_discover_all, |s, checked| {
+        s.select_all_discovered(checked);
+    });
+    bind!(main, on_discover_import, |s| {
+        s.import_discovered();
+    });
+    bind!(main, on_broken_check, |s| {
+        s.begin_broken_check();
+    });
+    bind!(main, on_broken_relocate, |s, id| {
+        s.relocate_pending = i64::from(id);
+        s.begin_relocate();
+    });
+    {
+        let app = Rc::clone(&app);
+        main.on_broken_edit(move |id| {
+            app.borrow_mut().main.set_broken_open(false);
+            open_editor(&app, i64::from(id));
+        });
+    }
+    bind!(main, on_broken_remove, |s, id| {
+        s.remove_broken_entry(i64::from(id));
     });
     bind!(main, on_native_event, |s, code, text| {
         if matches!(code, 1 | 3 | 4 | 6 | 7) && text.parse::<u64>().ok() != Some(s.policy.ticket())
@@ -2828,7 +3620,7 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             return;
         }
         match code {
-            1 => s.show_main(ShowSource::Hotkey),
+            1 => s.toggle_hotkey_visibility(),
             2 => s.status(text),
             3 => s.show_main(ShowSource::Tray),
             7 => s.show_main(ShowSource::SecondaryInstance),
@@ -2853,6 +3645,31 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
                 s.apply_pin();
             }
             16 => s.toggle_protection_bypass(),
+            18 => {
+                if let Ok(apps) = serde_json::from_str::<Vec<platform::DiscoveredApp>>(&text) {
+                    s.discovered_checked = vec![false; apps.len()];
+                    s.discovered_apps = apps;
+                    s.main.set_discover_loading(false);
+                    s.render_discover_list();
+                    if s.main.get_discover_open() {
+                        s.main.invoke_focus_discover_filter();
+                    }
+                }
+            }
+            19 => {
+                if let Ok((epoch, items)) = serde_json::from_str::<(u64, Vec<BrokenEntry>)>(&text)
+                    && epoch == s.data_epoch
+                {
+                    s.broken_items = items;
+                    s.main.set_broken_loading(false);
+                    s.sync_broken_ui();
+                }
+            }
+            20 => {
+                if let Ok(step) = text.parse::<i32>() {
+                    s.step_category(step);
+                }
+            }
             12 => {
                 if let Ok(generation) = text.parse() {
                     s.install_editor_drop(generation);
@@ -2886,9 +3703,12 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
             6 if s.allowed(ShowSource::Restore) => {
                 s.show_main(ShowSource::Restore);
                 s.dock = None;
+                s.edge_hold.clear();
+                s.sync_dock_overhang();
                 platform::restore_position(s.main.window());
                 platform::decorate(s.main.window());
             }
+            21 => s.apply_theme(),
             _ => {}
         }
     });
@@ -2930,56 +3750,268 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
     let compose_weak = main.as_weak();
     install_keys(
         main.window(),
+        main.as_weak(),
         move |key| {
-            use slint::winit_030::winit::keyboard::NamedKey;
+            use slint::winit_030::winit::keyboard::{Key, NamedKey};
             let Some(ui) = weak.upgrade() else {
                 return false;
             };
-            if ui.get_batch_target_open() || ui.get_batch_confirm() {
-                if key == NamedKey::Escape {
+            let control = key.modifiers.control_key();
+            let shift = key.modifiers.shift_key();
+            let alt = key.modifiers.alt_key();
+            let super_key = key.modifiers.super_key();
+
+            if ui.get_discover_open() || ui.get_broken_open() {
+                if key.logical == &Key::Named(NamedKey::Escape) {
                     ui.invoke_escape();
                     return true;
                 }
-                if ui.get_batch_confirm() && key == NamedKey::Enter {
+                return false;
+            }
+            if ui.get_batch_target_open() || ui.get_batch_confirm() {
+                if key.logical == &Key::Named(NamedKey::Escape) {
+                    ui.invoke_escape();
+                    return true;
+                }
+                if ui.get_batch_confirm() && key.logical == &Key::Named(NamedKey::Enter) {
                     ui.invoke_batch_execute(2, 0);
                     return true;
                 }
-                return matches!(key, NamedKey::Select | NamedKey::Find);
+                return control
+                    && matches!(
+                        key.logical,
+                        Key::Character(c) if c.eq_ignore_ascii_case("a") || c.eq_ignore_ascii_case("f")
+                    );
             }
-            if key == NamedKey::Select && ui.get_batch_mode() && !ui.get_search_focused() {
+            if ui.get_collection_delete()
+                || ui.get_confirm_delete()
+                || ui.get_relocate_open()
+                || ui.get_conversion_open()
+            {
+                if key.logical == &Key::Named(NamedKey::Escape) {
+                    ui.invoke_escape();
+                    return true;
+                }
+                return false;
+            }
+            if key.logical == &Key::Named(NamedKey::Escape) {
+                ui.invoke_escape();
+                return true;
+            }
+            if control
+                && !alt
+                && !super_key
+                && matches!(key.logical, Key::Character(c) if c.eq_ignore_ascii_case("f"))
+            {
+                ui.invoke_focus_search();
+                return true;
+            }
+            if control
+                && !alt
+                && !super_key
+                && matches!(key.logical, Key::Character(c) if c.eq_ignore_ascii_case("a"))
+                && ui.get_batch_mode()
+                && !ui.get_search_focused()
+                && ui.get_inline_kind() == 0
+                && !ui.get_more_open()
+            {
                 if !ui.get_batch_all_selected() {
                     ui.invoke_batch_all();
                 }
                 return true;
             }
-            if key == NamedKey::Find {
-                ui.invoke_focus_search();
+            if control
+                && !alt
+                && !super_key
+                && matches!(key.logical, Key::Character(c) if c.eq_ignore_ascii_case("n"))
+                && ui.get_inline_kind() == 0
+                && !ui.get_batch_mode()
+                && !ui.get_search_focused()
+            {
+                ui.invoke_add();
                 return true;
             }
-            if key == NamedKey::Escape {
-                ui.invoke_escape();
+            if control
+                && !alt
+                && !super_key
+                && matches!(key.logical, Key::Character(c) if c.as_str() == ",")
+                && ui.get_inline_kind() == 0
+            {
+                ui.invoke_settings();
                 return true;
             }
-            if ui.get_search_focused() && matches!(key, NamedKey::ArrowUp | NamedKey::ArrowDown) {
-                let items = ui.get_results();
-                let count = items.row_count();
-                if count == 0 {
+            if control
+                && !alt
+                && !super_key
+                && key.logical == &Key::Named(NamedKey::Tab)
+                && ui.get_inline_kind() == 0
+                && !ui.get_batch_mode()
+                && !ui.get_search_open()
+            {
+                ui.invoke_native_event(20, if shift { "-1" } else { "1" }.into());
+                return true;
+            }
+            if ui.get_inline_kind() != 0 {
+                return false;
+            }
+            if ui.get_search_open() {
+                if matches!(
+                    key.logical,
+                    Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
+                ) {
+                    let items = ui.get_results();
+                    let count = items.row_count();
+                    if count == 0 {
+                        return true;
+                    }
+                    let current = (0..count).find(|i| {
+                        items
+                            .row_data(*i)
+                            .is_some_and(|item| item.id == ui.get_selected_id())
+                    });
+                    let next = if key.logical == &Key::Named(NamedKey::ArrowDown) {
+                        current.map_or(0, |i| (i + 1).min(count - 1))
+                    } else {
+                        current.map_or(count - 1, |i| i.saturating_sub(1))
+                    };
+                    if let Some(item) = items.row_data(next) {
+                        ui.set_selected_id(item.id);
+                        ui.invoke_reveal_result(next as i32);
+                    }
                     return true;
                 }
+                if key.logical == &Key::Named(NamedKey::Enter) && ui.get_selected_id() != 0 {
+                    if shift && !control && !alt {
+                        ui.invoke_item_action(ui.get_selected_id(), 3);
+                        return true;
+                    }
+                    if alt && !control && !shift {
+                        ui.invoke_edit(ui.get_selected_id());
+                        return true;
+                    }
+                    if !ui.get_search_focused() && !control && !alt && !shift {
+                        ui.invoke_launch(ui.get_selected_id());
+                        return true;
+                    }
+                }
+                if !ui.get_search_focused()
+                    && !control
+                    && !alt
+                    && !shift
+                    && key.logical == &Key::Named(NamedKey::F2)
+                    && ui.get_selected_id() != 0
+                {
+                    ui.invoke_edit(ui.get_selected_id());
+                    return true;
+                }
+                return false;
+            }
+
+            if matches!(
+                key.logical,
+                Key::Named(
+                    NamedKey::ArrowLeft
+                        | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                        | NamedKey::Home
+                        | NamedKey::End
+                )
+            ) && !control
+                && !alt
+            {
+                let items = ui.get_items();
+                let count = items.row_count();
+                if count == 0 {
+                    return false;
+                }
+                let cols = if ui.get_list_view() {
+                    1usize
+                } else {
+                    (ui.get_grid_columns().max(1)) as usize
+                };
                 let current = (0..count).find(|i| {
                     items
                         .row_data(*i)
                         .is_some_and(|item| item.id == ui.get_selected_id())
                 });
-                let next = if key == NamedKey::ArrowDown {
-                    current.map_or(0, |i| (i + 1).min(count - 1))
-                } else {
-                    current.map_or(count - 1, |i| i.saturating_sub(1))
+                let next = match key.logical {
+                    Key::Named(NamedKey::ArrowRight) => {
+                        current.map_or(0, |i| (i + 1).min(count - 1))
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        current.map_or(count - 1, |i| i.saturating_sub(1))
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        current.map_or(0, |i| (i + cols).min(count - 1))
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        current.map_or(count - 1, |i| i.saturating_sub(cols))
+                    }
+                    Key::Named(NamedKey::Home) => 0,
+                    _ => count - 1,
                 };
                 if let Some(item) = items.row_data(next) {
+                    ui.set_keyboard_focus(true);
                     ui.set_selected_id(item.id);
-                    ui.invoke_reveal_result(next as i32);
+                    ui.invoke_reveal_grid_row((next / cols) as i32);
                 }
+                return true;
+            }
+
+            if ui.get_batch_mode() {
+                if key.logical == &Key::Named(NamedKey::Space)
+                    && !control
+                    && !alt
+                    && ui.get_selected_id() != 0
+                {
+                    ui.invoke_launch(ui.get_selected_id());
+                    return true;
+                }
+                return false;
+            }
+
+            if ui.get_selected_id() != 0 {
+                if key.logical == &Key::Named(NamedKey::Enter) {
+                    if shift && !control && !alt {
+                        ui.invoke_item_action(ui.get_selected_id(), 3);
+                        return true;
+                    }
+                    if alt && !control && !shift {
+                        ui.invoke_edit(ui.get_selected_id());
+                        return true;
+                    }
+                    if !control && !alt && !shift {
+                        ui.invoke_launch(ui.get_selected_id());
+                        return true;
+                    }
+                }
+                if key.logical == &Key::Named(NamedKey::F2) && !control && !alt && !shift {
+                    ui.invoke_edit(ui.get_selected_id());
+                    return true;
+                }
+                if key.logical == &Key::Named(NamedKey::Delete) && !control && !alt && !shift {
+                    let items = ui.get_items();
+                    let name = (0..items.row_count())
+                        .find_map(|i| {
+                            items
+                                .row_data(i)
+                                .filter(|item| item.id == ui.get_selected_id())
+                                .map(|item| item.name)
+                        })
+                        .unwrap_or_default();
+                    ui.set_delete_name(name);
+                    ui.set_inline_error("".into());
+                    ui.set_confirm_delete(true);
+                    return true;
+                }
+            }
+
+            if ui.get_type_to_search()
+                && !ui.get_more_open()
+                && let Some(ch) = type_search_char(key)
+            {
+                ui.invoke_start_type_search(ch.into());
                 return true;
             }
             false
@@ -3000,19 +4032,6 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
                         let _ =
                             weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(8, "".into()));
                     }
-                    // One timer and one closure per frame is not free, and without
-                    // DIASCIA_METRICS it would be allocated only to be dropped. The guard is that
-                    // check; `_` then covers a frame with nothing to measure.
-                    WindowEvent::RedrawRequested if diascia::metrics::enabled() => {
-                        let started = Instant::now();
-                        slint::Timer::single_shot(Duration::ZERO, move || {
-                            diascia::metrics::record("frame_dispatched", 0.);
-                            diascia::metrics::record(
-                                "frame_ms",
-                                started.elapsed().as_secs_f64() * 1000.,
-                            );
-                        });
-                    }
                     _ => {}
                 }
             }
@@ -3022,17 +4041,15 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
                 ui.set_composing(active);
             }
         },
-        true,
+        Some(main.as_weak()),
     );
-    bind_ui_commands(&app);
-    // Slint callback registration, i.e. the ~34 `bind!` sites plus the ui-command table.
-    mark!("startup_callbacks_ms");
+    ui_commands::bind_ui_commands(&app);
     {
         let mut s = app.borrow_mut();
         s.refresh()?;
         s.sync_settings_ui();
+        s.apply_theme();
     }
-    mark!("startup_ready_ms");
     let startup = Rc::downgrade(&app);
     slint::Timer::single_shot(Duration::ZERO, move || {
         if let Some(app) = startup.upgrade() {
@@ -3060,26 +4077,20 @@ fn run_at(data_dir: PathBuf) -> std::result::Result<(), Box<dyn std::error::Erro
         move || {
             if let Some(app) = weak.upgrade() {
                 let mut s = app.borrow_mut();
-                s.evaluate();
-                s.process_files();
-                s.save_window(false);
-                if diascia::metrics::enabled() {
-                    s.record_dataset();
-                    let (working_set, private) = platform::memory_kib();
-                    diascia::metrics::record("working_set_kb", working_set as f64);
-                    diascia::metrics::record("private_kb", private as f64);
+                if s.should_poll_tick() {
+                    s.evaluate();
                 }
-                diascia::metrics::flush();
+                if !s.pending_files.is_empty() {
+                    s.process_files();
+                }
+                s.save_window(false);
             }
         },
     );
-    #[cfg(test)]
-    app_regression::install(app.clone());
     slint::run_event_loop_until_quit()?;
     Ok(())
 }
 fn main() {
-    diascia::metrics::init();
     // Slint and tray-icon share muda's process-global, single-assignment handler.
     // Application menus use TrackPopupMenuEx directly; widget popups stay in Slint
     // so neither path takes muda's tray handler. Set before worker threads exist.
@@ -3089,8 +4100,8 @@ fn main() {
     let message = match std::panic::catch_unwind(run) {
         Ok(Ok(())) => return,
         Ok(Err(error)) => {
-            eprintln!("Diascia: {error}");
-            ("Diascia 无法启动", error.to_string())
+            eprintln!("Raptim: {error}");
+            ("Raptim 无法启动", error.to_string())
         }
         Err(payload) => {
             let text = payload
@@ -3098,16 +4109,21 @@ fn main() {
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "发生意外错误".into());
-            diascia::diagnostics::error("fatal", &text);
-            ("Diascia 运行中断", text)
+            raptim::diagnostics::error("fatal", &text);
+            ("Raptim 运行中断", text)
         }
     };
-    let detail = diascia::diagnostics::error_log_path()
+    let detail = raptim::diagnostics::error_log_path()
         .map(|path| format!("\n详细记录：{}", path.display()))
         .unwrap_or_default();
+    let permission_hint = if is_permission_error(&message.1) {
+        "\n\n提示：当前数据目录可能只读或缺少写入权限，可通过 `--data-dir <可写目录>` 指定数据位置，或将程序放到用户有写入权限的文件夹。"
+    } else {
+        ""
+    };
     rfd::MessageDialog::new()
         .set_title(message.0)
-        .set_description(format!("{}{detail}", message.1))
+        .set_description(format!("{}{detail}{permission_hint}", message.1))
         .set_level(rfd::MessageLevel::Error)
         .show();
 }
@@ -3131,19 +4147,30 @@ impl<T> std::ops::Deref for Deferred<T> {
 }
 fn create_settings(
     app: &Rc<RefCell<App>>,
+    main_weak: slint::Weak<MainWindow>,
     data: &std::path::Path,
 ) -> std::result::Result<SettingsWindow, slint::PlatformError> {
     let settings_ui = SettingsWindow::new()?;
-    settings_ui.set_rust_version(env!("DIASCIA_RUST_VERSION").into());
-    settings_ui.set_data_path(data.to_string_lossy().to_string().into());
+    settings_ui.set_rust_version(env!("RAPTIM_RUST_VERSION").into());
+    settings_ui.set_data_path(
+        raptim::paths::normal_path(data)
+            .to_string_lossy()
+            .as_ref()
+            .into(),
+    );
     settings_ui
         .window()
         .set_size(slint::LogicalSize::new(660., 480.));
-    install_settings_keys(&settings_ui);
+    install_settings_keys(&settings_ui, main_weak);
     macro_rules! bind { ($ui:ident, $callback:ident, |$s:ident $(,$arg:ident)*| $body:block) => { { let weak = Rc::downgrade(app); $ui.$callback(move |$($arg),*| { if let Some(app) = weak.upgrade() { #[allow(unused_mut)] let mut $s = app.borrow_mut(); $body } }); } }; }
     settings_ui.on_open_rust(|| {
         let _ = platform::launch(&Target::Url {
             url: "https://www.rust-lang.org/".into(),
+        });
+    });
+    settings_ui.on_open_slint(|| {
+        let _ = platform::launch(&Target::Url {
+            url: "https://slint.dev/".into(),
         });
     });
     bind!(settings_ui, on_record_hotkey, |s| {
@@ -3161,14 +4188,14 @@ fn create_settings(
     bind!(settings_ui, on_reset_hotkey, |s| {
         s.settings_ui.set_recording_hotkey(false);
         s.settings_ui
-            .set_hotkey_text(diascia::hotkey::DEFAULT.into());
+            .set_hotkey_text(raptim::hotkey::DEFAULT.into());
         s.apply_settings(2);
         s.evaluate();
     });
     bind!(settings_ui, on_captured_hotkey, |s, value| {
         s.settings_ui.set_recording_hotkey(false);
         if !value.is_empty() {
-            match diascia::hotkey::parse(&value) {
+            match raptim::hotkey::parse(&value) {
                 Ok(shortcut) => {
                     s.settings_ui.set_hotkey_text(shortcut.label.into());
                     s.apply_settings(2);
@@ -3210,6 +4237,33 @@ fn create_settings(
             s.settings_ui.set_status(e.to_string().into());
         }
     });
+    bind!(settings_ui, on_restore_position, |s| {
+        s.show_main(ShowSource::Restore);
+        s.dock = None;
+        s.edge_hold.clear();
+        s.sync_dock_overhang();
+        platform::restore_position(s.main.window());
+        platform::decorate(s.main.window());
+        s.save_window(true);
+    });
+    bind!(settings_ui, on_open_data_dir, |s| {
+        if let Err(e) = platform::launch(&Target::Folder {
+            path: s.data_dir.to_string_lossy().into_owned(),
+        }) {
+            s.settings_ui.set_status(e.message().into());
+        }
+    });
+    bind!(settings_ui, on_open_error_log, |s| {
+        if let Some(path) = raptim::diagnostics::error_log_path()
+            && path.exists()
+        {
+            if let Err(e) = platform::reveal_file(&path) {
+                s.settings_ui.set_status(e.into());
+            }
+        } else {
+            s.settings_ui.set_has_error_log(false);
+        }
+    });
     bind!(settings_ui, on_cancel, |s| {
         s.close_settings();
     });
@@ -3222,4 +4276,68 @@ fn create_settings(
         slint::CloseRequestResponse::KeepWindowShown
     });
     Ok(settings_ui)
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use slint::winit_030::winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    #[test]
+    fn type_search_accepts_printable_keys_and_skips_modifiers_or_whitespace() {
+        let plain = ModifiersState::empty();
+        let shift = ModifiersState::SHIFT;
+        let ctrl = ModifiersState::CONTROL;
+
+        let g = Key::Character("g".into());
+        let plus = Key::Character("+".into());
+        let space = Key::Character(" ".into());
+        let tab = Key::Named(NamedKey::Tab);
+
+        assert_eq!(
+            type_search_char(&KeyAction {
+                logical: &g,
+                modifiers: plain
+            }),
+            Some("g")
+        );
+        assert_eq!(
+            type_search_char(&KeyAction {
+                logical: &plus,
+                modifiers: shift
+            }),
+            Some("+")
+        );
+        assert_eq!(
+            type_search_char(&KeyAction {
+                logical: &g,
+                modifiers: ctrl
+            }),
+            None
+        );
+        assert_eq!(
+            type_search_char(&KeyAction {
+                logical: &space,
+                modifiers: plain
+            }),
+            None
+        );
+        assert_eq!(
+            type_search_char(&KeyAction {
+                logical: &tab,
+                modifiers: plain
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_permission_errors_and_bare_commands_on_path() {
+        assert!(is_permission_error("attempt to write a readonly database"));
+        assert!(is_permission_error("拒绝访问"));
+        assert!(!is_permission_error("invalid input"));
+        assert!(command_exists("cmd"));
+        assert!(!command_exists("C:\\Windows\\System32\\cmd.exe"));
+        assert!(!command_exists("raptim_definitely_missing_binary_xyz"));
+    }
 }

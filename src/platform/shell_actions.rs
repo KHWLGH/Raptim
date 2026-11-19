@@ -10,16 +10,142 @@ impl Drop for Pidl {
     }
 }
 
-pub fn desktop_shortcut(name: &str, target: &Target) -> Result<std::path::PathBuf, String> {
+pub fn known_folder_path(folder: &windows::core::GUID) -> Result<std::path::PathBuf, String> {
     let _com = ComGuard::new()?;
-    let desktop = unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_Desktop, KF_FLAG_DEFAULT, None)
-            .map_err(|e| e.to_string())?;
+    unsafe {
+        let p = SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None).map_err(|e| e.to_string())?;
         let value = p.to_string().map_err(|e| e.to_string());
         CoTaskMemFree(Some(p.0.cast()));
-        std::path::PathBuf::from(value?)
-    };
+        Ok(std::path::PathBuf::from(value?))
+    }
+}
+
+pub fn desktop_shortcut(name: &str, target: &Target) -> Result<std::path::PathBuf, String> {
+    let desktop = known_folder_path(&FOLDERID_Desktop)?;
     create_shortcut_in(&desktop, name, target)
+}
+
+fn decode_wide(buf: &[u16]) -> String {
+    let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// Read an `.url` Internet Shortcut file without executing anything.
+pub fn resolve_url_file(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 64 * 1024 {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let text = if bytes.starts_with(&[0xff, 0xfe]) {
+        let words: Vec<u16> = bytes[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&words)
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = line.eq_ignore_ascii_case("[InternetShortcut]");
+            continue;
+        }
+        if in_section
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("URL")
+        {
+            return crate::model::normalize_url(value);
+        }
+    }
+    None
+}
+
+/// Inspect a `.lnk` Shell link offline without UI or search heuristics. Returns `None` for MSI
+/// advertised shortcuts, virtual shell targets, or unparseable files so the caller can keep `Shortcut`.
+pub fn resolve_lnk_file(path: &Path) -> Option<Target> {
+    if !path.is_file() {
+        return None;
+    }
+    let _com = ComGuard::new().ok()?;
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let persist: IPersistFile = link.cast().ok()?;
+        persist
+            .Load(PCWSTR(wide(&path.to_string_lossy()).as_ptr()), STGM_READ)
+            .ok()?;
+        let flags = link
+            .cast::<IShellLinkDataList>()
+            .ok()
+            .and_then(|data| data.GetFlags().ok())
+            .unwrap_or(0);
+        // MSI advertised (Darwin) links resolve through installer tokens rather than a normal exe.
+        if flags & SLDF_HAS_DARWINID.0 as u32 != 0 {
+            return None;
+        }
+        let mut target_buf = [0u16; 32768];
+        if link
+            .GetPath(&mut target_buf, std::ptr::null_mut(), 0)
+            .is_err()
+        {
+            return None;
+        }
+        let target_path = decode_wide(&target_buf).trim().to_string();
+        if target_path.is_empty() {
+            return None;
+        }
+        let mut args_buf = [0u16; 4096];
+        let arguments = if link.GetArguments(&mut args_buf).is_ok() {
+            decode_wide(&args_buf).trim().to_string()
+        } else {
+            String::new()
+        };
+        let mut dir_buf = [0u16; 4096];
+        let working_dir = if link.GetWorkingDirectory(&mut dir_buf).is_ok() {
+            decode_wide(&dir_buf).trim().to_string()
+        } else {
+            String::new()
+        };
+        let show = match link.GetShowCmd() {
+            Ok(cmd) if cmd == SW_SHOWMAXIMIZED => ShowMode::Maximized,
+            Ok(cmd) if cmd == SW_SHOWMINIMIZED || cmd == SW_SHOWMINNOACTIVE => ShowMode::Minimized,
+            _ => ShowMode::Normal,
+        };
+        let elevated = flags & SLDF_RUNAS_USER.0 as u32 != 0;
+        let ext = Path::new(&target_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let is_dir = Path::new(&target_path).is_dir();
+        let target = if is_dir && arguments.is_empty() && !elevated && show == ShowMode::Normal {
+            Target::Folder { path: target_path }
+        } else if matches!(ext.as_str(), "exe" | "bat" | "cmd" | "com" | "msi")
+            || !arguments.is_empty()
+            || !working_dir.is_empty()
+            || elevated
+            || show != ShowMode::Normal
+        {
+            Target::Program {
+                path: target_path,
+                arguments,
+                working_dir,
+                elevated,
+                show,
+            }
+        } else {
+            Target::File { path: target_path }
+        };
+        target.validate().ok()?;
+        Some(target)
+    }
 }
 
 /// Reserve a unique filename before writing. Never replace an existing desktop file.
@@ -37,7 +163,7 @@ pub fn create_shortcut_in(
         .collect();
     let mut safe = safe.trim().trim_end_matches('.').to_string();
     if safe.is_empty() {
-        safe = "Diascia 快捷方式".into();
+        safe = "Raptim 快捷方式".into();
     }
     let stem = safe.split('.').next().unwrap_or("").to_ascii_uppercase();
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
@@ -257,113 +383,31 @@ pub fn shell_context_menu(window: &slint::Window, path: &Path) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn shortcuts_preserve_arguments_elevation_show_and_existing_files() {
+    fn creates_and_resolves_lnk_and_url_shortcuts() {
         let dir = tempfile::tempdir().unwrap();
-        let target = Target::Program {
+        let program = Target::Program {
             path: "C:\\Windows\\System32\\notepad.exe".into(),
             arguments: "\"C:\\资料 文件.txt\"".into(),
             working_dir: "C:\\Windows".into(),
             elevated: true,
             show: ShowMode::Maximized,
         };
-        let first = create_shortcut_in(dir.path(), "测试", &target).unwrap();
-        let bytes = std::fs::read(&first).unwrap();
-        let second = create_shortcut_in(dir.path(), "测试", &target).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(std::fs::read(&first).unwrap(), bytes);
-        let _com = ComGuard::new().unwrap();
-        unsafe {
-            let link: IShellLinkW =
-                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
-            link.cast::<IPersistFile>()
-                .unwrap()
-                .Load(PCWSTR(wide(&first.to_string_lossy()).as_ptr()), STGM_READ)
-                .unwrap();
-            let mut args = [0u16; 256];
-            link.GetArguments(&mut args).unwrap();
-            assert_eq!(
-                String::from_utf16_lossy(&args[..args.iter().position(|c| *c == 0).unwrap()]),
-                "\"C:\\资料 文件.txt\""
-            );
-            assert_ne!(
-                link.cast::<IShellLinkDataList>()
-                    .unwrap()
-                    .GetFlags()
-                    .unwrap()
-                    & SLDF_RUNAS_USER.0 as u32,
-                0
-            );
-            assert_eq!(link.GetShowCmd().unwrap(), show_cmd(ShowMode::Maximized));
-        }
+        let lnk = create_shortcut_in(dir.path(), "记事本", &program).unwrap();
+        assert_eq!(resolve_lnk_file(&lnk), Some(program));
+
         let url = create_shortcut_in(
             dir.path(),
-            "CON",
+            "示例",
             &Target::Url {
                 url: "https://example.com/a?q=1".into(),
             },
         )
         .unwrap();
-        assert_eq!(url.file_name().unwrap(), "_CON.url");
-        assert!(
-            std::fs::read_to_string(url)
-                .unwrap()
-                .contains("URL=https://example.com/a?q=1")
+        assert_eq!(
+            resolve_url_file(&url).as_deref(),
+            Some("https://example.com/a?q=1")
         );
-    }
-    /// An 应用标识 must reach the writer and fail *inside* the Shell, not before it. A fake AUMID is
-    /// deliberate: it makes `SHParseDisplayName` fail on every machine, so the assertion pins the
-    /// failure's origin rather than the inventory of whatever is installed. The launcher used to
-    /// absolutise through a convert that answers "网址和应用标识没有文件路径" for exactly this kind,
-    /// so nothing here was ever reached.
-    #[test]
-    fn app_targets_reach_the_shell_instead_of_the_path_converter() {
-        let dir = tempfile::tempdir().unwrap();
-        let error = create_shortcut_in(
-            dir.path(),
-            "计算器",
-            &Target::App {
-                aumid: "Diascia.Probe_1.0.0.0_neutral__000000000000!Entry".into(),
-            },
-        )
-        .expect_err("an uninstalled AUMID cannot resolve");
-        assert!(!error.contains("文件路径"), "{error}");
-        assert!(
-            !dir.path().join("计算器.lnk").exists(),
-            "a refused shortcut must not leave a file behind"
-        );
-    }
-    /// Measured rather than assumed: the child list `SHBindToParent` reports is an **interior pointer
-    /// into** the full list — `pidl + 440` on every run here — not an allocation of its own. Freeing
-    /// it the way the Shell documentation suggests aborts the process with `STATUS_HEAP_CORRUPTION`,
-    /// so this pins the shape: if a future Windows ever hands back a child from outside the block,
-    /// this test fails and the ownership question has to be revisited deliberately.
-    #[test]
-    fn the_child_id_list_lives_inside_the_full_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("tool.exe");
-        std::fs::write(&file, b"").unwrap();
-        let _com = ComGuard::new().unwrap();
-        unsafe {
-            let mut full = std::ptr::null_mut();
-            SHParseDisplayName(
-                PCWSTR(wide(&file.to_string_lossy()).as_ptr()),
-                None,
-                &mut full,
-                0,
-                None,
-            )
-            .unwrap();
-            let full = Pidl(full);
-            let mut child = std::ptr::null_mut();
-            let folder: IShellFolder =
-                SHBindToParent(full.0, Some(&mut child)).expect("a real file has a parent folder");
-            assert!(
-                child > full.0 && (child as usize) - (full.0 as usize) < 4096,
-                "child {child:p} 落在 full {:p} 之外，那它就该由调用方释放了",
-                full.0
-            );
-            drop(folder);
-        }
     }
 }

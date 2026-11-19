@@ -105,7 +105,7 @@ mod tests {
     use super::*;
     #[test]
     fn roundtrip_and_different_drive() {
-        let base = Path::new("C:\\Portable\\Diascia");
+        let base = Path::new("C:\\Portable\\Raptim");
         let relative = convert("C:\\Portable\\Tools\\app.exe", base, true).unwrap();
         assert_eq!(
             absolute(&relative, base),
@@ -115,8 +115,8 @@ mod tests {
         assert_eq!(absolute(".\\app.exe", base), base.join("app.exe"));
         assert_eq!(
             convert(
-                "C:\\Portable\\Diascia\\app.exe",
-                Path::new(r"\\?\C:\Portable\Diascia"),
+                "C:\\Portable\\Raptim\\app.exe",
+                Path::new(r"\\?\C:\Portable\Raptim"),
                 true
             )
             .unwrap(),
@@ -125,7 +125,7 @@ mod tests {
     }
     #[test]
     fn shell_resolution_absolutises_paths_and_passes_the_rest_through() {
-        let base = Path::new("C:\\Portable\\Diascia");
+        let base = Path::new("C:\\Portable\\Raptim");
         for passthrough in [
             Target::Url {
                 url: "https://example.com/A.png".into(),
@@ -148,9 +148,9 @@ mod tests {
                 base
             ),
             Target::Program {
-                path: "C:\\Portable\\Diascia\\Tools\\app.exe".into(),
+                path: "C:\\Portable\\Raptim\\Tools\\app.exe".into(),
                 arguments: "--flag".into(),
-                working_dir: "C:\\Portable\\Diascia\\Tools".into(),
+                working_dir: "C:\\Portable\\Raptim\\Tools".into(),
                 elevated: false,
                 show: Default::default(),
             }
@@ -158,7 +158,7 @@ mod tests {
     }
     #[test]
     fn tooltip_targets_cover_six_kinds() {
-        let base = Path::new("C:\\Portable\\Diascia");
+        let base = Path::new("C:\\Portable\\Raptim");
         let cases = [
             (
                 Target::Program {
@@ -168,7 +168,7 @@ mod tests {
                     elevated: false,
                     show: Default::default(),
                 },
-                "C:\\Portable\\Diascia\\Tools\\app.exe",
+                "C:\\Portable\\Raptim\\Tools\\app.exe",
             ),
             (
                 Target::File {
@@ -180,7 +180,7 @@ mod tests {
                 Target::Folder {
                     path: "Downloads".into(),
                 },
-                "C:\\Portable\\Diascia\\Downloads",
+                "C:\\Portable\\Raptim\\Downloads",
             ),
             (
                 Target::Url {
@@ -193,7 +193,7 @@ mod tests {
                     path: ".\\links\\tool.lnk".into(),
                     show: Default::default(),
                 },
-                "C:\\Portable\\Diascia\\links\\tool.lnk",
+                "C:\\Portable\\Raptim\\links\\tool.lnk",
             ),
             (
                 Target::App {

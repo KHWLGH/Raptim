@@ -1,6 +1,9 @@
 // UI command adapters; shared storage operations live in the library.
+use super::*;
+use raptim::menus::{self, MenuContext, MenuDestination, MenuEntry, MenuNode, Region};
+
 impl App {
-    fn category_for(&self, id: i64) -> i64 {
+    pub(super) fn category_for(&self, id: i64) -> i64 {
         self.collections
             .iter()
             .find(|c| c.id == id)
@@ -14,7 +17,7 @@ impl App {
             })
             .unwrap_or(self.collection)
     }
-    fn cancel_inline(&mut self) {
+    pub(super) fn cancel_inline(&mut self) {
         self.main.set_inline_kind(0);
         self.main.set_inline_error("".into());
         // The name field lives in this window now, so focus has to be moved back explicitly.
@@ -22,7 +25,7 @@ impl App {
         self.focus_hide.reset();
         self.edge_since = Instant::now();
     }
-    fn finish_inline(&mut self) -> bool {
+    pub(super) fn finish_inline(&mut self) -> bool {
         let kind = self.main.get_inline_kind();
         if kind == 0 {
             return true;
@@ -60,14 +63,14 @@ impl App {
             }
         }
     }
-    fn current_scope(&self) -> std::collections::HashSet<i64> {
+    pub(super) fn current_scope(&self) -> std::collections::HashSet<i64> {
         std::iter::once(self.collection).collect()
     }
 
     /// Snapshot what a context menu needs. `groups` and `destinations` are derived with the same
     /// iterators that publish the Slint models in `rebuild_navigation`, because a menu command
     /// number is an index into those lists.
-    fn menu_context(&self, kind: i32, id: i32) -> MenuContext {
+    pub(super) fn menu_context(&self, kind: i32, id: i32) -> MenuContext {
         let holds = |collection: i64| {
             self.entries
                 .iter()
@@ -141,7 +144,7 @@ impl App {
         }
     }
 
-    fn begin_collection_action(&mut self, id: i32, action: i32, target: i32) {
+    pub(super) fn begin_collection_action(&mut self, id: i32, action: i32, target: i32) {
         // Checked first: `finish_inline` below can write to the store, and the name form this
         // ends up showing must not appear over a game.
         if !self.allowed(ShowSource::Editor) {
@@ -259,7 +262,7 @@ impl App {
             self.main.invoke_focus_inline_name();
         }
     }
-    fn update_conversion(&mut self) {
+    pub(super) fn update_conversion(&mut self) {
         let mut nodes = Vec::new();
         for group in self.collections.iter().filter(|c| c.parent_id.is_none()) {
             let children: Vec<_> = self
@@ -298,7 +301,7 @@ impl App {
             }));
         }
         self.main.set_scopes(Rc::new(VecModel::from(nodes)).into());
-        let preview = diascia::commands::conversion_preview(
+        let preview = raptim::commands::conversion_preview(
             &self.entries,
             &self.scope_selection,
             &self.data_dir,
@@ -321,8 +324,6 @@ impl App {
     }
 }
 
-use diascia::menus::{self, MenuContext, MenuDestination, MenuEntry, MenuNode, Region};
-
 /// `Store::move_entry` and the collection reorder both stop silently at either end, so the menu
 /// refuses before the user pays for a no-op. `ids` must be the same ordered sibling list the
 /// reorder reads: same-collection entries by position for a project, same-parent collections for a
@@ -342,6 +343,7 @@ fn dispatch_manage(ui: &MainWindow, command: u32) {
         41 => ui.invoke_add_files(),
         42..=45 => ui.invoke_view_change(command as i32 - 42),
         46 => ui.invoke_global_action(7),
+        47 => ui.invoke_discover_apps(),
         _ => {}
     }
 }
@@ -351,6 +353,7 @@ fn dispatch_app(ui: &MainWindow, command: u32) {
     match command {
         1 => ui.invoke_global_action(2),
         2 => ui.invoke_global_action(4),
+        3 => ui.invoke_global_action(8),
         4 => ui.invoke_global_action(5),
         5 => ui.invoke_global_action(6),
         6 | 7 => ui.invoke_begin_conversion(command == 6),
@@ -419,7 +422,7 @@ fn dispatch_collection(ui: &MainWindow, ctx: &MenuContext, id: i32, kind: i32, c
     }
 }
 
-fn bind_ui_commands(app: &Rc<RefCell<App>>) {
+pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
     let main = app.borrow().main.clone_strong();
     let weak = Rc::downgrade(app);
     main.on_native_menu(move |kind, id| {
@@ -468,7 +471,7 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                 Some(Region::Item) => dispatch_item(&ui, &ctx, id, name, command),
                 Some(Region::Collection) => dispatch_collection(&ui, &ctx, id, kind, command),
                 // A row whose number no region claims would otherwise swallow the click silently.
-                None => diascia::diagnostics::error(
+                None => raptim::diagnostics::error(
                     "menu-unrouted",
                     &format!("kind {kind} command {command}"),
                 ),
@@ -604,7 +607,10 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
             6 => {
                 s.show_main(ShowSource::Restore);
                 s.dock = None;
+                s.edge_hold.clear();
+                s.sync_dock_overhang();
                 platform::restore_position(s.main.window());
+                platform::decorate(s.main.window());
             }
             7 => {
                 let scope = s.current_scope();
@@ -613,6 +619,7 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                 }
                 s.report_refresh();
             }
+            8 => s.begin_broken_check(),
             _ => {}
         }
     });
@@ -629,7 +636,7 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
         if let Some(e) = s.entries.iter().find(|e| e.id == i64::from(id)).cloned() {
             match action {
                 0 => {
-                    let path = diascia::paths::absolute(e.target.value(), &s.data_dir);
+                    let path = raptim::paths::absolute(e.target.value(), &s.data_dir);
                     if let Err(error) = platform::reveal_file(&path) {
                         s.status(error);
                     }
@@ -654,7 +661,7 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                     );
                 }
                 4 => {
-                    let path = diascia::paths::absolute(e.target.value(), &s.data_dir);
+                    let path = raptim::paths::absolute(e.target.value(), &s.data_dir);
                     let weak = s.main.as_weak();
                     let app_weak = s.weak_self.clone();
                     s.main.set_more_open(true);
@@ -685,7 +692,7 @@ fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                         // `resolve_for_shell`, not `convert_target`: a URL entry has no path to
                         // absolutise, and the shortcut writer handles `url` and AppsFolder targets
                         // itself. Going through the fallible convert failed every 网址 and 应用标识.
-                        let target = diascia::paths::resolve_for_shell(&e.target, &base);
+                        let target = raptim::paths::resolve_for_shell(&e.target, &base);
                         let result = platform::desktop_shortcut(&e.name, &target);
                         let message = result
                             .map(|path| format!("已创建：{}", path.display()))

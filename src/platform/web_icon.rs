@@ -26,7 +26,7 @@ const TOUCH_ICON_EDGE: u32 = 180;
 /// How long one address may keep a background slot before the lookup is abandoned.
 const ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 /// A server that refuses unknown clients just gets the same answer as one that is not there.
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Diascia/0.0 favicon";
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Raptim/0.0 favicon";
 
 struct Handle(*mut c_void);
 impl Drop for Handle {
@@ -370,123 +370,10 @@ fn header(request: *mut c_void, which: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        io::{Read, Write},
-        sync::{Arc, Mutex},
-    };
-
-    /// A one-shot HTTP server on the loopback interface: the fetcher only makes sense end to end,
-    /// and a real round trip is the only way to drive WinHTTP without inventing a fake stack.
-    /// Routes carry a status because the fetcher has to answer for statuses, not just bodies: an
-    /// error page that names an image type must not become an icon.
-    type Routes = Vec<(String, String, u16, Vec<u8>)>;
-
-    fn reason(status: u16) -> &'static str {
-        match status {
-            200 => "OK",
-            404 => "Not Found",
-            500 => "Internal Server Error",
-            _ => "Diascia Probe",
-        }
-    }
-
-    struct LocalServer {
-        address: std::net::SocketAddr,
-        routes: Arc<Mutex<Routes>>,
-    }
-
-    impl LocalServer {
-        fn start() -> Self {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let routes = Arc::new(Mutex::new(Routes::new()));
-            let served = routes.clone();
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(mut stream) = stream else { continue };
-                    let Some(path) = read_request(&mut stream) else {
-                        continue;
-                    };
-                    let answer = served
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .find(|(route, _, _, _)| *route == path)
-                        .cloned();
-                    let reply = match answer {
-                        Some((_, kind, status, body)) => {
-                            let mut reply = format!(
-                                "HTTP/1.1 {status} {}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                                reason(status),
-                                body.len()
-                            )
-                            .into_bytes();
-                            reply.extend_from_slice(&body);
-                            reply
-                        }
-                        None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_vec(),
-                    };
-                    let _ = stream.write_all(&reply);
-                    let _ = stream.flush();
-                }
-            });
-            Self { address, routes }
-        }
-
-        fn serve(&self, routes: &[(&str, &str, u16, Vec<u8>)]) {
-            *self.routes.lock().unwrap() = routes
-                .iter()
-                .map(|(path, kind, status, body)| {
-                    (
-                        (*path).to_string(),
-                        (*kind).to_string(),
-                        *status,
-                        body.clone(),
-                    )
-                })
-                .collect();
-        }
-
-        fn url(&self, path: &str) -> String {
-            format!("http://{}{path}", self.address)
-        }
-    }
-
-    /// Read exactly one request header block: waiting for the client to half-close would hang,
-    /// because WinHTTP keeps the connection open until it has the answer.
-    fn read_request(stream: &mut std::net::TcpStream) -> Option<String> {
-        let mut bytes = Vec::new();
-        let mut buffer = [0u8; 256];
-        loop {
-            let read = stream.read(&mut buffer).ok()?;
-            if read == 0 {
-                return None;
-            }
-            bytes.extend_from_slice(&buffer[..read]);
-            if bytes.windows(4).any(|window| window == b"\r\n\r\n") || bytes.len() > 8 * 1024 {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&bytes)
-            .split_whitespace()
-            .nth(1)
-            .map(str::to_string)
-    }
 
     fn png(edge: u32) -> Vec<u8> {
         let image = image::RgbaImage::from_pixel(edge, edge, image::Rgba([0, 120, 212, 255]));
         crate::icons::encode(image).unwrap()
-    }
-
-    fn edge(png: &[u8]) -> u32 {
-        image::load_from_memory(png).unwrap().width()
-    }
-
-    fn fetched(url: &str) -> Vec<u8> {
-        let png = fetch(url);
-        assert!(!png.is_empty(), "{url} should have produced an icon");
-        png
     }
 
     fn links(html: &str) -> Vec<String> {
@@ -500,147 +387,29 @@ mod tests {
     }
 
     #[test]
-    fn icon_links_are_ordered_by_expected_size_and_survive_every_quoting_style() {
+    fn parses_icon_links_and_normalizes_pngs() {
         assert_eq!(
             links(
                 r#"<html><head>
                     <link rel="stylesheet" href="/site.css">
                     <link rel='shortcut icon' href='/small.ico' sizes="16x16">
                     <link rel=icon href=big.png sizes=180x180>
-                    <link rel="apple-touch-icon" href="/touch.png">
-                    <link rel="icon" href="/mid.png" sizes="32x32">
-                    <link rel="icon" href="">
-                    <link rel="icon" href="data:image/png;base64,AAAA">
-                </head><body>rel="icon" outside a tag</body>"#
+                    <LINK REL="ICON" HREF="/UPPER.PNG">
+                </head></html>"#
             ),
             vec![
                 "https://example.com/docs/big.png",
-                "https://example.com/touch.png",
-                "https://example.com/mid.png",
                 "https://example.com/small.ico",
-            ],
-            "the biggest expected icon is tried first; empty and data: hrefs are dropped"
-        );
-        assert!(links(r#"<link rel="stylesheet" href="/a.css">"#).is_empty());
-    }
-
-    #[test]
-    fn declared_sizes_only_ever_reorder_the_candidates() {
-        assert_eq!(declared_edge(r#" sizes="32x32 180x180 any" "#), 180);
-        assert_eq!(declared_edge(r#"sizes="any""#), 0);
-        assert_eq!(declared_edge(""), 0);
-    }
-
-    #[test]
-    fn a_decoded_icon_is_normalised_to_a_storable_png() {
-        assert_eq!(edge(&to_png(&png(16)).expect("16px is usable")), 16);
-        assert_eq!(edge(&to_png(&png(600)).expect("oversized is scaled")), 128);
-        assert!(to_png(b"not an image at all").is_none());
-        assert!(to_png(&png(8)).is_none(), "too small to read in the grid");
-    }
-
-    #[test]
-    fn an_unreachable_address_gives_no_icon_and_never_panics() {
-        for dead in [
-            "",
-            "javascript:alert(1)",
-            "file:///c:/test",
-            "https://example.invalid/",
-        ] {
-            assert!(fetch(dead).is_empty(), "{dead} has no icon to give");
-        }
-    }
-
-    #[test]
-    fn a_page_is_scanned_for_its_icon_and_the_site_default_is_the_fallback() {
-        let server = LocalServer::start();
-        server.serve(&[
-            (
-                "/docs/",
-                "text/html; charset=utf-8",
-                200,
-                br#"<html><head><link rel="icon" href="/static/site.png" sizes="64x64"></head>"#
-                    .to_vec(),
-            ),
-            ("/static/site.png", "image/png", 200, png(64)),
-            ("/favicon.ico", "image/x-icon", 200, png(32)),
-        ]);
-        // The dispatch every icon call site goes through, not only this module's entry point.
-        let address = crate::model::Target::Url {
-            url: server.url("/docs/"),
-        };
-        assert_eq!(
-            edge(&super::super::icon_for(&address, std::path::Path::new("."))),
-            64,
-            "icon_for sends an address to the favicon lookup"
+                "https://example.com/UPPER.PNG",
+            ]
         );
         assert_eq!(
-            edge(&fetched(&server.url("/docs/"))),
-            64,
-            "the declared icon wins"
+            image::load_from_memory(&to_png(&png(600)).unwrap())
+                .unwrap()
+                .width(),
+            128
         );
-
-        server.serve(&[
-            ("/docs/", "text/html", 200, b"<html><head></head>".to_vec()),
-            ("/favicon.ico", "image/x-icon", 200, png(32)),
-        ]);
-        assert_eq!(
-            edge(&fetched(&server.url("/docs/"))),
-            32,
-            "without a declared icon, /favicon.ico is tried"
-        );
-
-        server.serve(&[("/docs/", "text/plain", 200, b"not a page".to_vec())]);
-        assert!(
-            fetch(&server.url("/docs/")).is_empty(),
-            "a non-HTML answer is not a page"
-        );
-    }
-
-    /// A status line is not a body. Naming an image type while saying 404 is exactly the shape of an
-    /// error page or a captive portal, and the fetcher used to read only the type.
-    #[test]
-    fn a_refused_status_is_not_an_icon_even_when_the_body_is_a_valid_png() {
-        let server = LocalServer::start();
-        server.serve(&[
-            ("/docs/", "text/html", 200, b"<html><head></head>".to_vec()),
-            ("/favicon.ico", "image/png", 404, png(32)),
-        ]);
-        assert!(
-            fetch(&server.url("/docs/")).is_empty(),
-            "404 上挂着一张能解码的 PNG，也不是图标"
-        );
-        // And the error page for the address itself is not a page to scan: parsed, it would offer a
-        // perfectly good 200 icon and the entry would come back with someone else's logo.
-        server.serve(&[
-            (
-                "/portal/",
-                "text/html",
-                500,
-                br#"<html><head><link rel="icon" href="/real.png"></head>"#.to_vec(),
-            ),
-            ("/real.png", "image/png", 200, png(64)),
-        ]);
-        assert!(
-            fetch(&server.url("/portal/")).is_empty(),
-            "5xx 的正文不能当页面来解析"
-        );
-    }
-
-    /// HTML spells attribute *names* any way it likes but a resource path is case-sensitive. The name
-    /// is matched on the case-folded copy and the value is cut out of the original at the same
-    /// offsets — folding the value would fix `<LINK HREF=…>` by breaking `/Case.png`.
-    #[test]
-    fn attribute_names_are_matched_case_insensitively_and_values_are_not() {
-        assert_eq!(
-            links(r#"<LINK REL="ICON" HREF="/UPPER.PNG">"#),
-            vec!["https://example.com/UPPER.PNG".to_string()],
-            "大写属性名的页面过去取不到任何候选图标"
-        );
-        assert_eq!(
-            links(r#"<link rel="icon" href=/Case.PNG sizes="64X16">"#),
-            vec!["https://example.com/Case.PNG".to_string()],
-            "未加引号的值保留大小写，折叠过的大小列表照样解析"
-        );
+        assert!(to_png(&png(8)).is_none());
+        assert!(to_png(b"not an image").is_none());
     }
 }

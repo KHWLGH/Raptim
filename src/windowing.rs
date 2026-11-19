@@ -6,16 +6,15 @@
 //! upstream guarantees a full redraw on remapping (see the native regression case).
 pub fn invalidate(window: &slint::Window) {
     mark_full_frame(window);
-    window.request_redraw();
+    if !crate::platform::request_redraw_now(window) {
+        window.request_redraw();
+    }
 }
 
 /// Call before a software frame is rendered when Windows may have replaced the backing
 /// surface (resize, scale-factor and theme changes); a partial dirty region can otherwise
 /// retain old tiles. This deliberately does not request another frame.
 pub fn mark_full_frame(window: &slint::Window) {
-    // Counts whole-surface dirty marks, i.e. how often the software renderer has to repaint the
-    // entire backing store rather than a damage rectangle.
-    crate::metrics::record("full_frame", 1.);
     prepare_tooltips(window);
     use i_slint_core::{
         lengths::{LogicalPoint, LogicalRect, LogicalSize},
@@ -71,7 +70,14 @@ pub fn prepare_tooltips(window: &slint::Window) {
 }
 
 pub fn show(window: &slint::Window) -> Result<(), slint::PlatformError> {
+    let existed = crate::platform::native_ready(window);
     crate::platform::skip_taskbar(window);
+    if existed {
+        // Prepare frame attributes and full dirty region before ShowWindow so the very first
+        // WM_PAINT presents complete pixels with DWMWCP_ROUND intact and zero style thrash.
+        crate::platform::decorate(window);
+        mark_full_frame(window);
+    }
     window.show()?;
     crate::platform::decorate(window);
     if let Some((rect, work)) = crate::platform::geometry(window) {
@@ -83,7 +89,13 @@ pub fn show(window: &slint::Window) -> Result<(), slint::PlatformError> {
             ));
         }
     }
-    invalidate(window);
+    if existed {
+        if !crate::platform::request_redraw_now(window) {
+            window.request_redraw();
+        }
+    } else {
+        invalidate(window);
+    }
     Ok(())
 }
 pub fn has_popup(window: &slint::Window) -> bool {

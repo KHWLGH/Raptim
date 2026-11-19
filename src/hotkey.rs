@@ -8,10 +8,23 @@ pub struct Shortcut {
 pub const DEFAULT: &str = "Ctrl+Alt+Space";
 /// Physical codes remain stable when Ctrl/Alt or an input method consumes text.
 pub fn physical_name(code: &str) -> Option<String> {
-    let name = code
-        .strip_prefix("Key")
-        .or_else(|| code.strip_prefix("Digit"))
-        .unwrap_or(code);
+    let name = match code {
+        "Backquote" => "`",
+        "Minus" => "-",
+        "Equal" => "=",
+        "BracketLeft" => "[",
+        "BracketRight" => "]",
+        "Backslash" => "\\",
+        "Semicolon" => ";",
+        "Quote" => "'",
+        "Comma" => ",",
+        "Period" => ".",
+        "Slash" => "/",
+        other => other
+            .strip_prefix("Key")
+            .or_else(|| other.strip_prefix("Digit"))
+            .unwrap_or(other),
+    };
     parse(&format!("Ctrl+{name}"))
         .ok()
         .map(|_| name.to_string())
@@ -41,9 +54,21 @@ pub fn parse(value: &str) -> Result<Shortcut, String> {
                 name = "Space".into();
                 0x20
             }
+            "TAB" => {
+                name = "Tab".into();
+                0x09
+            }
             "ENTER" => {
                 name = "Enter".into();
                 0x0d
+            }
+            "INSERT" => {
+                name = "Insert".into();
+                0x2d
+            }
+            "DELETE" => {
+                name = "Delete".into();
+                0x2e
             }
             "HOME" => {
                 name = "Home".into();
@@ -53,9 +78,69 @@ pub fn parse(value: &str) -> Result<Shortcut, String> {
                 name = "End".into();
                 0x23
             }
+            "PAGEUP" => {
+                name = "PageUp".into();
+                0x21
+            }
+            "PAGEDOWN" => {
+                name = "PageDown".into();
+                0x22
+            }
+            "`" | "BACKQUOTE" => {
+                name = "`".into();
+                0xc0
+            }
+            "-" | "MINUS" => {
+                name = "-".into();
+                0xbd
+            }
+            "=" | "EQUAL" => {
+                name = "=".into();
+                0xbb
+            }
+            "[" | "BRACKETLEFT" => {
+                name = "[".into();
+                0xdb
+            }
+            "]" | "BRACKETRIGHT" => {
+                name = "]".into();
+                0xdd
+            }
+            "\\" | "BACKSLASH" => {
+                name = "\\".into();
+                0xdc
+            }
+            ";" | "SEMICOLON" => {
+                name = ";".into();
+                0xba
+            }
+            "'" | "QUOTE" => {
+                name = "'".into();
+                0xde
+            }
+            "," | "COMMA" => {
+                name = ",".into();
+                0xbc
+            }
+            "." | "PERIOD" => {
+                name = ".".into();
+                0xbe
+            }
+            "/" | "SLASH" => {
+                name = "/".into();
+                0xbf
+            }
             _ if upper.len() == 1 && upper.as_bytes()[0].is_ascii_alphanumeric() => {
                 name = upper.clone();
                 u32::from(upper.as_bytes()[0])
+            }
+            _ if upper.starts_with("NUMPAD") => {
+                let digit = upper["NUMPAD".len()..].parse::<u32>().ok();
+                let Some(digit) = digit.filter(|d| *d <= 9) else {
+                    return Err("无效小键盘数字键".into());
+                };
+                name = format!("Numpad{digit}");
+                0x60 + digit
             }
             _ if upper.starts_with('F') => {
                 let n = upper[1..].parse::<u32>().map_err(|_| "无效功能键")?;
@@ -65,7 +150,7 @@ pub fn parse(value: &str) -> Result<Shortcut, String> {
                 name = upper.clone();
                 0x6f + n
             }
-            _ => return Err("使用 Ctrl、Alt、Shift、Win 与字母、数字或功能键组合".into()),
+            _ => return Err("使用 Ctrl、Alt、Shift、Win 与常用按键或功能键组合".into()),
         };
         key = Some(code);
     }
@@ -94,10 +179,26 @@ mod tests {
         assert_eq!(physical_name("KeyK").as_deref(), Some("K"));
         assert_eq!(physical_name("Space").as_deref(), Some("Space"));
         assert_eq!(physical_name("F12").as_deref(), Some("F12"));
+        assert_eq!(physical_name("Backquote").as_deref(), Some("`"));
+        assert_eq!(physical_name("Semicolon").as_deref(), Some(";"));
+        assert_eq!(physical_name("Numpad1").as_deref(), Some("Numpad1"));
         assert!(physical_name("ControlLeft").is_none());
         assert_eq!(parse(" alt + ctrl + space ").unwrap().label, DEFAULT);
         assert_eq!(parse("Ctrl+Shift+F12").unwrap().key, 0x7b);
-        for bad in ["A", "Shift+A", "Ctrl", "Ctrl+A+B", "Alt+F25"] {
+        assert_eq!(parse("Ctrl+`").unwrap().key, 0xc0);
+        assert_eq!(parse("Alt+Insert").unwrap().key, 0x2d);
+        assert_eq!(
+            parse("Ctrl+Shift+Numpad5").unwrap().label,
+            "Ctrl+Shift+Numpad5"
+        );
+        for bad in [
+            "A",
+            "Shift+A",
+            "Ctrl",
+            "Ctrl+A+B",
+            "Alt+F25",
+            "Ctrl+Numpad10",
+        ] {
             assert!(parse(bad).is_err());
         }
     }

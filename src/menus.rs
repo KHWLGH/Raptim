@@ -129,7 +129,7 @@ pub enum Region {
 pub fn region(kind: i32, command: u32) -> Option<Region> {
     match kind {
         0 | 4 => {
-            if command == BATCH_BASE || (VIEW_BASE..VIEW_BASE + 7).contains(&command) {
+            if command == BATCH_BASE || (VIEW_BASE..VIEW_BASE + 8).contains(&command) {
                 Some(Region::Manage)
             } else if kind == 0 && (1..=9).contains(&command) {
                 Some(Region::App)
@@ -160,6 +160,7 @@ pub fn tree(kind: i32, ctx: &MenuContext) -> Vec<MenuItem> {
                         MenuItem::action("导出…", 1).icon('\u{e74e}'),
                         MenuItem::action("恢复…", 2).icon('\u{e8e5}'),
                         MenuItem::separator(),
+                        MenuItem::action("检查失效项目…", 3).icon('\u{e9ce}'),
                         MenuItem::action("打开数据目录", 4).icon('\u{e8b7}'),
                     ],
                 )
@@ -176,7 +177,7 @@ pub fn tree(kind: i32, ctx: &MenuContext) -> Vec<MenuItem> {
                 MenuItem::action("恢复窗口位置", 5).icon('\u{e8a7}'),
                 MenuItem::action("设置…", 8).icon('\u{e713}'),
                 MenuItem::separator(),
-                MenuItem::action("退出", 9).icon('\u{e8bb}'),
+                MenuItem::action("退出", 9).icon('\u{f3b1}'),
             ]);
             items
         }
@@ -200,6 +201,7 @@ fn manage_menu(ctx: &MenuContext) -> Vec<MenuItem> {
         MenuItem::separator(),
         MenuItem::action("添加项目…", VIEW_BASE).icon('\u{e710}'),
         MenuItem::action("添加文件…", VIEW_BASE + 1).icon('\u{e8b7}'),
+        MenuItem::action("扫描导入软件…", VIEW_BASE + 7).icon('\u{e773}'),
         MenuItem::separator(),
         MenuItem::submenu(
             "图标大小",
@@ -359,4 +361,63 @@ fn collection_menu(ctx: &MenuContext, kind: i32) -> Vec<MenuItem> {
             .disabled(kind == 2 && ctx.groups.len() == 1),
     ]);
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn walk<'a>(items: &'a [MenuItem], visit: &mut impl FnMut(&'a MenuItem)) {
+        for item in items {
+            visit(item);
+            walk(&item.children, visit);
+        }
+    }
+
+    #[test]
+    fn actionable_commands_are_unique_and_routed() {
+        let ctx = MenuContext {
+            target: Some(MenuEntry { id: 7, kind: 0 }),
+            groups: vec![
+                MenuNode {
+                    id: 1,
+                    name: "常用".into(),
+                },
+                MenuNode {
+                    id: 3,
+                    name: "工作".into(),
+                },
+            ],
+            destinations: vec![
+                MenuDestination {
+                    id: 2,
+                    name: "默认分类".into(),
+                    parent: 1,
+                    holds_entry: false,
+                },
+                MenuDestination {
+                    id: 4,
+                    name: "工具".into(),
+                    parent: 1,
+                    holds_entry: true,
+                },
+            ],
+            ..Default::default()
+        };
+        for kind in 0..=4 {
+            let items = tree(kind, &ctx);
+            let mut seen = Vec::new();
+            walk(&items, &mut |item| {
+                if !item.separator && item.children.is_empty() {
+                    assert_ne!(item.command, 0);
+                    assert!(region(kind, item.command).is_some());
+                    seen.push(item.command);
+                }
+            });
+            let total = seen.len();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), total);
+        }
+    }
 }

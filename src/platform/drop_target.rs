@@ -41,8 +41,8 @@ fn registered(name: &str) -> u16 {
 fn formats() -> [u16; 5] {
     [
         15,
-        registered("UniformResourceLocatorW"),
         registered("text/x-moz-url"),
+        registered("UniformResourceLocatorW"),
         13,
         registered("UniformResourceLocator"),
     ]
@@ -112,7 +112,9 @@ fn read(data: &IDataObject) -> Option<ExternalDrop> {
         unsafe {
             let _ = GlobalUnlock(handle);
         }
-        return Some(ExternalDrop::Text(text));
+        if !text.trim().is_empty() {
+            return Some(ExternalDrop::Text(text));
+        }
     }
     None
 }
@@ -226,15 +228,15 @@ impl Drop for Registration {
 mod tests {
     use super::*;
     #[implement(IDataObject)]
-    struct TextData {
-        format: u16,
-        text: Vec<u16>,
-    }
+    struct TestData(Vec<(u16, Vec<u16>)>);
     #[allow(non_snake_case)]
-    impl IDataObject_Impl for TextData_Impl {
+    impl IDataObject_Impl for TestData_Impl {
         fn GetData(&self, f: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
-            self.QueryGetData(f).ok()?;
-            let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, self.text.len() * 2)? };
+            let fmt = unsafe { (*f).cfFormat };
+            let Some((_, text)) = self.0.iter().find(|(id, _)| *id == fmt) else {
+                return Err(DV_E_FORMATETC.into());
+            };
+            let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, text.len() * 2)? };
             let ptr = unsafe { GlobalLock(handle) };
             if ptr.is_null() {
                 unsafe {
@@ -243,7 +245,7 @@ mod tests {
                 return Err(E_OUTOFMEMORY.into());
             }
             unsafe {
-                std::ptr::copy_nonoverlapping(self.text.as_ptr(), ptr.cast(), self.text.len());
+                std::ptr::copy_nonoverlapping(text.as_ptr(), ptr.cast(), text.len());
                 let _ = GlobalUnlock(handle);
             }
             Ok(STGMEDIUM {
@@ -253,7 +255,8 @@ mod tests {
             })
         }
         fn QueryGetData(&self, f: *const FORMATETC) -> windows::core::HRESULT {
-            if unsafe { (*f).cfFormat == self.format } {
+            let fmt = unsafe { (*f).cfFormat };
+            if self.0.iter().any(|(id, _)| *id == fmt) {
                 S_OK
             } else {
                 DV_E_FORMATETC
@@ -302,10 +305,10 @@ mod tests {
             registered("UniformResourceLocatorW"),
             registered("text/x-moz-url"),
         ] {
-            let data: IDataObject = TextData {
+            let data: IDataObject = TestData(vec![(
                 format,
-                text: "https://example.com/中文\n标题\0".encode_utf16().collect(),
-            }
+                "https://example.com/中文\n标题\0".encode_utf16().collect(),
+            )])
             .into();
             assert!(accepts(&data));
             let Some(ExternalDrop::Text(text)) = read(&data) else {
@@ -359,5 +362,28 @@ mod tests {
             }
             assert_eq!(imported.get(), 1);
         }
+    }
+
+    #[test]
+    fn prefers_moz_url_with_title_over_bare_uniform_resource_locator() {
+        let data: IDataObject = TestData(vec![
+            (
+                registered("UniformResourceLocatorW"),
+                "https://example.com/path\0".encode_utf16().collect(),
+            ),
+            (
+                registered("text/x-moz-url"),
+                "https://example.com/path\n网页标题\0"
+                    .encode_utf16()
+                    .collect(),
+            ),
+        ])
+        .into();
+        let Some(ExternalDrop::Text(text)) = read(&data) else {
+            panic!("missing browser URL")
+        };
+        let entries = crate::importing::url_entries(&text, 2).unwrap();
+        assert_eq!(entries[0].name, "网页标题");
+        assert_eq!(entries[0].target.value(), "https://example.com/path");
     }
 }

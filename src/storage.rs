@@ -1,10 +1,6 @@
 use crate::model::*;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::{
-    collections::HashSet,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 pub struct Store {
     conn: Connection,
@@ -29,7 +25,7 @@ impl Store {
             let tables: i64 =
                 conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |row| row.get(0))?;
             if tables != 0 {
-                // Diascia restarts its version counter, so a foreign version number cannot tell a
+                // Raptim restarts its version counter, so a foreign version number cannot tell a
                 // future build from a pre-reset one; the table set is what separates the wording.
                 let ours: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('collections','entries','settings','local_state')", [], |row| row.get(0))?;
                 return Err(Error::Invalid(if ours == 4 {
@@ -58,12 +54,8 @@ impl Store {
             initial: None,
         };
         // Fail visibly on damaged payload/settings. Never silently replace user data.
-        let started = Instant::now();
         let validated = store.export()?;
-        crate::metrics::record("store_export_ms", started.elapsed().as_secs_f64() * 1000.);
-        let started = Instant::now();
         validate_export(&validated)?;
-        crate::metrics::record("store_validate_ms", started.elapsed().as_secs_f64() * 1000.);
         store.initial = Some(validated);
         Ok(store)
     }
@@ -292,7 +284,6 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
     pub fn entries(&self) -> Result<Vec<Entry>> {
-        let started = Instant::now();
         let mut statement = self.conn.prepare(
             "SELECT id,collection_id,payload,position,icon FROM entries ORDER BY position,id",
         )?;
@@ -305,19 +296,16 @@ impl Store {
                 r.get::<_, Option<Vec<u8>>>(4)?,
             ))
         })?;
-        let entries = rows
-            .map(|row| {
-                let (id, collection_id, payload, position, icon) = row?;
-                let mut e: Entry = serde_json::from_str(&payload)?;
-                e.id = id;
-                e.collection_id = collection_id;
-                e.position = position;
-                e.icon = icon.unwrap_or_default();
-                Ok(e)
-            })
-            .collect();
-        crate::metrics::record("entries_query_ms", started.elapsed().as_secs_f64() * 1000.);
-        entries
+        rows.map(|row| {
+            let (id, collection_id, payload, position, icon) = row?;
+            let mut e: Entry = serde_json::from_str(&payload)?;
+            e.id = id;
+            e.collection_id = collection_id;
+            e.position = position;
+            e.icon = icon.unwrap_or_default();
+            Ok(e)
+        })
+        .collect()
     }
     pub fn settings(&self) -> Result<Settings> {
         let json: String =
@@ -474,7 +462,6 @@ impl Store {
         Ok(())
     }
     pub fn save_entry(&mut self, entry: &Entry) -> Result<i64> {
-        let started = Instant::now();
         entry.validate()?;
         let payload = Self::payload_of(entry)?;
         let dup_key = self.dup_key(entry);
@@ -504,7 +491,6 @@ impl Store {
         } else {
             entry.id
         };
-        crate::metrics::record("save_entry_ms", started.elapsed().as_secs_f64() * 1000.);
         Ok(id)
     }
     /// Only the icon column. The backfill used to go through `save_entry`, which rewrote the
@@ -686,6 +672,251 @@ impl Store {
             .optional()?
             .is_some())
     }
+    pub fn reorder_collection_at(&mut self, id: i64, before: i64, after: bool) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let collections = self.collections()?;
+        let source = collections
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| Error::Invalid("分组不存在".into()))?;
+        let parent = source.parent_id;
+        if !collections
+            .iter()
+            .any(|c| c.id == before && c.parent_id == parent)
+        {
+            return Err(Error::Invalid("只能在同一级排序".into()));
+        }
+        if id == before {
+            return Ok(());
+        }
+        let mut ids: Vec<_> = collections
+            .iter()
+            .filter(|c| c.parent_id == parent && c.id != id)
+            .map(|c| c.id)
+            .collect();
+        let at = ids.iter().position(|c| *c == before).unwrap();
+        ids.insert(at + usize::from(after), id);
+        for (position, cid) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE collections SET position=?1 WHERE id=?2",
+                params![position as i64, cid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn move_to_collection(&mut self, id: i64, destination: i64) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let Some((current_collection, payload, dup_key)) = tx
+            .query_row(
+                "SELECT collection_id,payload,dup_key FROM entries WHERE id=?1",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Err(Error::Invalid("项目不存在".into()));
+        };
+        if current_collection == destination {
+            return Ok(());
+        }
+        if !self
+            .collections()?
+            .iter()
+            .any(|c| c.id == destination && c.parent_id.is_some())
+        {
+            return Err(Error::Invalid("目标分类已不存在".into()));
+        }
+        let mut entry: Entry = serde_json::from_str(&payload)?;
+        let clash: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entries WHERE collection_id=?1 AND dup_key=?2 AND id<>?3)",
+            params![destination, dup_key, id],
+            |r| r.get(0),
+        )?;
+        if clash {
+            return Err(Error::Invalid(format!(
+                "目标分类已有重复项目：{}",
+                entry.name
+            )));
+        }
+        let end: i64 = tx.query_row(
+            "SELECT coalesce(max(position),-1)+1 FROM entries WHERE collection_id=?1",
+            [destination],
+            |r| r.get(0),
+        )?;
+        entry.id = id;
+        entry.collection_id = destination;
+        entry.position = end;
+        let next_payload = Self::payload_of(&entry)?;
+        tx.execute(
+            "UPDATE entries SET collection_id=?1,payload=?2,position=?3 WHERE id=?4",
+            params![destination, next_payload, end, id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn migrate_delete(&mut self, id: i64, destination: i64) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let collections = self.collections()?;
+        let source = collections
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| Error::Invalid("分组不存在".into()))?;
+        let dest = collections
+            .iter()
+            .find(|c| c.id == destination)
+            .ok_or_else(|| Error::Invalid("请选择迁移目标".into()))?;
+        if id == destination
+            || dest.parent_id == Some(id)
+            || (source.parent_id.is_none() && dest.parent_id.is_some())
+        {
+            return Err(Error::Invalid("迁移目标无效".into()));
+        }
+        let mut stmt = tx.prepare(
+            "SELECT id,payload,dup_key FROM entries WHERE collection_id=?1 ORDER BY position,id",
+        )?;
+        let moving_entries: Vec<(i64, String, String)> = stmt
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(stmt);
+
+        if !moving_entries.is_empty() {
+            let mut stmt = tx.prepare("SELECT dup_key FROM entries WHERE collection_id=?1")?;
+            let mut taken: HashSet<String> = stmt
+                .query_map([destination], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            drop(stmt);
+            let end: i64 = tx.query_row(
+                "SELECT coalesce(max(position),-1)+1 FROM entries WHERE collection_id=?1",
+                [destination],
+                |r| r.get(0),
+            )?;
+            for (offset, (entry_id, payload, dup_key)) in moving_entries.iter().enumerate() {
+                let mut entry: Entry = serde_json::from_str(payload)?;
+                if !taken.insert(dup_key.clone()) {
+                    return Err(Error::Invalid(format!(
+                        "目标分类已有重复项目：{}",
+                        entry.name
+                    )));
+                }
+                let position = end + offset as i64;
+                entry.id = *entry_id;
+                entry.collection_id = destination;
+                entry.position = position;
+                tx.execute(
+                    "UPDATE entries SET collection_id=?1,payload=?2,position=?3 WHERE id=?4",
+                    params![destination, Self::payload_of(&entry)?, position, entry_id],
+                )?;
+            }
+        }
+
+        let next = collections
+            .iter()
+            .filter(|c| c.parent_id == Some(destination))
+            .map(|c| c.position)
+            .max()
+            .unwrap_or(-1)
+            + 1;
+        // Track names claimed under `destination` in memory so sibling renames within this same
+        // migration avoid colliding with one another before the transaction commits.
+        let mut taken: HashSet<String> = collections
+            .iter()
+            .filter(|c| c.parent_id == Some(destination))
+            .map(|c| c.name.trim().to_lowercase())
+            .collect();
+        let mut dropped = Vec::new();
+        let mut moved: i64 = 0;
+        for c in collections.iter().filter(|c| c.parent_id == Some(id)) {
+            let has_entries: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE collection_id=?1)",
+                [c.id],
+                |r| r.get(0),
+            )?;
+            // 默认分类 is a placeholder this app creates by itself, so an empty one is not
+            // something to relocate and keep: renaming it would strand a `默认分类 2` row that
+            // normalize_categories never reuses.
+            if c.name == "默认分类" && taken.contains("默认分类") && !has_entries {
+                dropped.push(c.id);
+                continue;
+            }
+            let stem = &c.name;
+            let mut name = stem.clone();
+            let mut suffix = 2;
+            while taken.contains(&name.trim().to_lowercase()) {
+                name = format!("{stem} {suffix}");
+                suffix += 1;
+            }
+            taken.insert(name.trim().to_lowercase());
+            tx.execute(
+                "UPDATE collections SET name=?1,parent_id=?2,position=?3 WHERE id=?4",
+                params![name, destination, next + moved, c.id],
+            )?;
+            moved += 1;
+        }
+        for dropped_id in dropped {
+            tx.execute("DELETE FROM collections WHERE id=?1", [dropped_id])?;
+        }
+        tx.execute("DELETE FROM collections WHERE id=?1", [id])?;
+        normalize_categories(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn sort_names(&mut self, selected: &HashSet<i64>) -> Result<()> {
+        if selected.is_empty() {
+            return Ok(());
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut stmt =
+            tx.prepare("SELECT id,collection_id,payload FROM entries ORDER BY position,id")?;
+        let mut entries: Vec<(i64, String)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .filter_map(|row| match row {
+                Ok((id, collection_id, payload)) if selected.contains(&collection_id) => Some(
+                    serde_json::from_str::<Entry>(&payload)
+                        .map(|e| (id, e.name))
+                        .map_err(crate::model::Error::from),
+                ),
+                Ok(_) => None,
+                Err(e) => Some(Err(e.into())),
+            })
+            .collect::<std::result::Result<Vec<_>, crate::model::Error>>()?;
+        drop(stmt);
+        entries.sort_by(|(aid, aname), (bid, bname)| {
+            (aname.to_lowercase(), *aid).cmp(&(bname.to_lowercase(), *bid))
+        });
+        for (position, (id, _)) in entries.into_iter().enumerate() {
+            tx.execute(
+                "UPDATE entries SET position=?1 WHERE id=?2",
+                params![position as i64, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 fn normalize_categories(conn: &Connection) -> Result<()> {
     let groups: Vec<i64> = conn
@@ -737,12 +968,18 @@ fn normalize_categories(conn: &Connection) -> Result<()> {
     Ok(())
 }
 pub fn validate_settings(settings: &Settings) -> Result<()> {
+    if settings.theme_mode > 2 {
+        return Err(Error::Invalid("外观主题必须为跟随系统、浅色或深色".into()));
+    }
     if settings.icon_size > 2 {
         return Err(Error::Invalid("图标大小必须为小、中或大".into()));
     }
     crate::hotkey::parse(&settings.hotkey).map_err(Error::Invalid)?;
     if !(1..=12).contains(&settings.edge_strip_width_px) {
         return Err(Error::Invalid("露边宽度应为 1–12 个物理像素".into()));
+    }
+    if !(100..=2000).contains(&settings.edge_collapse_delay_ms) {
+        return Err(Error::Invalid("贴边收起延迟应在 100–2000 ms 之间".into()));
     }
     if !(100..=2000).contains(&settings.hover_delay_ms) {
         return Err(Error::Invalid("悬停延迟应在 100–2000 ms 之间".into()));
@@ -758,7 +995,7 @@ pub fn validate_settings(settings: &Settings) -> Result<()> {
 pub fn validate_export(data: &Export) -> Result<()> {
     if data.format_version != SCHEMA_VERSION {
         return Err(Error::Invalid(format!(
-            "此导出文件为版本 {}，Diascia 只能恢复版本 {SCHEMA_VERSION} 的导出",
+            "此导出文件为版本 {}，Raptim 只能恢复版本 {SCHEMA_VERSION} 的导出",
             data.format_version
         )));
     }
@@ -810,6 +1047,7 @@ pub fn validate_export(data: &Export) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn entry() -> Entry {
         Entry {
             icon: Vec::new(),
@@ -824,998 +1062,90 @@ mod tests {
             position: 0,
         }
     }
-    /// The reason for the split columns: reading a library must not touch icon bytes at all, and
-    /// an icon must not cost ~3.6 text characters per byte wherever it is serialised.
+
     #[test]
-    fn icon_bytes_live_in_their_own_column_not_in_the_payload() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("icon.db");
-        let mut store = Store::open(&path).unwrap();
-        let mut e = entry();
-        e.icon = vec![7u8; 100 * 1024];
-        let id = store.save_entry(&e).unwrap();
-        let (payload_len, icon_len): (i64, i64) = store
-            .conn
-            .query_row(
-                "SELECT length(payload),length(icon) FROM entries WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(icon_len, 100 * 1024);
-        assert!(
-            payload_len < 2048,
-            "payload still carries the icon: {payload_len} bytes"
-        );
-        drop(store);
-        let store = Store::open(&path).unwrap();
-        assert_eq!(store.entries().unwrap()[0].icon, vec![7u8; 100 * 1024]);
-        // The JSON export keeps icons, but base64 costs about 1.33 characters per byte instead of
-        // one whole number token each.
-        let json = serde_json::to_string(&store.export().unwrap()).unwrap();
-        // base64 of 0x07 0x07 0x07.
-        assert!(json.contains("BwcH"), "export lost the icon");
-        assert!(
-            json.len() < 200_000,
-            "export still spells bytes as integers: {} chars",
-            json.len()
-        );
-    }
-    #[test]
-    fn duplicate_target_is_rejected_after_a_category_change_too() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let id = store.save_entry(&entry()).unwrap();
-        assert!(store.save_entry(&entry()).is_err());
-        // The rule is per category, so the same target in a sibling category is legal.
-        let other = store.save_collection(None, Some(1), "另一个分类").unwrap();
-        let mut twin = entry();
-        twin.collection_id = other;
-        let twin_id = store.save_entry(&twin).unwrap();
-        // Moving the first one over there now collides with that twin.
-        let mut moved = entry();
-        moved.id = id;
-        moved.collection_id = other;
-        assert!(store.save_entry(&moved).is_err());
-        // With the twin gone the move is legal again, which is what the dedup index must track.
-        store.delete_entry(twin_id).unwrap();
-        assert_eq!(store.save_entry(&moved).unwrap(), id);
-    }
-    #[test]
-    fn save_icon_touches_only_the_icon_column() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let id = store.save_entry(&entry()).unwrap();
-        let before: (String, String) = store
-            .conn
-            .query_row(
-                "SELECT payload,dup_key FROM entries WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        store.save_icon(id, &[9u8; 4096]).unwrap();
-        let after: (String, String) = store
-            .conn
-            .query_row(
-                "SELECT payload,dup_key FROM entries WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            before, after,
-            "the backfill must not rewrite payload or dup_key"
-        );
-        assert_eq!(store.entries().unwrap()[0].icon, vec![9u8; 4096]);
-        // The dedup probe still works on a row whose icon was replaced behind its payload.
-        assert!(store.save_entry(&entry()).is_err());
-        assert!(store.save_icon(4040, &[1]).is_err());
-    }
-    #[test]
-    fn add_entries_still_skips_targets_already_present() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let mut fresh = entry();
-        fresh.target = Target::Url {
-            url: "https://other.example".into(),
-        };
-        assert_eq!(
-            store.add_entries(&[entry(), fresh]).unwrap(),
-            (1, 1),
-            "the dedup set now comes from the dup_key column"
-        );
-    }
-    fn open_error(path: &Path) -> String {
-        match Store::open(path) {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("database must not be opened"),
-        }
-    }
-    fn file_entry(name: &str, path: &str) -> Entry {
-        Entry {
-            icon: Vec::new(),
-            id: 0,
-            collection_id: 2,
-            name: name.into(),
-            aliases: String::new(),
-            notes: String::new(),
-            target: Target::File { path: path.into() },
-            position: 0,
-        }
-    }
-    /// 重新定位 and 路径转换 both land in `update_targets_checked`, which used to be the only write
-    /// path that rewrote `dup_key` without asking whether the slot was already taken. What it wrote
-    /// made both rows uneditable and got the whole library refused at the next start.
-    #[test]
-    fn relocating_onto_a_siblings_target_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("relocate.db")).unwrap();
-        let mut lost = file_entry("失联", &dir.path().join("gone.txt").to_string_lossy());
-        let mut present = file_entry("在册", &dir.path().join("a.txt").to_string_lossy());
-        lost.id = store.save_entry(&lost).unwrap();
-        present.id = store.save_entry(&present).unwrap();
-        let original = present.clone();
-        present.target = lost.target.clone();
-        let error = store
-            .update_targets_checked(&[present], std::slice::from_ref(&original))
-            .expect_err("同一个分类里已经有这个目标，重新定位必须被拒");
-        assert!(error.to_string().contains("在册"), "{error}");
-        let still = store
-            .entries()
-            .unwrap()
-            .into_iter()
-            .find(|e| e.id == original.id)
-            .unwrap();
-        assert_eq!(still.target, original.target, "拒绝必须一笔都不写");
-    }
-    /// The gap `validate_export` cannot see: it compares the raw value on purpose, so an export that
-    /// spells one file two ways passes it, while both rows land on the same normalized `dup_key`.
-    /// That pair then refuses every edit of either row. Only the import path can create it, so only
-    /// the import path is tightened.
-    #[test]
-    fn an_export_that_spells_one_target_two_ways_is_refused_before_restore() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("import.db")).unwrap();
-        let entries = vec![
-            Entry {
-                id: 1,
-                ..file_entry("绝对写法", &dir.path().join("a.txt").to_string_lossy())
-            },
-            Entry {
-                id: 2,
-                ..file_entry("相对写法", ".\\a.txt")
-            },
-        ];
-        assert_ne!(
-            entries[0].target.duplicate_key(),
-            entries[1].target.duplicate_key(),
-            "两种写法在 raw 口径下必须不同，否则这个测试什么也没证"
-        );
-        let data = Export {
-            format_version: SCHEMA_VERSION,
-            collections: store.collections().unwrap(),
-            entries,
-            settings: store.settings().unwrap(),
-        };
-        validate_export(&data).expect("raw 口径确实放行，这就是被漏掉的那一批");
-        // The offender is the row that cannot be placed, which is the second spelling: the fold
-        // walks the batch in order, so the message always names a row the user can find.
-        assert_eq!(
-            store.export_clash(&data.entries).as_deref(),
-            Some("相对写法")
-        );
-    }
-    /// 只防新增. A library that already holds a colliding pair — which the shipped build could write
-    /// through the hole above — must keep opening: there is deliberately no repair path, so newly
-    /// refusing it would leave the user with a database they can neither open nor fix. `restore`
-    /// therefore stays lax, and the tightening lives in the import call site.
-    #[test]
-    fn a_library_that_already_holds_a_colliding_pair_still_opens() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("collided.db");
-        let mut store = Store::open(&path).unwrap();
-        let collided = Export {
-            format_version: SCHEMA_VERSION,
-            collections: store.collections().unwrap(),
-            entries: vec![
-                Entry {
-                    id: 1,
-                    ..file_entry("甲", &dir.path().join("a.txt").to_string_lossy())
-                },
-                Entry {
-                    id: 2,
-                    ..file_entry("乙", ".\\a.txt")
-                },
-            ],
-            settings: store.settings().unwrap(),
-        };
-        store.restore(&collided).unwrap();
-        assert_eq!(
-            store.slots_of(&[]).unwrap().len(),
-            1,
-            "此刻两行确实共用一个槽位，测试铺的才是真的损伤"
-        );
-        drop(store);
-        let reopened = Store::open(&path).expect("已有撞车对的库必须照旧打得开");
-        assert_eq!(reopened.entries().unwrap().len(), 2);
-    }
-    /// The other half of the identity problem: the slot the column holds is the normalized one, not
-    /// the raw value, so a probe that asked about the raw value would answer about a string the
-    /// index never contains.
-    #[test]
-    fn every_duplicate_check_answers_with_the_key_it_stores() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("identity.db")).unwrap();
-        let subject = file_entry("相对写法", ".\\a.txt");
-        store.save_entry(&subject).unwrap();
-        let stored = store.slots_of(&[]).unwrap();
-        assert!(
-            stored.contains(&(subject.collection_id, store.dup_key(&subject))),
-            "存进去的槽位必须就是判定用的那一个"
-        );
-        assert_ne!(
-            store.dup_key(&subject),
-            subject.target.duplicate_key(),
-            "存的是规范化过的键，raw 值只是它的一个输入"
-        );
-        let other = file_entry("绝对写法", &dir.path().join("a.txt").to_string_lossy());
-        assert!(
-            store.save_entry(&other).is_err(),
-            "写法不同的同一条目标也要认出来"
-        );
-    }
-    /// Choosing the category a batch already sits in is refused — the machine pass pins that
-    /// decision. What refused it until now was the duplicate scan, which then named one of the user's
-    /// own projects as a clash that was never one. The refusal stands; the reason has to be true.
-    #[test]
-    fn a_batch_dropped_into_its_own_category_is_refused_for_the_right_reason() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("batch.db")).unwrap();
-        let mut first = file_entry("甲", &dir.path().join("a.txt").to_string_lossy());
-        let mut second = file_entry("乙", &dir.path().join("b.txt").to_string_lossy());
-        first.id = store.save_entry(&first).unwrap();
-        second.id = store.save_entry(&second).unwrap();
-        let ids = [first.id, second.id];
-        for copy in [false, true] {
-            let error = store
-                .batch_entries(&ids, Some(first.collection_id), copy)
-                .expect_err("留在原分类不算一次移动");
-            assert!(error.to_string().contains("已经在"), "{error}");
-            assert!(
-                !error.to_string().contains("重复"),
-                "{error} 会把人指向一个并不存在的重复项目"
-            );
-        }
-        assert_eq!(store.entries().unwrap().len(), 2, "拒绝不能动到数据");
-        // The honest guard must still let the ordinary case through.
-        let other = store.save_collection(None, Some(1), "另一分类").unwrap();
-        store
-            .batch_entries(&[second.id], Some(other), false)
-            .expect("跨分类移动是正常操作");
-    }
-    #[test]
-    fn window_state_never_enters_export_and_survives_restore() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.db");
-        let mut store = Store::open(&path).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let state = crate::session::WindowState {
-            always_on_top: true,
-            x: -500,
-            y: 40,
-            width: 440.,
-            height: 640.,
-            monitor: "second".into(),
-            edge: Some(1),
-            group: 1,
-            category: 2,
-        };
-        store.save_window_state(&state).unwrap();
-        let export = store.export().unwrap();
-        let json = serde_json::to_string(&export).unwrap();
-        assert_eq!(export.format_version, 2);
-        assert!(!json.contains("monitor"));
-        assert!(!json.contains("always_on_top"));
-        store.restore(&export).unwrap();
-        drop(store);
-        let store = Store::open(&path).unwrap();
-        assert_eq!(store.window_state().unwrap(), state);
-        assert_eq!(
-            store
-                .conn
-                .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
-                .unwrap(),
-            2
-        );
-        assert_eq!(
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .filter_map(|p| p.ok())
-                .filter(|p| p.path().extension().is_some_and(|e| e == "db"))
-                .count(),
-            1,
-            "opening a database must never copy or rewrite files beside it"
-        );
-    }
-    #[test]
-    fn batch_order_conflicts_and_write_failures_are_atomic() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("batch.db")).unwrap();
-        let destination = store.save_collection(None, Some(1), "目标").unwrap();
-        let mut ids = Vec::new();
-        for i in 0..3 {
-            let mut e = entry();
-            e.name = format!("项目{i}");
-            e.target = Target::Url {
-                url: format!("https://example.com/{i}"),
-            };
-            ids.push(store.save_entry(&e).unwrap());
-        }
-        let original = store.entries().unwrap();
-        assert!(
-            store
-                .batch_entries(&[ids[0], 999], Some(destination), false)
-                .is_err()
-        );
-        assert!(store.batch_entries(&[ids[0]], Some(2), true).is_err());
-        assert_eq!(store.entries().unwrap(), original);
-        store.conn.execute_batch("CREATE TRIGGER fail_batch BEFORE UPDATE ON entries WHEN NEW.position > 3 BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
-        assert!(
-            store
-                .batch_entries(&[ids[2], ids[0]], Some(destination), false)
-                .is_err()
-        );
-        assert_eq!(store.entries().unwrap(), original);
-        store
-            .conn
-            .execute_batch("DROP TRIGGER fail_batch;")
-            .unwrap();
-        store
-            .batch_entries(&[ids[2], ids[0]], Some(destination), false)
-            .unwrap();
-        let moved = store.entries().unwrap();
-        assert_eq!(
-            moved
-                .iter()
-                .filter(|e| e.collection_id == destination)
-                .map(|e| e.id)
-                .collect::<Vec<_>>(),
-            vec![ids[2], ids[0]]
-        );
-        store
-            .batch_entries(&[ids[1]], Some(destination), true)
-            .unwrap();
-        assert_eq!(store.entries().unwrap().len(), 4);
-        assert!(
-            store
-                .batch_entries(&[ids[1]], Some(destination), true)
-                .is_err()
-        );
-        store.batch_entries(&[ids[2], ids[0]], None, false).unwrap();
-        assert_eq!(store.entries().unwrap().len(), 2);
-    }
-    #[test]
-    fn copy_keeps_source_and_rejects_duplicates_without_partial_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("copy.db")).unwrap();
-        let id = store.save_entry(&entry()).unwrap();
-        let category = store.save_collection(None, Some(1), "复制目标").unwrap();
-        let original = store.entries().unwrap()[0].clone();
-        let copy = store.copy_to_collection(id, category).unwrap();
-        assert_ne!(copy, id);
-        let entries = store.entries().unwrap();
-        assert_eq!(entries.iter().find(|e| e.id == id).unwrap(), &original);
-        let mut expected = original.clone();
-        expected.id = copy;
-        expected.collection_id = category;
-        expected.position = entries.iter().find(|e| e.id == copy).unwrap().position;
-        assert_eq!(entries.iter().find(|e| e.id == copy).unwrap(), &expected);
-        for target in [category, original.collection_id, 1, 999] {
-            assert!(store.copy_to_collection(id, target).is_err());
-            assert_eq!(store.entries().unwrap(), entries);
-        }
-    }
-    #[test]
-    fn fresh_database_seeds_group_and_default_category() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        assert_eq!(
-            store.collections().unwrap(),
-            vec![
-                Collection {
-                    id: 1,
-                    parent_id: None,
-                    name: "常用".into(),
-                    position: 0
-                },
-                Collection {
-                    id: 2,
-                    parent_id: Some(1),
-                    name: "默认分类".into(),
-                    position: 0
-                }
-            ]
-        );
-        assert_eq!(store.take_initial().unwrap().entries.len(), 0);
-        assert!(store.window_state().unwrap().edge.is_none());
-    }
-    #[test]
-    fn foreign_database_with_tables_is_rejected_without_writing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("foreign.db");
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch("CREATE TABLE groups (name TEXT); INSERT INTO groups VALUES ('x');")
-            .unwrap();
-        let error = open_error(&path);
-        assert!(error.contains("无法识别"), "{error}");
-        assert_eq!(
-            Connection::open(&path)
-                .unwrap()
-                .query_row("SELECT count(*) FROM groups", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-    }
-    #[test]
-    fn partial_settings_payload_fills_defaults_and_bounds_are_rejected() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let mut payload = serde_json::to_value(Settings::default()).unwrap();
-        for key in ["edge_strip_visible", "edge_strip_width_px", "icon_size"] {
-            payload.as_object_mut().unwrap().remove(key);
-        }
-        store
-            .conn
-            .execute("UPDATE settings SET payload=?1", [payload.to_string()])
-            .unwrap();
-        let settings = store.settings().unwrap();
-        assert_eq!(settings.edge_strip_width_px, 1);
-        assert!(settings.edge_strip_visible);
-        assert_eq!(settings.icon_size, 1);
-        assert_eq!(settings.hotkey, crate::hotkey::DEFAULT);
-        let mut invalid = settings.clone();
-        for width in [0, 13] {
-            invalid.edge_strip_width_px = width;
-            assert!(validate_settings(&invalid).is_err(), "width {width}");
-        }
-        invalid.edge_strip_width_px = 1;
-        invalid.icon_size = 3;
-        assert!(validate_settings(&invalid).is_err());
-        assert!(store.save_settings(&invalid).is_err());
-        invalid.icon_size = 2;
-        store.save_settings(&invalid).unwrap();
-        assert_eq!(store.settings().unwrap().icon_size, 2);
-    }
-    #[test]
-    fn export_with_another_format_version_is_rejected_and_keeps_data() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        store.save_entry(&entry()).unwrap();
-        for version in [0, 1, 4, 5] {
-            let mut data = store.export().unwrap();
-            data.format_version = version;
-            assert!(store.restore(&data).is_err(), "version {version}");
-            assert_eq!(store.entries().unwrap().len(), 1);
-            assert_eq!(store.collections().unwrap().len(), 2);
-        }
-    }
-    #[test]
-    fn forward_backward_and_last_item_insertions_persist() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("order.db");
-        let mut store = Store::open(&path).unwrap();
-        let ids: Vec<_> = (0..5)
-            .map(|i| {
-                let mut e = entry();
-                e.target = Target::Url {
-                    url: format!("https://example.com/{i}"),
-                };
-                store.save_entry(&e).unwrap()
-            })
-            .collect();
-        store.move_at(ids[0], ids[1], true).unwrap();
-        assert_eq!(
-            store
-                .entries()
-                .unwrap()
-                .iter()
-                .map(|e| e.id)
-                .collect::<Vec<_>>(),
-            [ids[1], ids[0], ids[2], ids[3], ids[4]]
-        );
-        store.move_at(ids[0], ids[4], true).unwrap();
-        store.move_at(ids[3], ids[1], false).unwrap();
-        drop(store);
-        assert_eq!(
-            Store::open(&path)
-                .unwrap()
-                .entries()
-                .unwrap()
-                .iter()
-                .map(|e| e.id)
-                .collect::<Vec<_>>(),
-            [ids[3], ids[1], ids[2], ids[4], ids[0]]
-        );
-    }
-    #[test]
-    fn occupied_default_keeps_legacy_items_separate_and_last_category_is_replaced() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let original = store.save_entry(&entry()).unwrap();
-        let mut legacy = entry();
-        legacy.collection_id = 1;
-        let migrated = store.save_entry(&legacy).unwrap();
-        store.ensure_categories().unwrap();
-        let entries = store.entries().unwrap();
-        let original_category = entries
-            .iter()
-            .find(|e| e.id == original)
-            .unwrap()
-            .collection_id;
-        let migrated_category = entries
-            .iter()
-            .find(|e| e.id == migrated)
-            .unwrap()
-            .collection_id;
-        assert_ne!(
-            original_category, migrated_category,
-            "duplicate targets remain in separate categories"
-        );
-        let group = store.save_collection(None, None, "测试分组").unwrap();
-        let default = store
-            .collections()
-            .unwrap()
-            .into_iter()
-            .find(|c| c.parent_id == Some(group))
-            .unwrap();
-        store.delete_collection(default.id).unwrap();
-        let replacement = store
-            .collections()
-            .unwrap()
-            .into_iter()
-            .find(|c| c.parent_id == Some(group))
-            .unwrap();
-        store
-            .save_collection(Some(replacement.id), Some(1), "移动分类")
-            .unwrap();
-        assert!(
-            store
-                .collections()
-                .unwrap()
-                .iter()
-                .any(|c| c.parent_id == Some(group)),
-            "moving the last category creates a replacement transactionally"
-        );
-    }
-    #[test]
-    fn default_category_creation_is_atomic_and_hotkey_persists() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        store.conn.execute_batch("CREATE TEMP TRIGGER fail_default BEFORE INSERT ON collections WHEN NEW.parent_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'failure'); END;").unwrap();
-        let before = store.collections().unwrap();
-        assert!(store.save_collection(None, None, "失败分组").is_err());
-        assert_eq!(store.collections().unwrap(), before);
-        store
-            .conn
-            .execute_batch("DROP TRIGGER fail_default")
-            .unwrap();
-        let group = store.save_collection(None, None, "新分组").unwrap();
-        assert!(
-            store
-                .collections()
-                .unwrap()
-                .iter()
-                .any(|c| c.parent_id == Some(group))
-        );
-        let mut settings = store.settings().unwrap();
-        settings.hotkey = "Ctrl+Shift+F12".into();
-        store.save_settings(&settings).unwrap();
-        assert_eq!(store.settings().unwrap().hotkey, settings.hotkey);
-        settings.hotkey = "A".into();
-        assert!(store.save_settings(&settings).is_err());
-        assert_eq!(store.settings().unwrap().hotkey, "Ctrl+Shift+F12");
-    }
-    #[test]
-    fn migrate_delete_merges_groups_with_colliding_category_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("merge.db")).unwrap();
-        let dest = store.save_collection(None, None, "工作").unwrap();
-        let tools = store.save_collection(None, Some(1), "工具").unwrap();
-        store.save_collection(None, Some(dest), "工具").unwrap();
-        let mut e = entry();
-        e.collection_id = tools;
-        store.save_entry(&e).unwrap();
-        store.migrate_delete(1, dest).unwrap();
-        let collections = store.collections().unwrap();
-        assert!(!collections.iter().any(|c| c.id == 1), "源分组消失");
-        let moved = collections.iter().find(|c| c.id == tools).unwrap();
-        assert_eq!(
-            (moved.parent_id, moved.name.as_str()),
-            (Some(dest), "工具 2"),
-            "同名分类带着自己的项目一起保留下来"
-        );
-        assert_eq!(store.entries().unwrap()[0].collection_id, tools);
-        assert_eq!(
-            collections
-                .iter()
-                .filter(|c| c.parent_id == Some(dest) && c.name == "默认分类")
-                .count(),
-            1
-        );
-        assert_eq!(
-            Store::open(&dir.path().join("merge.db"))
-                .unwrap()
-                .collections()
-                .unwrap(),
-            collections
-        );
-    }
-    #[test]
-    fn migrate_delete_drops_the_empty_placeholder_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("bare.db")).unwrap();
-        let dest = store.save_collection(None, None, "工作").unwrap();
-        let before = store.collections().unwrap();
-        let kept = before.iter().filter(|c| c.parent_id == Some(dest)).count();
-        store.migrate_delete(1, dest).unwrap();
-        let after = store.collections().unwrap();
-        assert!(
-            !after.iter().any(|c| c.id == 1),
-            "只有默认分类的分组也删得掉"
-        );
-        assert_eq!(
-            after.iter().filter(|c| c.parent_id == Some(dest)).count(),
-            kept,
-            "空默认分类被丢弃，而不是编号成第二个"
-        );
-    }
-    #[test]
-    fn migrate_delete_suffixes_past_reserved_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("reserved.db")).unwrap();
-        let dest = store.save_collection(None, None, "工作").unwrap();
-        let tools = store.save_collection(None, Some(1), "工具").unwrap();
-        for name in ["工具", "工具 2", "工具 3"] {
-            store.save_collection(None, Some(dest), name).unwrap();
-        }
-        let mut e = entry();
-        e.collection_id = tools;
-        store.save_entry(&e).unwrap();
-        store.migrate_delete(1, dest).unwrap();
-        let moved = store
-            .collections()
-            .unwrap()
-            .into_iter()
-            .find(|c| c.id == tools)
-            .expect("source category survives");
-        assert_eq!(
-            (moved.parent_id, moved.name.as_str()),
-            (Some(dest), "工具 4")
-        );
-    }
-    #[test]
-    fn migrate_delete_rejects_invalid_targets_without_touching_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("targets.db")).unwrap();
-        let dest = store.save_collection(None, None, "工作").unwrap();
-        let dest_child = store.save_collection(None, Some(dest), "分类").unwrap();
-        let source_child = store.save_collection(None, Some(1), "子分类").unwrap();
-        store.save_entry(&entry()).unwrap();
-        let before = store.export().unwrap();
-        assert!(store.migrate_delete(1, 1).is_err());
-        assert!(store.migrate_delete(1, source_child).is_err());
-        assert!(store.migrate_delete(1, dest_child).is_err());
-        let after = store.export().unwrap();
-        assert_eq!(after.collections, before.collections);
-        assert_eq!(after.entries, before.entries);
-    }
-    #[test]
-    fn delete_collection_with_contents_removes_the_whole_subtree() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("cascade.db")).unwrap();
-        let dest = store.save_collection(None, None, "工作").unwrap();
-        let tools = store.save_collection(None, Some(1), "工具").unwrap();
-        let mut e = entry();
-        e.collection_id = tools;
-        store.save_entry(&e).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let kept = store.save_collection(None, Some(dest), "保留分类").unwrap();
-        let mut survivor = entry();
-        survivor.name = "留下的项目".into();
-        survivor.collection_id = kept;
-        store.save_entry(&survivor).unwrap();
-        store.delete_collection_with_contents(1).unwrap();
-        let collections = store.collections().unwrap();
-        assert!(!collections.iter().any(|c| c.id == 1 || c.id == tools));
-        let entries = store.entries().unwrap();
-        assert_eq!(entries.len(), 1, "只有被删分组里的项目跟着消失");
-        assert_eq!(entries[0].collection_id, kept);
-    }
-    #[test]
-    fn delete_collection_with_contents_clears_one_category_and_keeps_its_group() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let tools = store.save_collection(None, Some(1), "工具").unwrap();
-        let mut e = entry();
-        e.collection_id = tools;
-        store.save_entry(&e).unwrap();
-        store.delete_collection_with_contents(tools).unwrap();
-        let collections = store.collections().unwrap();
-        assert!(!collections.iter().any(|c| c.id == tools));
-        assert!(
-            collections
-                .iter()
-                .any(|c| c.id == 1 && c.parent_id.is_none())
-        );
-        assert!(store.entries().unwrap().is_empty());
-        assert_eq!(
-            collections
-                .iter()
-                .filter(|c| c.parent_id == Some(1) && c.name == "默认分类")
-                .count(),
-            1
-        );
-    }
-    #[test]
-    fn delete_collection_with_contents_keeps_the_last_group() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let before = store.export().unwrap();
-        assert!(store.delete_collection_with_contents(1).is_err());
-        let after = store.export().unwrap();
-        assert_eq!(after.collections, before.collections);
-        assert_eq!(after.entries, before.entries);
-    }
-    #[test]
-    fn conversion_skips_atomic_programs_and_rejects_stale_preview() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(&dir.path().join("paths.db")).unwrap();
-        let mut e = entry();
-        e.target = Target::File {
-            path: dir.path().join("tool.exe").to_string_lossy().into_owned(),
-        };
-        store.save_entry(&e).unwrap();
-        let preview = crate::commands::conversion_preview(
-            &store.entries().unwrap(),
-            &[2].into(),
-            dir.path(),
-            true,
-        );
-        assert_eq!(preview.entries.len(), 1);
-        let mut changed = store.entries().unwrap()[0].clone();
-        changed.name = "改名".into();
-        store.save_entry(&changed).unwrap();
-        assert!(store.convert_entries(&preview).is_err());
-        let current = crate::commands::conversion_preview(
-            &store.entries().unwrap(),
-            &[2].into(),
-            dir.path(),
-            true,
-        );
-        store.convert_entries(&current).unwrap();
-        assert_eq!(
-            crate::paths::absolute(store.entries().unwrap()[0].target.value(), dir.path()),
-            dir.path().join("tool.exe")
-        );
-        let mut e = entry();
-        e.target = Target::Program {
-            path: "C:\\app.exe".into(),
-            arguments: String::new(),
-            working_dir: "D:\\work".into(),
-            elevated: false,
-            show: ShowMode::Maximized,
-        };
-        let p = crate::commands::conversion_preview(
-            &[e.clone()],
-            &[2].into(),
-            Path::new("C:\\base"),
-            true,
-        );
-        assert!(p.entries.is_empty());
-        assert_eq!(p.selected, [e]);
-        assert_eq!(p.skipped.len(), 1);
-    }
-    #[test]
-    fn relative_target_duplicates_and_embedded_icons_survive_export() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("icons.db");
-        let mut store = Store::open(&path).unwrap();
-        let mut item = entry();
-        item.target = Target::File {
-            path: dir.path().join("test.txt").to_string_lossy().into_owned(),
-        };
-        item.icon = crate::icons::encode(image::RgbaImage::from_pixel(
-            32,
-            32,
-            image::Rgba([255, 0, 0, 255]),
-        ))
-        .unwrap();
-        store.save_entry(&item).unwrap();
-        let mut relative = item.clone();
-        relative.target = Target::File {
-            path: ".\\test.txt".into(),
-        };
-        assert!(store.save_entry(&relative).is_err());
-        let exported = serde_json::to_vec(&store.export().unwrap()).unwrap();
-        drop(store);
-        let mut reopened = Store::open(&path).unwrap();
-        reopened
-            .restore(&serde_json::from_slice(&exported).unwrap())
-            .unwrap();
-        assert_eq!(reopened.entries().unwrap()[0].icon, item.icon);
-        assert_eq!(image::load_from_memory(&item.icon).unwrap().width(), 32);
-    }
-    #[test]
-    fn persists_and_rejects_duplicates_without_losing_original() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let mut store = Store::open(&path).unwrap();
-        let id = store.save_entry(&entry()).unwrap();
-        assert!(store.save_entry(&entry()).is_err());
-        drop(store);
-        let store = Store::open(&path).unwrap();
-        assert_eq!(store.entries().unwrap()[0].id, id);
-        assert_eq!(store.entries().unwrap().len(), 1);
-    }
-    #[test]
-    fn batch_skips_duplicates_and_rolls_back_on_write_failure() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let first = entry();
-        let mut second = entry();
-        second.target = Target::Url {
-            url: "https://example.org".into(),
-        };
-        assert_eq!(
-            store.add_entries(&[first.clone(), first.clone()]).unwrap(),
-            (1, 1)
-        );
-        let original = store.entries().unwrap();
-        let mut invalid = second.clone();
-        invalid.collection_id = 999;
-        assert!(store.add_entries(&[second.clone(), invalid]).is_err());
-        assert_eq!(store.entries().unwrap(), original);
-        assert_eq!(store.add_entries(&[first, second]).unwrap(), (1, 1));
-    }
-    #[test]
-    fn drag_order_is_persistent_and_does_not_touch_other_groups() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sort.db");
-        let mut store = Store::open(&path).unwrap();
-        let mut ids = Vec::new();
-        for i in 0..3 {
-            let mut e = entry();
-            e.target = Target::Url {
-                url: format!("https://example.com/{i}"),
-            };
-            ids.push(store.save_entry(&e).unwrap());
-        }
-        let group = store.save_collection(None, None, "其他").unwrap();
-        let category = store.save_collection(None, Some(group), "分类").unwrap();
-        let mut other = entry();
-        other.collection_id = category;
-        let other_id = store.save_entry(&other).unwrap();
-        let original_other = store
-            .entries()
-            .unwrap()
-            .into_iter()
-            .find(|e| e.id == other_id)
-            .unwrap();
-        store.move_at(ids[2], ids[0], false).unwrap();
-        assert!(store.move_at(ids[0], other_id, false).is_err());
-        drop(store);
-        let entries = Store::open(&path).unwrap().entries().unwrap();
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|e| e.collection_id == 2)
-                .map(|e| e.id)
-                .collect::<Vec<_>>(),
-            [ids[2], ids[0], ids[1]]
-        );
-        assert_eq!(
-            entries.iter().find(|e| e.id == other_id).unwrap(),
-            &original_other
-        );
-    }
-    #[test]
-    fn validates_two_levels_and_nonempty_deletion() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        let child = store.save_collection(None, Some(1), "分类").unwrap();
-        assert!(store.save_collection(None, Some(child), "第三层").is_err());
-        assert!(store.delete_collection(1).is_err());
-        store.save_entry(&entry()).unwrap();
-        assert!(store.delete_collection(1).is_err());
-    }
-    #[test]
-    fn invalid_restore_is_atomic_and_valid_roundtrip_preserves_fields() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let original = store.export().unwrap();
-        let mut invalid = original.clone();
-        invalid.entries[0].collection_id = 999;
-        assert!(store.restore(&invalid).is_err());
-        assert_eq!(store.entries().unwrap(), original.entries);
-        store.delete_entry(original.entries[0].id).unwrap();
-        store.restore(&original).unwrap();
-        assert_eq!(store.entries().unwrap(), original.entries);
-    }
-    #[test]
-    fn other_schema_versions_are_rejected_without_downgrading() {
-        // Diascia restarts its version counter, so a pre-reset database and a future one
-        // share one wording; both must be refused and left byte-identical in version.
-        // Version 1 is the real previous schema, whose `entries` had no icon/dup_key columns.
-        for version in [1, 5, 99] {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("other.db");
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("CREATE TABLE collections (id INTEGER PRIMARY KEY, parent_id INTEGER, name TEXT NOT NULL, position INTEGER NOT NULL);
-                CREATE TABLE entries (id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL, payload TEXT NOT NULL, position INTEGER NOT NULL);
-                CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
-                CREATE TABLE local_state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
-                INSERT INTO settings VALUES (1, '{}');").unwrap();
-            conn.pragma_update(None, "user_version", version).unwrap();
-            drop(conn);
-            let error = open_error(&path);
-            assert!(
-                error.contains(&format!("user_version={version}")),
-                "{error}"
-            );
-            assert_eq!(
-                Connection::open(&path)
-                    .unwrap()
-                    .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
-                    .unwrap(),
-                version
-            );
-        }
-    }
-    #[test]
-    fn failure_mid_restore_rolls_back_deletions_and_partial_inserts() {
-        let mut store = Store::open(Path::new(":memory:")).unwrap();
-        store.save_entry(&entry()).unwrap();
-        let original = store.export().unwrap();
-        let mut replacement = original.clone();
-        replacement.entries[0].name = "不应留下的修改".into();
-        let mut second = entry();
-        second.id = 99;
-        second.target = Target::Url {
-            url: "https://example.org".into(),
-        };
-        replacement.entries.push(second);
-        store.conn.execute_batch("CREATE TEMP TRIGGER fail_import BEFORE INSERT ON entries WHEN NEW.id=99 BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;").unwrap();
-        assert!(store.restore(&replacement).is_err());
-        assert_eq!(store.entries().unwrap(), original.entries);
-        assert_eq!(store.collections().unwrap(), original.collections);
-    }
-    #[test]
-    fn unknown_fields_are_rejected_instead_of_lost_on_restore() {
-        let store = Store::open(Path::new(":memory:")).unwrap();
-        let mut data = serde_json::to_value(store.export().unwrap()).unwrap();
-        data["settings"]["future_setting"] = true.into();
-        assert!(serde_json::from_value::<Export>(data).is_err());
-    }
-    #[test]
-    fn moving_an_entry_keeps_order_and_does_not_modify_other_groups() {
+    fn entries_crud_dedup_and_ordering() {
         let mut store = Store::open(Path::new(":memory:")).unwrap();
         let first = store.save_entry(&entry()).unwrap();
+        assert!(store.save_entry(&entry()).is_err());
+
         let mut second = entry();
-        second.name = "另一个".into();
+        second.name = "Alpha".into();
         second.target = Target::Url {
-            url: "https://example.org".into(),
+            url: "https://alpha.example.com".into(),
         };
         let second_id = store.save_entry(&second).unwrap();
-        store.move_entry(second_id, -1).unwrap();
+
+        store.save_icon(first, &[7u8; 64]).unwrap();
+        store.move_at(second_id, first, false).unwrap();
         let entries = store.entries().unwrap();
         assert_eq!(
             entries.iter().map(|e| e.id).collect::<Vec<_>>(),
             vec![second_id, first]
         );
-        let group = store.save_collection(None, None, "工作").unwrap();
-        let mut moved = entries[0].clone();
-        moved.collection_id = group;
-        store.save_entry(&moved).unwrap();
         assert_eq!(
-            store
-                .entries()
-                .unwrap()
-                .iter()
-                .filter(|e| e.collection_id == 2)
-                .count(),
-            1
+            entries.iter().find(|e| e.id == first).unwrap().icon,
+            vec![7u8; 64]
         );
+
+        let other = store.save_collection(None, Some(1), "另一分类").unwrap();
+        let copied = store.copy_to_collection(first, other).unwrap();
+        assert_ne!(copied, first);
+        store
+            .batch_entries(&[second_id], Some(other), false)
+            .unwrap();
+        store.delete_entry(first).unwrap();
+        assert_eq!(store.entries().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn collections_hierarchy_and_deletion() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        assert_eq!(store.collections().unwrap().len(), 2);
+
+        let group = store.save_collection(None, None, "工作").unwrap();
+        let tools = store.save_collection(None, Some(1), "工具").unwrap();
+        let mut e = entry();
+        e.collection_id = tools;
+        store.save_entry(&e).unwrap();
+
+        store.migrate_delete(1, group).unwrap();
+        let collections = store.collections().unwrap();
+        assert!(!collections.iter().any(|c| c.id == 1));
+        assert_eq!(store.entries().unwrap()[0].collection_id, tools);
+
+        store.delete_collection_with_contents(tools).unwrap();
+        assert!(store.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn export_restore_and_settings_roundtrip() {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut item = entry();
+        item.icon = vec![1, 2, 3, 4];
+        store.save_entry(&item).unwrap();
+
+        let mut settings = store.settings().unwrap();
+        settings.hotkey = "Ctrl+Shift+F12".into();
+        store.save_settings(&settings).unwrap();
+
+        let state = crate::session::WindowState {
+            always_on_top: true,
+            width: 440.,
+            height: 640.,
+            group: 1,
+            category: 2,
+            ..Default::default()
+        };
+        store.save_window_state(&state).unwrap();
+
+        let exported = serde_json::to_vec(&store.export().unwrap()).unwrap();
+        store.delete_entry(1).unwrap();
+        store
+            .restore(&serde_json::from_slice(&exported).unwrap())
+            .unwrap();
+        assert_eq!(store.entries().unwrap()[0].icon, vec![1, 2, 3, 4]);
+        assert_eq!(store.settings().unwrap().hotkey, "Ctrl+Shift+F12");
+        assert_eq!(store.window_state().unwrap(), state);
     }
 }

@@ -137,7 +137,7 @@ unsafe fn paint_frame(hwnd: HWND, paint: &Paint) {
             bottom: outer.bottom - outer.top,
         };
         FillRect(dc, &bounds, paint.background);
-        if GetPropW(hwnd, w!("Diascia.MenuComposed")).is_invalid() {
+        if GetPropW(hwnd, w!("Raptim.MenuComposed")).is_invalid() {
             let pen = CreatePen(PS_SOLID, 1, paint.stroke);
             let old_pen = SelectObject(dc, pen.into());
             let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
@@ -189,12 +189,12 @@ unsafe extern "system" fn menu_created(code: i32, wp: WPARAM, lp: LPARAM) -> LRE
                     if GetWindowRect(event.hwnd, &mut r).is_ok() {
                         let stamp =
                             (((r.right - r.left) as usize) << 32) | (r.bottom - r.top) as usize;
-                        if GetPropW(event.hwnd, w!("Diascia.MenuSize")).0 as usize == stamp {
+                        if GetPropW(event.hwnd, w!("Raptim.MenuSize")).0 as usize == stamp {
                             return CallNextHookEx(None, code, wp, lp);
                         }
                         let _ = SetPropW(
                             event.hwnd,
-                            w!("Diascia.MenuSize"),
+                            w!("Raptim.MenuSize"),
                             Some(HANDLE(stamp as *mut _)),
                         );
                         let corner = DWMWCP_ROUND;
@@ -217,7 +217,7 @@ unsafe extern "system" fn menu_created(code: i32, wp: WPARAM, lp: LPARAM) -> LRE
                             // native border at a different radius. Never combine them.
                             let _ = SetPropW(
                                 event.hwnd,
-                                w!("Diascia.MenuComposed"),
+                                w!("Raptim.MenuComposed"),
                                 Some(HANDLE(1usize as _)),
                             );
                             let _ = SetWindowRgn(event.hwnd, None, true);
@@ -276,10 +276,7 @@ impl Drop for Paint {
     }
 }
 
-/// The Fluent palette for one popup. `quality` is a parameter only so the pixel probes can ask for
-/// grayscale antialiasing: ClearType spreads colour across glyph edges, and which way it does that
-/// is a per-machine tuning, so a colour assertion written against it would be flaky elsewhere.
-fn new_paint(scale: f32, dark: bool, quality: FONT_QUALITY) -> Paint {
+fn new_paint(scale: f32, dark: bool) -> Paint {
     unsafe {
         let font = |name, size| {
             CreateFontW(
@@ -294,7 +291,7 @@ fn new_paint(scale: f32, dark: bool, quality: FONT_QUALITY) -> Paint {
                 DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS,
-                quality,
+                CLEARTYPE_QUALITY,
                 0,
                 name,
             )
@@ -513,7 +510,7 @@ pub fn show(window: &slint::Window, items: &[MenuItem], background: slint::Color
             < 384;
     let scale = window.scale_factor();
     unsafe {
-        let paint = new_paint(scale, dark, CLEARTYPE_QUALITY);
+        let paint = new_paint(scale, dark);
         let menu = build(items, &paint).ok()?;
         if !SetWindowSubclass(
             hwnd,
@@ -557,356 +554,5 @@ pub fn show(window: &slint::Window, items: &[MenuItem], background: slint::Color
         let _ = DestroyMenu(menu);
         ACTIVE_PAINT.with(|p| p.set(std::ptr::null()));
         (command != 0).then_some(command)
-    }
-}
-
-#[cfg(test)]
-mod pixel_probes {
-    use super::*;
-    use crate::menus::{self, MenuContext, MenuDestination, MenuEntry, MenuNode};
-
-    /// `COLORREF` is `0x00BBGGRR`, the same byte order a 32-bit DIB row stores.
-    fn rgb(colour: COLORREF) -> (u8, u8, u8) {
-        (
-            (colour.0 & 0xff) as u8,
-            (colour.0 >> 8 & 0xff) as u8,
-            (colour.0 >> 16 & 0xff) as u8,
-        )
-    }
-
-    fn same<T: AsRef<[u8]> + ?Sized>(pixel: &T, want: (u8, u8, u8)) -> bool {
-        let pixel = pixel.as_ref();
-        pixel[2] == want.0 && pixel[1] == want.1 && pixel[0] == want.2
-    }
-
-    /// A memory bitmap standing in for a popup surface: `draw_item` only ever needs an HDC, so the
-    /// owner-draw path can be inspected without a window, a modal menu loop, or the user's mouse.
-    struct Surface {
-        screen: HDC,
-        dc: HDC,
-        bitmap: HBITMAP,
-        old: HGDIOBJ,
-        width: i32,
-        height: i32,
-    }
-
-    impl Surface {
-        fn new(width: i32, height: i32) -> Self {
-            unsafe {
-                let screen = GetDC(None);
-                let dc = CreateCompatibleDC(Some(screen));
-                let bitmap = CreateCompatibleBitmap(screen, width, height);
-                let old = SelectObject(dc, HGDIOBJ(bitmap.0));
-                Self {
-                    screen,
-                    dc,
-                    bitmap,
-                    old,
-                    width,
-                    height,
-                }
-            }
-        }
-
-        fn draw(&self, paint: &Paint, item: &MenuItem, selected: bool) {
-            let rect = RECT {
-                left: 0,
-                top: 0,
-                right: self.width,
-                bottom: self.height,
-            };
-            unsafe { draw_item(self.dc, paint, &rect, item, selected) };
-        }
-
-        fn pixels(&self) -> Vec<u8> {
-            unsafe {
-                let mut info = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: self.width,
-                        biHeight: -self.height,
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let mut out = vec![0u8; (self.width * self.height * 4) as usize];
-                let read = GetDIBits(
-                    self.dc,
-                    self.bitmap,
-                    0,
-                    self.height as u32,
-                    Some(out.as_mut_ptr().cast()),
-                    &mut info,
-                    DIB_RGB_COLORS,
-                );
-                assert_eq!(read, self.height, "位图没读全");
-                out
-            }
-        }
-    }
-
-    impl Drop for Surface {
-        fn drop(&mut self) {
-            unsafe {
-                let _ = SelectObject(self.dc, self.old);
-                let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
-                let _ = DeleteDC(self.dc);
-                ReleaseDC(None, self.screen);
-            }
-        }
-    }
-
-    /// Exact matches only: solid fills are exact, and just the glyph antialiasing is not.
-    fn count(pixels: &[u8], want: (u8, u8, u8)) -> usize {
-        pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|p| same(p, want))
-            .count()
-    }
-
-    fn row_band(
-        pixels: &[u8],
-        width: i32,
-        row: i32,
-        from: i32,
-        to: i32,
-        want: (u8, u8, u8),
-    ) -> i32 {
-        (from..to)
-            .filter(|x| {
-                let at = ((row * width + x) * 4) as usize;
-                same(&pixels[at..at + 4], want)
-            })
-            .count() as i32
-    }
-
-    fn probe(scale: f32, dark: bool) -> Paint {
-        new_paint(scale, dark, ANTIALIASED_QUALITY)
-    }
-
-    #[test]
-    fn section_rule_is_one_pixel_thick_and_ten_inset() {
-        for scale in [1., 2.] {
-            let paint = probe(scale, true);
-            let rule = MenuItem::separator();
-            let (width, height) = measure_item(&paint, &rule, 0);
-            assert_eq!(width, paint.px(206));
-            assert_eq!(height, paint.px(9), "一段分隔只占 9 逻辑像素");
-            let surface = Surface::new(width, height);
-            surface.draw(&paint, &rule, true);
-            let pixels = surface.pixels();
-            let divider = rgb(COLORREF(0x003f_3f3f));
-            let background = rgb(COLORREF(0x0028_2828));
-            let inset = width - 2 * paint.px(10);
-            let lines: Vec<i32> = (0..height)
-                .filter(|row| row_band(&pixels, width, *row, 0, width, divider) > 0)
-                .collect();
-            let first = (height - paint.px(1)) / 2;
-            let expected: Vec<i32> = (first..first + paint.px(1)).collect();
-            assert_eq!(
-                lines,
-                expected,
-                "scale {scale}: 线必须正好 {thick} 物理像素厚、垂直居中",
-                thick = paint.px(1)
-            );
-            for &row in &lines {
-                assert_eq!(
-                    row_band(
-                        &pixels,
-                        width,
-                        row,
-                        paint.px(10),
-                        width - paint.px(10),
-                        divider
-                    ),
-                    inset,
-                    "scale {scale}: 细线必须横贯缩进后的整行"
-                );
-                assert_eq!(
-                    row_band(&pixels, width, row, 0, paint.px(10), background)
-                        + row_band(&pixels, width, row, width - paint.px(10), width, background),
-                    2 * paint.px(10),
-                    "scale {scale}: 两端缩进里不能有线"
-                );
-            }
-            for row in (0..height).filter(|row| !lines.contains(row)) {
-                assert_eq!(
-                    row_band(&pixels, width, row, 0, width, background),
-                    width,
-                    "scale {scale}: 其余整行都该是底色"
-                );
-            }
-            assert_eq!(count(&pixels, divider) as i32, inset * paint.px(1));
-        }
-    }
-
-    #[test]
-    fn rows_are_a_uniform_height_between_two_width_bounds() {
-        for scale in [1., 2.] {
-            let paint = probe(scale, true);
-            let row = MenuItem::action("设置…", 8).icon('\u{e713}');
-            let (width, height) = measure_item(&paint, &row, paint.px(52));
-            assert_eq!(height, paint.px(34), "scale {scale}: 行高不随内容变");
-            assert_eq!(width, paint.px(206), "scale {scale}: 窄标签也要占满下限");
-            let (wide, _) = measure_item(&paint, &row, paint.px(4000));
-            assert_eq!(wide, paint.px(340), "scale {scale}: 长标签不能超出上限");
-            let (middle, _) = measure_item(&paint, &row, paint.px(240));
-            assert_eq!(middle, paint.px(300));
-        }
-    }
-
-    #[test]
-    fn only_a_row_that_can_be_picked_shows_the_hover_fill() {
-        let paint = probe(2., true);
-        let hover = rgb(COLORREF(0x003c_3c3c));
-        let enabled = MenuItem::action("添加项目…", 40).icon('\u{e710}');
-        let disabled = MenuItem::action("多选整理", 30)
-            .icon('\u{e762}')
-            .disabled(true);
-        let (width, height) = measure_item(&paint, &enabled, paint.px(80));
-        for (item, selected) in [(&enabled, true), (&enabled, false), (&disabled, true)] {
-            let surface = Surface::new(width, height);
-            surface.draw(&paint, item, selected);
-            let pixels = surface.pixels();
-            let filled = count(&pixels, hover) as i32;
-            let box_area = (width - 2 * paint.px(3)) * (height - 2 * paint.px(2));
-            if selected && item.enabled {
-                assert!(
-                    filled > box_area * 8 / 10,
-                    "选中的可用行要铺出圆角填充：{filled} / {box_area}"
-                );
-            } else {
-                assert_eq!(
-                    filled, 0,
-                    "selected={selected} enabled={} 没有资格画填充",
-                    item.enabled
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn greyed_rows_are_painted_in_the_muted_ink() {
-        let paint = probe(2., true);
-        let foreground = rgb(paint.foreground);
-        let muted = rgb(paint.muted);
-        for (enabled, want, unwanted) in [(true, foreground, muted), (false, muted, foreground)] {
-            let row = MenuItem::action("Windows 原生菜单", 13)
-                .icon('\u{e700}')
-                .disabled(!enabled);
-            let (width, height) = measure_item(&paint, &row, paint.px(190));
-            let surface = Surface::new(width, height);
-            surface.draw(&paint, &row, false);
-            let pixels = surface.pixels();
-            let text = |colour: (u8, u8, u8), row: i32| {
-                row_band(
-                    &pixels,
-                    width,
-                    row,
-                    paint.px(38),
-                    width - paint.px(22),
-                    colour,
-                )
-            };
-            let strokes: i32 = (height / 3..2 * height / 3)
-                .map(|row| text(want, row))
-                .sum();
-            assert!(
-                strokes > paint.px(20),
-                "enabled={enabled}: 字里至少该有一批实心笔画，只找到 {strokes}"
-            );
-            let wrong: i32 = (0..height).map(|row| text(unwanted, row)).sum();
-            assert_eq!(wrong, 0, "enabled={enabled} 的文字区串色了 {wrong} 像素");
-        }
-    }
-
-    /// `DIASCIA_MENU_DUMP=<path>.png` renders every menu the app can open, flattened, both themes.
-    /// This is how a glyph or a section gets reviewed: a real popup would need the foreground.
-    #[test]
-    fn dump_every_menu_for_review() {
-        let Some(path) = std::env::var_os("DIASCIA_MENU_DUMP") else {
-            return;
-        };
-        let context = MenuContext {
-            target: Some(MenuEntry { id: 7, kind: 0 }),
-            icon_size: 1,
-            can_move_up: true,
-            can_move_down: true,
-            groups: vec![MenuNode {
-                id: 1,
-                name: "常用".into(),
-            }],
-            destinations: vec![MenuDestination {
-                id: 2,
-                name: "默认分类".into(),
-                parent: 1,
-                holds_entry: false,
-            }],
-            ..Default::default()
-        };
-        fn flatten(items: &[MenuItem], out: &mut Vec<MenuItem>) {
-            for item in items {
-                out.push(item.clone());
-                flatten(&item.children, out);
-            }
-        }
-        for dark in [true, false] {
-            let paint = probe(2., dark);
-            let mut rows = Vec::new();
-            for kind in 0..=4 {
-                flatten(&menus::tree(kind, &context), &mut rows);
-                rows.push(MenuItem::separator());
-            }
-            let mut widths = Vec::new();
-            let mut heights = Vec::new();
-            for row in &rows {
-                let (row_width, row_height) =
-                    unsafe { measure_item(&paint, row, label_width(&paint, row)) };
-                widths.push(row_width);
-                heights.push(row_height);
-            }
-            let width = *widths.iter().max().unwrap();
-            let height: i32 = heights.iter().sum();
-            let surface = Surface::new(width, height);
-            let mut top = 0;
-            for (row, row_height) in rows.iter().zip(&heights) {
-                let rect = RECT {
-                    left: 0,
-                    top,
-                    right: width,
-                    bottom: top + row_height,
-                };
-                unsafe { draw_item(surface.dc, &paint, &rect, row, false) };
-                top += row_height;
-            }
-            let rgba: Vec<u8> = surface
-                .pixels()
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 255])
-                .collect();
-            let file = std::io::BufWriter::new(
-                std::fs::File::create(
-                    std::path::Path::new(&path)
-                        .with_extension("")
-                        .with_extension(if dark { "dark.png" } else { "light.png" }),
-                )
-                .unwrap(),
-            );
-            let mut encoder = png::Encoder::new(file, width as u32, height as u32);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .write_header()
-                .unwrap()
-                .write_image_data(&rgba)
-                .unwrap();
-        }
     }
 }

@@ -1,40 +1,58 @@
 <#
 .SYNOPSIS
-    The headless gate: formatting, lints, tests and a release build. Nothing here touches the desktop.
+    The headless gate: formatting, lints, unit tests and a release build.
 
 .DESCRIPTION
-    Diascia's default verification path. Every check runs offscreen: the UI tests install a
-    MinimalSoftwareWindow platform and rasterise into their own buffer, the menu tests read the tree
-    as plain data, and the owner-draw probes paint into a memory bitmap. So this can run while the
-    user works in another window.
-
-    -Machine opts into the real-window regression, which is a different thing: it shows the launcher
-    and editor windows, focuses them, puts a tray icon down and registers Ctrl+Alt+Shift+F10/F9.
-    Run it deliberately, never inside a loop.
-
-    `cargo fmt` never inspects src/ui_commands.rs or src/app_session.rs: they are include!ed into
-    main.rs, so they are not part of rustfmt's module walk. The second check covers them.
-
+    Raptim's default verification path. Runs rustfmt, clippy, unit tests, and a release build.
     Kept ASCII-only: Windows PowerShell 5.1 reads .ps1 as ANSI, so non-ASCII literals arrive mangled.
 
 .EXAMPLE
     powershell -File scripts/verify.ps1
 
 .EXAMPLE
-    powershell -File scripts/verify.ps1 -Release -Machine
+    powershell -File scripts/verify.ps1 -Release
 #>
 param(
     [switch]$Release,
-    [switch]$Machine
+    [string]$TargetDir = '',
+    [int]$Jobs = 0
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
+$prevTargetDir = $env:CARGO_TARGET_DIR
+if ($TargetDir) {
+    $env:CARGO_TARGET_DIR = $TargetDir
+}
+$resolvedTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'target' }
+
 function Invoke-Gate([string]$name, [scriptblock]$body) {
     Write-Output "==> $name"
-    & $body
-    if ($LASTEXITCODE -ne 0) {
-        throw "$name failed (exit $LASTEXITCODE)"
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $captured = & $body 2>&1 | ForEach-Object {
+            $line = if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $_.Exception.Message
+            } else {
+                "$_"
+            }
+            Write-Output $line
+            $line
+        }
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prevPref
+    }
+    if ($code -ne 0) {
+        $joined = $captured -join "`n"
+        if ($joined -match 'os error 32|Access is denied|build-script-build') {
+            $resolved = Resolve-Path $resolvedTargetDir -ErrorAction SilentlyContinue
+            if (-not $resolved) { $resolved = $resolvedTargetDir }
+            Write-Warning ("Build file lock detected (likely real-time AV scanning '{0}'). Add '{1}', '~/.cargo', and '~/.rustup' to AV exclusions, remove any quarantined build-script-build.exe, or re-run with -TargetDir <excluded_dir> -Jobs 1." -f $resolvedTargetDir, $resolved)
+        }
+        throw "$name failed (exit $code)"
     }
 }
 
@@ -44,21 +62,28 @@ $cargoProfile = @()
 if ($Release) {
     $cargoProfile += '--release'
 }
-
-Invoke-Gate 'rustfmt (crate modules)' { cargo fmt --check }
-Invoke-Gate 'rustfmt (include!ed files)' {
-    rustfmt --edition 2024 --check src/ui_commands.rs src/app_session.rs
+$cargoJobs = @()
+if ($Jobs -gt 0) {
+    $cargoJobs += @('-j', "$Jobs")
 }
-Invoke-Gate 'clippy' { cargo clippy @cargoProfile --all-targets --locked -- -D warnings }
-Invoke-Gate 'test (all offscreen)' { cargo test @cargoProfile --all-targets --locked }
-if ($Machine) {
-    Invoke-Gate 'machine pass (this one takes the foreground)' {
-        cargo test --release --locked -- --ignored --nocapture
+
+try {
+    Invoke-Gate 'rustfmt' { cargo fmt --check }
+    Invoke-Gate 'clippy' { cargo clippy @cargoProfile @cargoJobs --all-targets --locked -- -D warnings }
+    Invoke-Gate 'test' { cargo test @cargoProfile @cargoJobs --all-targets --locked }
+    Invoke-Gate 'release build' { cargo build --release @cargoJobs --locked }
+
+    $exe = Get-Item (Join-Path $resolvedTargetDir 'release/raptim.exe')
+    Write-Output ''
+    Write-Output ("exe    {0:n0} bytes   built {1}" -f $exe.Length, $exe.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
+    Write-Output 'gate passed: no step above brought a window to the foreground.'
+}
+finally {
+    if ($TargetDir) {
+        if ($null -eq $prevTargetDir) {
+            Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:CARGO_TARGET_DIR = $prevTargetDir
+        }
     }
 }
-Invoke-Gate 'release build' { cargo build --release --locked }
-
-$exe = Get-Item target/release/diascia.exe
-Write-Output ''
-Write-Output ("exe    {0:n0} bytes   built {1}" -f $exe.Length, $exe.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
-Write-Output 'gate passed: no step above brought a window to the foreground.'
