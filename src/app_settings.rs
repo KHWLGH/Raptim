@@ -312,79 +312,59 @@ fn notice_items() -> ModelRc<NoticeItem> {
             "slint / i-slint-core / slint-build",
             "1.18.0",
             "GPL-3.0-only",
-            "提供界面框架与 Fluent 软件渲染后端，并保留 AboutSlint 归属展示",
+            "界面框架与 Fluent 软件渲染后端",
         ),
         (
             "rusqlite",
             "0.37.0",
             "MIT",
-            "封装 SQLite 数据存储，并通过 bundled 特性内嵌公共领域版本",
+            "SQLite 存储封装，内置 SQLite 源码编译",
         ),
         (
             "windows / windows-core",
             "0.62.2",
             "MIT OR Apache-2.0",
-            "调用 Win32 窗口管理、Shell 交互、OLE 拖放、全局热键及网络请求接口",
+            "Win32 窗口、Shell、拖放、热键与网络接口",
         ),
         (
             "tray-icon",
             "0.24.2",
             "MIT OR Apache-2.0",
-            "提供 Windows 系统托盘图标与原生托盘菜单",
+            "系统托盘图标与托盘菜单",
         ),
-        (
-            "rfd",
-            "0.16.0",
-            "MIT",
-            "调用系统原生的文件选择、目录选择与错误提示对话框",
-        ),
+        ("rfd", "0.16.0", "MIT", "系统原生文件选择、目录选择与提示框"),
         (
             "image",
             "0.25.10",
             "MIT OR Apache-2.0",
-            "用于解析、缩放并编码 PNG、JPEG 与 ICO 格式图标",
+            "PNG、JPEG 与 ICO 图标的解码、缩放与编码",
         ),
-        (
-            "pinyin",
-            "0.10.0",
-            "MIT",
-            "基于 plain 特性提供离线全拼与首字母匹配",
-        ),
-        (
-            "arboard",
-            "3.6.1",
-            "MIT OR Apache-2.0",
-            "用于将路径、网址、环境信息和许可证内容写入剪贴板",
-        ),
+        ("pinyin", "0.10.0", "MIT", "离线中文全拼与首字母搜索"),
+        ("arboard", "3.6.1", "MIT OR Apache-2.0", "系统剪贴板读写"),
         (
             "base64",
             "0.23.1",
             "MIT OR Apache-2.0",
-            "负责 JSON 导出与恢复过程中的图标 Base64 编解码",
+            "JSON 导入导出时的图标 Base64 编解码",
         ),
         (
             "serde / serde_json",
             "1.0.229 / 1.0.151",
             "MIT OR Apache-2.0",
-            "负责设置项、本机窗口状态以及 JSON 导入导出的序列化",
+            "配置、本机窗口状态与 JSON 导入导出的序列化",
         ),
         (
             "url",
             "2.5.8",
             "MIT OR Apache-2.0",
-            "用于规范化网址并构造网页图标请求地址",
+            "网址解析与网页图标地址拼接",
         ),
-        (
-            "thiserror",
-            "2.0.20",
-            "MIT OR Apache-2.0",
-            "用于定义结构化的业务错误类型",
-        ),
+        ("thiserror", "2.0.20", "MIT OR Apache-2.0", "错误类型定义"),
         (
             "raw-window-handle",
             "0.6.2",
             "MIT OR Apache-2.0 OR Zlib",
-            "用于从窗口抽象中读取底层 Win32 HWND 句柄",
+            "获取窗口底层 Win32 HWND 句柄",
         ),
     ]
     .into_iter()
@@ -400,7 +380,7 @@ fn notice_items() -> ModelRc<NoticeItem> {
 
 fn environment_summary() -> String {
     format!(
-        "Raptim {} | Rust {} | Slint 1.18.0 (Fluent / Software) | SQLite WAL (v2) | Windows ({})",
+        "Raptim {} | Rust {} | Slint 1.18.0 (Fluent / Software) | SQLite WAL | Windows ({})",
         env!("CARGO_PKG_VERSION"),
         env!("RAPTIM_RUST_VERSION"),
         std::env::consts::ARCH

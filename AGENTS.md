@@ -9,7 +9,7 @@ Raptim 是面向 Windows 的本地快速启动器，基于 **Rust（Edition 2024
 开始修改前，请先阅读对应模块的现有实现，并按任务查阅专题文档：
 
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)：环境要求、构建配置、验证门禁、测试边界与版本/更新日志维护流程。
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：模块分层、事件模型、SQLite v2 / JSON v2 契约、策略状态机与渲染桥接。
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：模块分层、事件模型、SQLite 存储与 JSON 导出契约、策略状态机与渲染桥接。
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md)：存储与图标实测数据、缓存策略、贴边改框边界与已否决的优化方向。
 - [docs/USAGE.md](docs/USAGE.md)：启动参数、功能交互、快捷键、全部设置项及故障排查规则。
 - [CHANGELOG.md](CHANGELOG.md) 与 [changelog/unreleased/zh-CN.md](changelog/unreleased/zh-CN.md)：版本索引与日常未发布改动草稿。
@@ -45,8 +45,8 @@ powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
 1. **版本锁定与渲染桥接**：`Cargo.toml` 中 `slint`、`i-slint-core` 与 `slint-build` 严格锁定 `=1.18.0`。`src/windowing.rs` 针对 Slint 1.18 软件渲染器实现了隐藏重显脏区标记与 `ToolTipImpl` 轮廓剥离，未经实测验证不要升级或解除版本锁定。
 2. **构建配置保护**：不要删除或修改 `.cargo/config.toml` 中的 SQLite `CFLAGS`（关闭了 FTS/RTree/JSON1 等未使用模块）；`scripts/verify.ps1` 必须保持纯 ASCII，确保 Windows PowerShell 5.1 读取时不乱码。
 3. **存储与去重统一口径（`dup_key`）**：
-   - 数据库与导出格式固定为版本 `2`；所有改写目标的写入路径（含 `update_targets_checked`、编辑保存、拖入、批量移动/复制与恢复预检）必须共用 `storage_key` / `slots_of` / `first_clash` 判定。
-   - 保持 `entries_collection(collection_id, dup_key)` 为**普通索引而非 `UNIQUE`**，以确保批处理事务中间态与已有重复行的历史版本 2 库可正常打开；不要暗中迁移、覆盖或静默修复不兼容数据库。
+   - 数据库与导出格式当前固定校验内部 schema 标记（`user_version = 2` / `format_version = 2`）；所有改写目标的写入路径（含 `update_targets_checked`、编辑保存、拖入、批量移动/复制与恢复预检）必须共用 `storage_key` / `slots_of` / `first_clash` 判定。
+   - 保持 `entries_collection(collection_id, dup_key)` 为**普通索引而非 `UNIQUE`**，以确保批处理事务中间态与已有重复行的数据库仍可正常打开；不要暗中迁移、覆盖或静默修复不兼容数据库。
 4. **Windows Shell 与窗口边界**：
    - 禁止对 `SHBindToParent` 返回的 `ppidlLast`（内部子 PIDL）调用 `CoTaskMemFree`；父级 `Pidl` 必须持续存活至 `GetUIObjectOf` 完成。
    - 贴边与置顶操作禁止经由 `winit::set_window_level` 改写窗口层级（会抹除 `WS_EX_TOOLWINDOW`），且所有改框写入须先检查当前 HWND 状态。

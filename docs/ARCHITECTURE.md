@@ -50,7 +50,7 @@ flowchart TB
 | `src/app_tools.rs` | 已安装软件扫描导入、失效项目巡检与就地重定位 |
 | `src/ui_commands.rs` | 右键/「更多」菜单上下文快照、命令路由及路径转换预览 |
 | `src/model.rs` | 六类 `Target`、网址归一化（`normalize_url`）、`Entry`（base64 图标字段）、`Settings` 与 `Export` |
-| `src/storage.rs` | SQLite v2 读写、WAL 事务管理、统一 `dup_key` 查重与 JSON 导出恢复校验 |
+| `src/storage.rs` | SQLite 读写、WAL 事务管理、统一 `dup_key` 查重与 JSON 导出恢复校验 |
 | `src/paths.rs` | 长路径前缀剥离、相对/绝对路径解析、展示路径格式化与同盘相对转换 |
 | `src/search.rs` | 基于 `pinyin`（无声调）的增量搜索索引，支持多词、全拼、首字母与驼峰匹配 |
 | `src/icons.rs` | 128 px PNG 编码限幅、文件读取解码限制与后台解码缓存（上限 24 MiB） |
@@ -104,7 +104,7 @@ flowchart LR
 sequenceDiagram
   participant CLI as 启动入口 / 第二实例
   participant INST as Instance · 命名事件
-  participant STORE as Store (SQLite v2)
+  participant STORE as Store (SQLite)
   participant UI as UI 主线程 (App)
   participant BG as 后台图标 / 监听线程
 
@@ -113,7 +113,7 @@ sequenceDiagram
     INST->>UI: 唤醒命名事件 · SecondaryInstanceSummon
     CLI-->>CLI: 直接退出新进程
   else 首个实例启动
-    UI->>STORE: Store::open + validate_export (仅读写 v2)
+    UI->>STORE: Store::open + validate_export
     STORE-->>UI: take_initial() 复用已校验快照
     UI->>BG: 启动 Hotkey / Tray / ForegroundWatch / FrameClock
     alt --silent 且已停靠并开启贴边
@@ -130,7 +130,7 @@ sequenceDiagram
 
 业务数据与设置保存在数据目录的 `raptim.db`（开启 `WAL`、`synchronous = FULL`、`foreign_keys = ON`，`busy_timeout = 2s`）。
 
-### SQLite v2 表结构
+### SQLite 表结构
 
 | 表名 | 字段与用途 |
 | --- | --- |
@@ -143,12 +143,12 @@ sequenceDiagram
 
 1. **写入时物化**：`dup_key` 由 `Store::storage_key` 统一将目标按数据库目录转为绝对路径后计算 `Target::duplicate_key()`（网址保留路径与查询大小写，`Program` 包含路径、参数、工作目录、提权标志与打开方式，`Shortcut` 包含路径与打开方式），从而让相对路径与指向同一文件的绝对路径归一化到同一个键。
 2. **全写入路径收敛**：新增、编辑保存、拖入、批量移动/复制、**重新定位与路径转换（`update_targets_checked`）** 以及恢复前预检均共用 `storage_key` / `slots_of` / `first_clash` 判定。
-3. **普通索引而非 `UNIQUE`**：`entries_collection(collection_id, dup_key)` 刻意保持普通非唯一索引而不加 `UNIQUE` 约束。原因有两点：其一，`batch_entries` 在事务内逐行改写或交换条目时可能出现短暂合法中间态，`UNIQUE` 会抢先中止事务并把可读中文错误变成不透明回滚；其二，对于历史上已经存在重复对的版本 2 库，保持普通索引可确保其仍能正常打开，系统遵循「只防新增、不改已有撞车对」原则。
+3. **普通索引而非 `UNIQUE`**：`entries_collection(collection_id, dup_key)` 刻意保持普通非唯一索引而不加 `UNIQUE` 约束。原因有两点：其一，`batch_entries` 在事务内逐行改写或交换条目时可能出现短暂合法中间态，`UNIQUE` 会抢先中止事务并把可读中文错误变成不透明回滚；其二，保证数据库中已有历史重复记录时仍能正常打开，系统遵循「只防新增、不改已有撞车对」原则。
 
-### JSON 导出与版本拒绝策略
+### JSON 导出与 schema 校验边界
 
-- 导出格式固定 `format_version = 2`，`Entry.icon` 使用标准 base64 字符串（相比整数数组约 3.6 字符/字节降至 1.33），结构体均启用 `#[serde(deny_unknown_fields)]`。
-- 打开数据库时校验 `PRAGMA user_version == 2`；若已有非空表且版本号不是 2（例如早期开发残留或版本 1 数据库）或非本应用表结构，直接返回明确中文错误并保持原文件字节零修改，不提供自动迁移。
+- 导出格式固定携带 `format_version = 2`，`Entry.icon` 使用标准 Base64 字符串（相比整数数组约 3.6 字符/字节降至 1.33），结构体均启用 `#[serde(deny_unknown_fields)]`。
+- 打开数据库时校验内部 `PRAGMA user_version == 2` 与预期表结构；若遇到无法识别的库文件或非空不兼容表结构，直接返回明确中文错误并保持原文件字节零修改，不做静默迁移或覆盖。
 
 ## 菜单树与命令路由
 
@@ -188,7 +188,7 @@ sequenceDiagram
 
 | 范围 | 模块路径 | 核心验证点 |
 | --- | --- | --- |
-| 模型、路径与存储 | `src/model.rs`、`src/paths.rs`、`src/storage.rs` | 网址规范化、窗口模式参与 `dup_key`、无文件系统探测校验、跨盘与相对路径往返、条目 CRUD/查重/排序/迁移删除、JSON v2 导出恢复事务及冲突库兼容打开 |
+| 模型、路径与存储 | `src/model.rs`、`src/paths.rs`、`src/storage.rs` | 网址规范化、窗口模式参与 `dup_key`、无文件系统探测校验、跨盘与相对路径往返、条目 CRUD/查重/排序/迁移删除、JSON 导出恢复事务及冲突库兼容打开 |
 | 检索、导入与启动 | `src/search.rs`、`src/icons.rs`、`src/importing.rs`、`src/launch.rs` | 全拼/首字母/驼峰/多词排序、排除文件路径、缓存 LRU 淘汰与过期解码丢弃、拖拽文件与网址分类、OS 错误码映射与可重定位性分类 |
 | 菜单、策略与窗口几何 | `src/menus.rs`、`src/policy.rs`、`src/docking.rs`、`src/windowing.rs` | 五类菜单树命令号唯一性及与 `Region` 双向映射、`bypass`/`Strict`/`Fullscreen` 优先级与延迟降级、`ticket` 过期过滤、停靠过伸与阻尼动画、物理脏区逻辑坐标转换 |
 | 输入、会话与诊断 | `src/gestures.rs`、`src/hotkey.rs`、`src/session.rs`、`src/diagnostics.rs`、`src/main.rs` | 180 ms/12 DIP 拖拽防误触与快滑取消、IME preedit 组合状态、热键解析规范化、搜索范围与跨平台 `NoticeQueue` 合并/截断、日志脱敏与行边界半段截断、可打印搜索字符过滤 |

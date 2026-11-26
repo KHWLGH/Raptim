@@ -96,7 +96,7 @@ powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
 当前自动化测试聚焦于**核心纯逻辑与关键数据不变量**，不在 CI/常规提交中维护脆弱的界面坐标、像素色值或静态文案断言：
 
 - **自动化单元测试覆盖范围**：
-  - `model` / `paths` / `storage`：目标校验、网址补全、相对路径往返、`dup_key` 统一查重、已含撞车库兼容打开、JSON v2 导出/恢复事务与设置校验。
+  - `model` / `paths` / `storage`：目标校验、网址补全、相对路径往返、`dup_key` 统一查重、已含撞车库兼容打开、JSON 导出/恢复事务与设置校验。
   - `search`：排除文件路径、全拼/首字母/驼峰/多词匹配与增量更新。
   - `docking` / `windowing` / `policy` / `session`：停靠过伸几何、阻尼动画与失焦淡出曲线、物理更新矩形转换、保护决策优先级、轮询间隔与 `NoticeQueue` 合并规则。
   - `menus`：五类菜单树命令号唯一性及与 `region()` 双向路由一致性。
