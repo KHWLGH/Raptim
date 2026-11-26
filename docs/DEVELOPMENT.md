@@ -123,7 +123,7 @@ powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
 - **准备正式版本**：
   1. 整理校对 `changelog/unreleased/zh-CN.md`，将其归档至 `changelog/<version>/zh-CN.md`（首行标题使用 `# <version> - YYYY-MM-DD`）。
   2. 在根目录 [CHANGELOG.md](../CHANGELOG.md) 的 `<!-- releases:start -->` 下方插入新版本入口并链接到归档文件，同时保留 `[Unreleased]` 入口并将 `changelog/unreleased/zh-CN.md` 重置为 `# Unreleased`。
-  3. 同步更新版本号：目前需同步修改 [Cargo.toml](../Cargo.toml) 的 `version`、[Cargo.lock](../Cargo.lock) 中的包版本，以及 [ui/app.slint](../ui/app.slint)「设置 → 关于」里的显示版本文本（尚未通过构建环境变量自动注入 UI）。
+  3. 同步更新版本号：同步修改 [Cargo.toml](../Cargo.toml) 的 `version` 与 [Cargo.lock](../Cargo.lock) 中的包版本（「设置 → 关于」与环境信息复制已自动读取 `CARGO_PKG_VERSION`，无需再手工改动 `ui/app.slint`）。
   4. 运行 `powershell -File scripts/verify.ps1 -Release` 验证全套门禁通过并复核相关文档链接后，再提交发布或打 Tag。
 
 > 普通功能开发与文档整理不自动升版或归档日志，仅在明确准备发版时执行上述归档步骤。

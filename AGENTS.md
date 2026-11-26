@@ -66,5 +66,5 @@ powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
 ## 文档与更新日志维护
 
 - 仓库文档与更新日志以简体中文维护；开发期间只追加维护 `changelog/unreleased/zh-CN.md`（按 `新增`、`变更`、`修复`、`性能与维护` 分组）。
-- 行为、设置项、快捷键、存储契约或构建流程发生变化时，同步更新 `docs/` 对应文档与 `README.md`；修改版本号需同步 `Cargo.toml`、`Cargo.lock` 与 `ui/app.slint` 关于页文本。
+- 行为、设置项、快捷键、存储契约或构建流程发生变化时，同步更新 `docs/` 对应文档与 `README.md`；修改版本号需同步 `Cargo.toml` 与 `Cargo.lock`（关于页已自动读取 `CARGO_PKG_VERSION`）。
 - 普通功能改动或文档整理**不自动升版、不归档历史日志、不自动提交或打 Git Tag**，仅在用户明确要求发布时执行发版归档流程。

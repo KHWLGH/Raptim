@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use raptim::{
     AppOption, BrokenOption, DestinationNode, DiscoverOption, EditorWindow, Item, MainWindow,
-    NavItem, Palette, ScopeNode, SettingsWindow,
+    NavItem, NoticeItem, Palette, ScopeNode, SettingsWindow,
     launch::Failure,
     model::*,
     platform,

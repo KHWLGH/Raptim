@@ -10,6 +10,7 @@ export struct DestinationNode { id: int, parent: int, name: string, expanded: bo
 export struct AppOption { name: string, aumid: string }
 export struct DiscoverOption { checked: bool, index: int, name: string, detail: string, kind: int }
 export struct BrokenOption { id: int, name: string, target: string, reason: string, relocatable: bool }
+export struct NoticeItem { name: string, version: string, license: string, detail: string }
 
 component PixelWidthInput inherits Rectangle {
     in-out property <int> value: 1;
@@ -1024,8 +1025,13 @@ export component EditorWindow inherits AppWindow {
 }
 
 export component SettingsWindow inherits AppWindow {
+    in property <string> app-version;
     in property <string> rust-version;
     in property <bool> composing;
+    in-out property <bool> legal-open;
+    in-out property <int> legal-tab;
+    in property <[string]> license-lines;
+    in property <[NoticeItem]> notice-items;
     in-out property <bool> window-active <=> root.frame-active;
     in-out property <bool> topmost-window;
     always-on-top: root.topmost-window;
@@ -1063,7 +1069,9 @@ export component SettingsWindow inherits AppWindow {
     in property <bool> has-error-log;
     in-out property <string> status;
     in-out property <bool> restore-confirm;
-    callback open-rust; callback open-slint; callback change(int); callback browse-game; callback add-protected-app(string); callback remove-protected-app(int); callback export-data; callback import-data;
+    callback open-rust; callback open-slint; callback open-repo; callback open-issues; callback open-changelog;
+    callback copy-env-info; callback copy-license;
+    callback change(int); callback browse-game; callback add-protected-app(string); callback remove-protected-app(int); callback export-data; callback import-data;
     callback confirm-restore; callback cancel; callback restore-position; callback open-data-dir; callback open-error-log;
     changed page => { settings-scroll.content-y = 0px; }
     VerticalLayout {
@@ -1279,24 +1287,57 @@ export component SettingsWindow inherits AppWindow {
                                 }
                             }
 
-                            if root.page == 4: VerticalLayout { padding-top: 6px; spacing: 18px; alignment: start;
+                            if root.page == 4: VerticalLayout { padding-top: 6px; spacing: 14px; alignment: start;
                                 HorizontalLayout { spacing: 14px; alignment: start;
                                     VerticalLayout { alignment: center;
-                                        Image { width: 44px; height: 44px; source: @image-url("icons/raptim.svg"); }
+                                        Image { width: 48px; height: 48px; source: @image-url("icons/raptim.svg"); }
                                     }
-                                    VerticalLayout { alignment: center; spacing: 2px;
-                                        Text { text: "Raptim"; font-size: 22px; font-weight: 600; color: Palette.foreground; }
-                                        Text { text: "Version 0.0.0"; font-size: 13px; color: Theme.muted; }
+                                    VerticalLayout { alignment: center; spacing: 3px; horizontal-stretch: 1;
+                                        HorizontalLayout { spacing: 8px; alignment: start;
+                                            Text { text: "Raptim"; font-size: 22px; font-weight: 600; color: Palette.foreground; vertical-alignment: center; }
+                                            Rectangle {
+                                                y: 4px; height: 22px; border-radius: 4px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
+                                                HorizontalLayout { padding-left: 8px; padding-right: 8px;
+                                                    Text { text: "v" + root.app-version; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+                                                }
+                                            }
+                                        }
+                                        Text { text: "面向 Windows 的轻量本地启动器"; font-size: 12px; color: Theme.muted; wrap: word-wrap; }
                                     }
                                 }
-                                Rectangle { height: 1px; background: Theme.stroke; }
-                                HorizontalLayout { spacing: 20px;
+                                HorizontalLayout { spacing: 8px; alignment: start;
+                                    Button { height: 30px; text: "GitHub 仓库"; clicked => { root.open-repo(); } }
+                                    Button { height: 30px; text: "反馈问题"; clicked => { root.open-issues(); } }
+                                    Button { height: 30px; text: "更新日志"; clicked => { root.open-changelog(); } }
+                                    Button { height: 30px; text: "复制环境信息"; clicked => { root.copy-env-info(); } }
+                                }
+                                Rectangle {
+                                    border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
+                                    VerticalLayout { padding: 12px; spacing: 8px;
+                                        HorizontalLayout { spacing: 8px;
+                                            Text { horizontal-stretch: 1; text: "版权与开源许可"; font-weight: 600; font-size: 13px; color: Palette.foreground; vertical-alignment: center; }
+                                            Rectangle {
+                                                height: 22px; border-radius: 4px; background: Theme.selection;
+                                                HorizontalLayout { padding-left: 8px; padding-right: 8px;
+                                                    Text { text: "GPL-3.0-only"; font-size: 11px; font-weight: 600; color: Palette.accent-background; vertical-alignment: center; }
+                                                }
+                                            }
+                                        }
+                                        Text { text: "Copyright (C) 2026 KHWLGH"; font-size: 12px; color: Palette.foreground; }
+                                        Text { text: "本软件基于 GNU General Public License v3.0（GPL-3.0-only）开源发布，按现状提供且不附带任何担保。"; wrap: word-wrap; font-size: 12px; color: Theme.muted; }
+                                        HorizontalLayout { padding-top: 2px; spacing: 8px; alignment: start;
+                                            Button { height: 30px; text: "查看开源许可证"; clicked => { root.legal-tab = 0; root.legal-open = true; } }
+                                            Button { height: 30px; text: "第三方组件说明"; clicked => { root.legal-tab = 1; root.legal-open = true; } }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout { spacing: 16px;
                                     Rectangle {
                                         preferred-width: 1px; horizontal-stretch: 1; height: 126px; border-radius: 6px;
-                                        background: rust-touch.has-hover ? Theme.hover : transparent;
+                                        background: rust-touch.has-hover ? Theme.hover : Theme.navigation;
                                         animate background { duration: 100ms; }
-                                        border-width: rust-focus.has-focus ? 1px : 0px;
-                                        border-color: Palette.accent-background;
+                                        border-width: 1px;
+                                        border-color: rust-focus.has-focus ? Palette.accent-background : Theme.stroke;
                                         VerticalLayout { padding: 10px; spacing: 6px; alignment: center;
                                             HorizontalLayout { alignment: center; Image { width: 44px; height: 44px; source: @image-url("icons/rust.svg"); colorize: Palette.foreground; } }
                                             Text { text: "Version " + root.rust-version; horizontal-alignment: center; font-weight: 600; color: Palette.foreground; }
@@ -1309,10 +1350,10 @@ export component SettingsWindow inherits AppWindow {
                                     }
                                     Rectangle {
                                         preferred-width: 1px; horizontal-stretch: 1; height: 126px; border-radius: 6px;
-                                        background: slint-touch.has-hover ? Theme.hover : transparent;
+                                        background: slint-touch.has-hover ? Theme.hover : Theme.navigation;
                                         animate background { duration: 100ms; }
-                                        border-width: slint-focus.has-focus ? 1px : 0px;
-                                        border-color: Palette.accent-background;
+                                        border-width: 1px;
+                                        border-color: slint-focus.has-focus ? Palette.accent-background : Theme.stroke;
                                         VerticalLayout { padding: 4px; alignment: center;
                                             AboutSlint { height: 118px; }
                                         }
@@ -1320,6 +1361,28 @@ export component SettingsWindow inherits AppWindow {
                                         slint-focus := FocusScope { x: 0px; width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-slint(); return accept; } return reject; } }
                                         slint-touch := TouchArea { mouse-cursor: pointer; clicked => { root.open-slint(); } }
                                         Tooltip { HintSurface { title: "https://slint.dev/"; } }
+                                    }
+                                }
+                                Rectangle {
+                                    border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
+                                    VerticalLayout { padding: 12px; spacing: 6px;
+                                        Text { text: "构建与运行信息"; font-weight: 600; font-size: 13px; color: Palette.foreground; }
+                                        HorizontalLayout { spacing: 8px;
+                                            Text { width: 84px; text: "应用版本"; font-size: 12px; color: Theme.muted; }
+                                            Text { horizontal-stretch: 1; text: root.app-version; font-size: 12px; color: Palette.foreground; overflow: elide; }
+                                        }
+                                        HorizontalLayout { spacing: 8px;
+                                            Text { width: 84px; text: "编译工具链"; font-size: 12px; color: Theme.muted; }
+                                            Text { horizontal-stretch: 1; text: "Rust " + root.rust-version; font-size: 12px; color: Palette.foreground; overflow: elide; }
+                                        }
+                                        HorizontalLayout { spacing: 8px;
+                                            Text { width: 84px; text: "界面引擎"; font-size: 12px; color: Theme.muted; }
+                                            Text { horizontal-stretch: 1; text: "Slint 1.18.0（Fluent 样式，软件渲染）"; font-size: 12px; color: Palette.foreground; overflow: elide; }
+                                        }
+                                        HorizontalLayout { spacing: 8px;
+                                            Text { width: 84px; text: "数据存储"; font-size: 12px; color: Theme.muted; }
+                                            Text { horizontal-stretch: 1; text: "内置 SQLite（WAL 模式，格式版本 2）"; font-size: 12px; color: Palette.foreground; overflow: elide; }
+                                        }
                                     }
                                 }
                             }
@@ -1332,6 +1395,65 @@ export component SettingsWindow inherits AppWindow {
                             Text { text: root.status; wrap: word-wrap; font-size: 12px; color: Palette.foreground; }
                         }
                     }
+                }
+            }
+        }
+    }
+    if root.legal-open: Rectangle {
+        x: 0px; y: 0px; width: 100%; height: 100%;
+        background: #0005;
+        TouchArea { }
+        Rectangle {
+            x: 24px; y: 24px; width: parent.width - 48px; height: parent.height - 48px;
+            background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.stroke;
+            VerticalLayout { padding: 16px; spacing: 10px;
+                HorizontalLayout { spacing: 8px;
+                    Button { height: 30px; primary: root.legal-tab == 0; text: "GPL-3.0 许可证"; clicked => { root.legal-tab = 0; } }
+                    Button { height: 30px; primary: root.legal-tab == 1; text: "第三方组件"; clicked => { root.legal-tab = 1; } }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton { icon: @image-url("icons/close.svg"); label: "关闭"; clicked => { root.legal-open = false; } }
+                }
+                if root.legal-tab == 0: Rectangle {
+                    vertical-stretch: 1; border-radius: 6px; background: Palette.background; border-width: 1px; border-color: Theme.stroke;
+                    VerticalLayout { padding: 6px;
+                        ListView {
+                            vertical-stretch: 1;
+                            for line in root.license-lines: Rectangle {
+                                height: 18px;
+                                Text { x: 4px; width: parent.width - 8px; height: parent.height; text: line; font-family: "Consolas"; font-size: 11.5px; color: Palette.foreground; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                }
+                if root.legal-tab == 0: HorizontalLayout { alignment: end; spacing: 8px;
+                    Button { height: 32px; text: "复制全文"; clicked => { root.copy-license(); } }
+                    Button { height: 32px; primary: true; text: "关闭"; clicked => { root.legal-open = false; } }
+                }
+                if root.legal-tab == 1: ListView {
+                    vertical-stretch: 1;
+                    for item in root.notice-items: Rectangle {
+                        height: 64px;
+                        Rectangle {
+                            y: 2px; width: parent.width; height: 60px; border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
+                            VerticalLayout { padding-left: 10px; padding-right: 10px; padding-top: 7px; padding-bottom: 7px; spacing: 4px; alignment: center;
+                                HorizontalLayout { spacing: 8px;
+                                    Text { text: item.name; font-weight: 600; font-size: 13px; color: Palette.foreground; vertical-alignment: center; }
+                                    Text { text: item.version; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: item.license; font-size: 11px; color: Palette.accent-background; vertical-alignment: center; overflow: elide; }
+                                }
+                                Text { text: item.detail; font-size: 12px; color: Palette.alternate-foreground; overflow: elide; }
+                            }
+                            Tooltip { HintSurface { title: item.name + " " + item.version; detail: item.license; notes: item.detail; } }
+                        }
+                    }
+                }
+                if root.legal-tab == 1: Text {
+                    text: "其余传递依赖均采用与 GPL-3.0-only 兼容的宽松开源许可。内置 Rust 标志遵循 CC BY 4.0 协议，运行期提取的本机与网页图标仅保存在本地数据库中，不随软件分发。";
+                    wrap: word-wrap; font-size: 11.5px; color: Theme.muted;
+                }
+                if root.legal-tab == 1: HorizontalLayout { alignment: end; spacing: 8px;
+                    Button { height: 32px; primary: true; text: "关闭"; clicked => { root.legal-open = false; } }
                 }
             }
         }

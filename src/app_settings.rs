@@ -54,6 +54,8 @@ impl App {
 
     pub(super) fn close_settings(&mut self) {
         self.settings_ui.set_recording_hotkey(false);
+        self.settings_ui.set_legal_open(false);
+        self.settings_ui.set_status("".into());
         self.sync_settings_ui();
         self.focus_hide.reset();
         self.edge_since = Instant::now();
@@ -302,13 +304,119 @@ impl App {
     }
 }
 
+const LICENSE_TEXT: &str = include_str!("../LICENSE");
+
+fn notice_items() -> ModelRc<NoticeItem> {
+    let items = [
+        (
+            "slint / i-slint-core / slint-build",
+            "1.18.0",
+            "GPL-3.0-only",
+            "提供界面框架与 Fluent 软件渲染后端，并保留 AboutSlint 归属展示",
+        ),
+        (
+            "rusqlite",
+            "0.37.0",
+            "MIT",
+            "封装 SQLite 数据存储，并通过 bundled 特性内嵌公共领域版本",
+        ),
+        (
+            "windows / windows-core",
+            "0.62.2",
+            "MIT OR Apache-2.0",
+            "调用 Win32 窗口管理、Shell 交互、OLE 拖放、全局热键及网络请求接口",
+        ),
+        (
+            "tray-icon",
+            "0.24.2",
+            "MIT OR Apache-2.0",
+            "提供 Windows 系统托盘图标与原生托盘菜单",
+        ),
+        (
+            "rfd",
+            "0.16.0",
+            "MIT",
+            "调用系统原生的文件选择、目录选择与错误提示对话框",
+        ),
+        (
+            "image",
+            "0.25.10",
+            "MIT OR Apache-2.0",
+            "用于解析、缩放并编码 PNG、JPEG 与 ICO 格式图标",
+        ),
+        (
+            "pinyin",
+            "0.10.0",
+            "MIT",
+            "基于 plain 特性提供离线全拼与首字母匹配",
+        ),
+        (
+            "arboard",
+            "3.6.1",
+            "MIT OR Apache-2.0",
+            "用于将路径、网址、环境信息和许可证内容写入剪贴板",
+        ),
+        (
+            "base64",
+            "0.23.1",
+            "MIT OR Apache-2.0",
+            "负责 JSON 导出与恢复过程中的图标 Base64 编解码",
+        ),
+        (
+            "serde / serde_json",
+            "1.0.229 / 1.0.151",
+            "MIT OR Apache-2.0",
+            "负责设置项、本机窗口状态以及 JSON 导入导出的序列化",
+        ),
+        (
+            "url",
+            "2.5.8",
+            "MIT OR Apache-2.0",
+            "用于规范化网址并构造网页图标请求地址",
+        ),
+        (
+            "thiserror",
+            "2.0.20",
+            "MIT OR Apache-2.0",
+            "用于定义结构化的业务错误类型",
+        ),
+        (
+            "raw-window-handle",
+            "0.6.2",
+            "MIT OR Apache-2.0 OR Zlib",
+            "用于从窗口抽象中读取底层 Win32 HWND 句柄",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, version, license, detail)| NoticeItem {
+        name: name.into(),
+        version: version.into(),
+        license: license.into(),
+        detail: detail.into(),
+    })
+    .collect::<Vec<_>>();
+    Rc::new(VecModel::from(items)).into()
+}
+
+fn environment_summary() -> String {
+    format!(
+        "Raptim {} | Rust {} | Slint 1.18.0 (Fluent / Software) | SQLite WAL (v2) | Windows ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("RAPTIM_RUST_VERSION"),
+        std::env::consts::ARCH
+    )
+}
+
 fn create_settings(
     app: &Rc<RefCell<App>>,
     events: EventSink,
     data: &std::path::Path,
 ) -> std::result::Result<SettingsWindow, slint::PlatformError> {
     let settings_ui = SettingsWindow::new()?;
+    settings_ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings_ui.set_rust_version(env!("RAPTIM_RUST_VERSION").into());
+    settings_ui.set_license_lines(strings(LICENSE_TEXT.lines().map(str::to_string)));
+    settings_ui.set_notice_items(notice_items());
     settings_ui.set_data_path(
         raptim::paths::normal_path(data)
             .to_string_lossy()
@@ -331,15 +439,35 @@ fn create_settings(
             });
         }};
     }
-    settings_ui.on_open_rust(|| {
-        let _ = platform::launch(&Target::Url {
-            url: "https://www.rust-lang.org/".into(),
-        });
+    let bind_url = |url: &'static str| {
+        move || {
+            let _ = platform::launch(&Target::Url { url: url.into() });
+        }
+    };
+    settings_ui.on_open_rust(bind_url("https://www.rust-lang.org/"));
+    settings_ui.on_open_slint(bind_url("https://slint.dev/"));
+    settings_ui.on_open_repo(bind_url("https://github.com/KHWLGH/Raptim"));
+    settings_ui.on_open_issues(bind_url("https://github.com/KHWLGH/Raptim/issues"));
+    settings_ui.on_open_changelog(bind_url(
+        "https://github.com/KHWLGH/Raptim/blob/main/CHANGELOG.md",
+    ));
+    let copy_text = |ui: &SettingsWindow, text: String, ok_message: &'static str| {
+        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+            Ok(()) => ui.set_status(ok_message.into()),
+            Err(error) => ui.set_status(format!("复制失败：{error}").into()),
+        }
+    };
+    let env_ui = settings_ui.as_weak();
+    settings_ui.on_copy_env_info(move || {
+        if let Some(ui) = env_ui.upgrade() {
+            copy_text(&ui, environment_summary(), "已复制环境信息");
+        }
     });
-    settings_ui.on_open_slint(|| {
-        let _ = platform::launch(&Target::Url {
-            url: "https://slint.dev/".into(),
-        });
+    let license_ui = settings_ui.as_weak();
+    settings_ui.on_copy_license(move || {
+        if let Some(ui) = license_ui.upgrade() {
+            copy_text(&ui, LICENSE_TEXT.to_string(), "已复制 GPL-3.0 许可证全文");
+        }
     });
     bind!(settings_ui, on_record_hotkey, |s| {
         s.settings_ui

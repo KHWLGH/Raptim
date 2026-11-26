@@ -264,7 +264,9 @@ pub(super) fn install_settings_keys(ui: &SettingsWindow, events: EventSink) {
                         && event.logical_key == Key::Named(NamedKey::Escape)
                         && !windowing::has_popup(window)
                     {
-                        if ui.get_restore_confirm() {
+                        if ui.get_legal_open() {
+                            ui.set_legal_open(false);
+                        } else if ui.get_restore_confirm() {
                             ui.set_restore_confirm(false);
                         } else {
                             ui.invoke_cancel();

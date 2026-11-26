@@ -12,6 +12,7 @@
 
 ## 变更
 
+- 完善「设置 → 关于」界面：自动读取 `CARGO_PKG_VERSION` 作为应用版本，新增 GitHub 仓库、问题反馈、更新日志与「复制环境信息」快捷操作，补充 `GPL-3.0-only` 版权许可卡片以及支持 `Esc` 关闭和全文复制的窗内离线阅读器（使用 `ListView` 逐行虚拟化展示 [LICENSE](../../LICENSE) 原文与第三方组件清单），并保留 Rust 与 `AboutSlint` 归属卡片。
 - 确立项目自有代码与整体分发采用 `GPL-3.0-only` 开源许可（Slint 1.18.0 同步选用 GPLv3 路径），补充根目录 [LICENSE](../../LICENSE) 原文与 `Cargo.toml` 许可元数据，并在 [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) 补全全部直接依赖核查清单与资产归属声明。
 - 数据库结构与 JSON 导出升至版本 2：将图标从 `entries.payload` JSON 迁出至独立 `icon BLOB` 列，JSON 改用 base64 编码，写入时物化 `dup_key` 去重键，并将窗口几何与「始终置顶」拆入 `local_state` 本机状态表（不随导出迁移）；明确拒绝未知字段及非版本 2 的旧库或外部库且不作迁移改写（[技术架构](../../docs/ARCHITECTURE.md#数据存储与兼容边界)）。
 - 数据管理精简为「导出 / 恢复」两个动作，移除应用内备份按钮、命令号、恢复前 `before-restore-*.db` 快照及 `rusqlite` `backup` 特性；恢复操作继续在事务内原子执行并在导入前按 `dup_key` 规范化口径拦截同分类重复目标，正式库备份由用户在退出后整目录复制（含 `-wal`/`-shm`）。
