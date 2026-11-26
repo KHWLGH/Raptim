@@ -1,6 +1,6 @@
 //! Refresh-paced edge animation. No DWM wait runs on the UI thread and no
 //! timer keeps waking a settled/hidden window. At most one frame is queued.
-use super::{Notify, OwnedHandle};
+use super::{NativeSignal, Notify, OwnedHandle};
 use std::{
     sync::{Arc, Condvar, Mutex},
     thread::JoinHandle,
@@ -135,7 +135,7 @@ impl FrameClock {
                     }
                     state.pending = true;
                     drop(state);
-                    notify(11, generation.to_string());
+                    notify(NativeSignal::FrameClockTick(generation));
                 }
             })
             .map_err(|e| format!("无法创建动画时钟：{e}"))?;
@@ -187,8 +187,10 @@ mod tests {
     #[test]
     fn worker_is_idle_until_needed_and_never_queues_multiple_frames() {
         let (send, receive) = std::sync::mpsc::channel();
-        let clock = FrameClock::new(Arc::new(move |_, value| {
-            let _ = send.send(value.parse::<u64>().unwrap());
+        let clock = FrameClock::new(Arc::new(move |signal| {
+            if let NativeSignal::FrameClockTick(generation) = signal {
+                let _ = send.send(generation);
+            }
         }))
         .unwrap();
         assert!(receive.recv_timeout(Duration::from_millis(25)).is_err());

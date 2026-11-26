@@ -44,7 +44,7 @@ impl App {
             raptim::docking::hidden_hwnd_position(edge, rect, strip, pad),
             work,
         );
-        platform::topmost(self.main.window(), true);
+        self.apply_main_topmost(true);
         self.sync_edge_appearance();
         if let Err(e) = platform::show_without_activation(self.main.window()) {
             self.status(e);
@@ -65,7 +65,7 @@ impl App {
         {
             return;
         }
-        let weak = self.main.as_weak();
+        let sink = self.events.clone();
         let result =
             platform::drop_target::Registration::new(session.window.window(), move |event| {
                 if let platform::drop_target::DropEvent::Data(
@@ -75,13 +75,9 @@ impl App {
                 ) = event
                     && paths.len() == 1
                 {
-                    let payload = serde_json::to_string(&(
+                    sink.send(AppEvent::EditorImageDropped {
                         generation,
-                        paths[0].to_string_lossy().into_owned(),
-                    ))
-                    .unwrap();
-                    let _ = weak.upgrade_in_event_loop(move |ui| {
-                        ui.invoke_native_event(13, payload.into())
+                        path: paths[0].to_string_lossy().into_owned(),
                     });
                 }
             });
@@ -119,6 +115,8 @@ impl App {
                 }
             }
             self.position_restored = true;
+            self.apply_main_topmost(self.edge_motion.is_some() || self.wants_topmost());
+            self.apply_theme();
         }
         self.install_external_drop();
     }
@@ -128,8 +126,10 @@ impl App {
             return;
         }
         let weak = self.main.as_weak();
+        let sink = self.events.clone();
         match platform::drop_target::Registration::new(self.main.window(), move |event| {
             use platform::drop_target::DropEvent;
+            let sink = sink.clone();
             let _ = weak.upgrade_in_event_loop(move |ui| match event {
                 DropEvent::Hover(x, y) | DropEvent::Data(_, x, y) => {
                     if let Some((r, _)) = platform::geometry(ui.window()) {
@@ -138,12 +138,8 @@ impl App {
                     }
                     ui.set_drop_hover(true);
                     if let DropEvent::Data(value, _, _) = event {
-                        let payload = serde_json::to_string(&value).expect("drop serialization");
-                        let weak = ui.as_weak();
                         slint::Timer::single_shot(Duration::ZERO, move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.invoke_external_drop(payload.into());
-                            }
+                            sink.send(AppEvent::ExternalDrop(value));
                         });
                     }
                 }
@@ -152,6 +148,46 @@ impl App {
         }) {
             Ok(r) => self.external_drop = Some(r),
             Err(e) => self.status(format!("外部拖入不可用：{e}")),
+        }
+    }
+
+    pub(super) fn handle_external_drop(&mut self, drop_data: raptim::importing::ExternalDrop) {
+        if !self.allowed(ShowSource::Editor) {
+            self.main.set_drop_hover(false);
+            return;
+        }
+        let destination = if self.main.get_external_category() != 0 {
+            self.category_for(i64::from(self.main.get_external_category()))
+        } else {
+            self.collection
+        };
+        self.main.set_drop_hover(false);
+        match drop_data {
+            raptim::importing::ExternalDrop::Files(paths) => {
+                if paths.is_empty() {
+                    self.status("每次最多添加 500 项");
+                } else if let Err(e) = self.queue_files(paths, destination) {
+                    self.status(e);
+                }
+            }
+            raptim::importing::ExternalDrop::Text(text) => {
+                match raptim::importing::url_entries(&text, destination)
+                    .and_then(|entries| self.store.add_entries(&entries))
+                {
+                    Ok((added, duplicates)) => {
+                        self.status(format!("已添加 {added} 项，跳过 {duplicates} 项重复目标"));
+                        self.report_refresh();
+                        let wanted: Vec<_> = self
+                            .entries
+                            .iter()
+                            .filter(|e| e.icon.is_empty() && matches!(e.target, Target::Url { .. }))
+                            .map(|e| (e.id, e.target.clone()))
+                            .collect();
+                        self.fill_icons(wanted);
+                    }
+                    Err(e) => self.status(e),
+                }
+            }
         }
     }
 
@@ -552,9 +588,6 @@ impl App {
     /// Filtered list handed to the picker. Filtering stays here so the view only renders the
     /// result rather than testing every installed app on each keystroke.
     pub(super) fn refresh_app_list(&mut self) {
-        if self.installed_apps.is_empty() {
-            self.installed_apps = platform::installed_apps();
-        }
         let Some(session) = &self.editor else {
             return;
         };
@@ -592,6 +625,11 @@ impl App {
         };
         session.window.set_picker_open(true);
         session.window.invoke_focus_picker_filter();
+        let sink = self.events.clone();
+        std::thread::spawn(move || {
+            let apps = platform::installed_apps();
+            sink.send(AppEvent::InstalledAppsReady(apps));
+        });
     }
     pub(super) fn close_app_picker(&mut self) {
         let Some(session) = &self.editor else {

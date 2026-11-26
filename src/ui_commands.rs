@@ -595,7 +595,11 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                     return;
                 }
                 s.settings_ui.set_page(3);
-                s.dialog(action);
+                s.dialog(if action == 2 {
+                    DialogKind::ExportJson
+                } else {
+                    DialogKind::RestoreJson
+                });
             }
             5 => {
                 if let Err(e) = platform::launch(&Target::Folder {
@@ -702,20 +706,16 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                 }
                 6 => {
                     let base = s.data_dir.clone();
-                    let weak = s.main.as_weak();
+                    let sink = s.events.clone();
                     let epoch = s.data_epoch;
                     std::thread::spawn(move || {
-                        let icon = platform::icon_for(&e.target, &base);
-                        let value = serde_json::to_string(&(
+                        let new_icon = platform::icon_for(&e.target, &base);
+                        sink.send(AppEvent::RefreshIconReady {
                             epoch,
-                            e.id,
-                            e.target.duplicate_key(),
-                            e.icon,
-                            icon,
-                        ))
-                        .unwrap();
-                        let _ = weak.upgrade_in_event_loop(move |ui| {
-                            ui.invoke_refresh_icon_ready(value.into())
+                            id: e.id,
+                            key: e.target.duplicate_key(),
+                            old_icon: e.icon,
+                            new_icon,
                         });
                     });
                 }

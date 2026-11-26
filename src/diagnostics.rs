@@ -18,6 +18,28 @@ pub fn attach(data_dir: &Path) {
     let _ = DATA_DIR.set(data_dir.to_path_buf());
 }
 
+fn truncate_log_bytes(all: &[u8]) -> &[u8] {
+    let half = all.len() / 2;
+    let cut = all[half..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|offset| half + offset + 1)
+        .or_else(|| {
+            all[..half]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|pos| pos + 1)
+        })
+        .unwrap_or_else(|| {
+            let mut idx = half;
+            while idx < all.len() && (all[idx] & 0b1100_0000) == 0b1000_0000 {
+                idx += 1;
+            }
+            idx
+        });
+    &all[cut.min(all.len())..]
+}
+
 fn append(name: &str, text: &str) {
     let Some(dir) = DATA_DIR.get() else {
         return;
@@ -29,11 +51,7 @@ fn append(name: &str, text: &str) {
         .unwrap_or(false)
         && let Ok(all) = std::fs::read(&path)
     {
-        let cut = all
-            .iter()
-            .position(|b| *b == b'\n')
-            .unwrap_or(all.len() / 2);
-        let _ = std::fs::write(&path, &all[cut..]);
+        let _ = std::fs::write(&path, truncate_log_bytes(&all));
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = file.write_all(text.as_bytes());
@@ -147,5 +165,20 @@ mod tests {
         let redacted = redact(&text);
         assert!(!redacted.contains(&home), "{redacted}");
         assert!(redacted.contains("tool.exe"), "paths survive as names");
+    }
+    #[test]
+    fn truncation_drops_oldest_half_on_line_boundary_without_stalling() {
+        let mut buf = Vec::new();
+        for i in 0..100 {
+            buf.extend_from_slice(format!("line-{i:04}-payload\n").as_bytes());
+        }
+        let first_cut = truncate_log_bytes(&buf);
+        assert!(!first_cut.starts_with(b"\n"));
+        assert!(first_cut.len() < buf.len() * 2 / 3);
+        assert!(first_cut.ends_with(b"line-0099-payload\n"));
+
+        let second_cut = truncate_log_bytes(first_cut);
+        assert!(!second_cut.starts_with(b"\n"));
+        assert!(second_cut.len() < first_cut.len());
     }
 }

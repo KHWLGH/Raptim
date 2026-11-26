@@ -4,6 +4,8 @@ use crate::{
     policy::{Notification, Protection, Signals, decide},
 };
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     hash::{Hash, Hasher},
     path::Path,
     sync::{Arc, mpsc},
@@ -42,6 +44,38 @@ impl Drop for TaskMemIdl {
         unsafe { CoTaskMemFree(Some(self.0 as *const _)) }
     }
 }
+
+/// Strongly-typed native background notifications, replacing magic integer codes `1..=21`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeSignal {
+    HotkeyPressed,
+    StatusMessage(String),
+    TrayShow,
+    TraySettings,
+    TrayQuit,
+    TrayRestorePosition,
+    SecondaryInstanceSummon,
+    FrameClockTick(u64),
+    ForegroundChanged,
+    TrayTogglePin,
+    TrayToggleProtectionBypass,
+    DisplayChanged,
+    SystemThemeChanged,
+}
+impl NativeSignal {
+    pub fn requires_ticket(&self) -> bool {
+        matches!(
+            self,
+            Self::HotkeyPressed
+                | Self::TrayShow
+                | Self::TraySettings
+                | Self::TrayRestorePosition
+                | Self::SecondaryInstanceSummon
+        )
+    }
+}
+
+pub type Notify = Arc<dyn Fn(NativeSignal) + Send + Sync>;
 
 /// What one `WaitForMultipleObjects` return means for the summon waiter. The handles are ordered
 /// `[stop, event]`, so only index 0 ends the thread. Everything that is not index 1 — `WAIT_FAILED`
@@ -112,7 +146,7 @@ impl Instance {
             loop {
                 match classify_wait(WaitForMultipleObjects(&handles, false, INFINITE)) {
                     Wait::Stop => break,
-                    Wait::Summon => notify(7, String::new()),
+                    Wait::Summon => notify(NativeSignal::SecondaryInstanceSummon),
                     // Back off rather than spin: if a call is failing it will keep failing, and a
                     // hot loop here costs more than the summon it is waiting for.
                     Wait::Retry => thread::sleep(std::time::Duration::from_millis(50)),
@@ -130,281 +164,6 @@ impl Drop for Instance {
             let _ = worker.join();
         }
     }
-}
-
-/// Caches the foreground process image path so repeated polling does not
-/// reopen the process handle while the window stays unchanged.
-#[derive(Default)]
-pub struct ProtectionCache {
-    hwnd: usize,
-    pid: u32,
-    path: String,
-}
-
-/// AppsFolder gives one display name plus one parsing name per child; only entries that parse to
-/// an app id are usable as a launch target, so everything else (virtual sub-folders in
-/// particular) is dropped here rather than becoming a broken project.
-fn app_option(display: &str, parsing: &str) -> Option<(String, String)> {
-    // The parent folder hands back a child-relative parsing name, which is the bare app id; the
-    // absolute form is accepted too because that is what a dropped Shell item reports.
-    let aumid = parsing
-        .strip_prefix("shell:AppsFolder\\")
-        .unwrap_or(parsing)
-        .trim_end_matches('\\');
-    if !aumid.contains('!') || aumid.contains('\\') || display.trim().is_empty() {
-        return None;
-    }
-    Some((aumid.to_string(), display.to_string()))
-}
-
-/// Installed packaged applications as `(aumid, display name)`.
-pub fn installed_apps() -> Vec<(String, String)> {
-    // Best effort: a thread that already initialised a different apartment model still resolves
-    // shell items, and a thread with no COM at all simply gets an empty list back.
-    let _com = ComGuard::new().ok();
-    unsafe {
-        let Ok(item): windows::core::Result<IShellItem> =
-            SHCreateItemFromParsingName(w!("shell:AppsFolder"), None)
-        else {
-            return Vec::new();
-        };
-        let Ok(folder): windows::core::Result<IShellFolder> =
-            item.BindToHandler(None, &BHID_SFObject)
-        else {
-            return Vec::new();
-        };
-        let mut enumerator: Option<IEnumIDList> = None;
-        if folder
-            .EnumObjects(
-                HWND::default(),
-                (SHCONTF_FOLDERS.0 | SHCONTF_NONFOLDERS.0 | SHCONTF_INIT_ON_FIRST_NEXT.0) as u32,
-                &mut enumerator,
-            )
-            .is_err()
-        {
-            return Vec::new();
-        }
-        let Some(enumerator) = enumerator else {
-            return Vec::new();
-        };
-        let mut apps = Vec::new();
-        let mut buffer = [std::ptr::null_mut::<Common::ITEMIDLIST>(); 1];
-        while enumerator.Next(&mut buffer, None) == S_OK {
-            let child = buffer[0];
-            if child.is_null() {
-                continue;
-            }
-            let display = child_name(&folder, child, SHGDN_NORMAL, 512);
-            let parsing = child_name(&folder, child, SHGDN_FORPARSING, 4096);
-            CoTaskMemFree(Some(child as *const _));
-            if let Some(option) = app_option(&display, &parsing) {
-                apps.push(option);
-            }
-        }
-        apps.sort_by_key(|app| app.1.to_lowercase());
-        apps
-    }
-}
-
-fn child_name(
-    folder: &IShellFolder,
-    child: *const Common::ITEMIDLIST,
-    flag: SHGDNF,
-    width: usize,
-) -> String {
-    let mut wide = vec![0u16; width];
-    let mut str_ret = Common::STRRET::default();
-    if unsafe { folder.GetDisplayNameOf(child, flag, &mut str_ret) }.is_err()
-        || unsafe { StrRetToBufW(&mut str_ret, Some(child), &mut wide) }.is_err()
-    {
-        return String::new();
-    }
-    let end = wide.iter().position(|c| *c == 0).unwrap_or(wide.len());
-    String::from_utf16_lossy(&wide[..end])
-}
-
-pub fn protection(settings: &Settings) -> Protection {
-    let mut cache = ProtectionCache::default();
-    decide(collect_signals(settings, &mut cache))
-}
-
-/// The raw observations behind one verdict. The existing deny-list, per-application rule and
-/// `rcMonitor` geometry work stays in `protection_cached`; the system notification state is
-/// added as the third signal and is only queried while fullscreen protection is switched on, so
-/// it can never resurrect a protection the user turned off.
-pub fn collect_signals(settings: &Settings, cache: &mut ProtectionCache) -> Signals {
-    let observed = protection_cached(settings, cache);
-    Signals {
-        strict_rule: observed == Protection::Strict,
-        fullscreen_geometry: observed == Protection::Fullscreen,
-        notification: if settings.fullscreen_protection {
-            notification_state()
-        } else {
-            Notification::Unavailable
-        },
-        ..Default::default()
-    }
-}
-
-pub fn notification_state() -> Notification {
-    match unsafe { SHQueryUserNotificationState() } {
-        Ok(QUNS_RUNNING_D3D_FULL_SCREEN) => Notification::RunningD3dFullScreen,
-        Ok(QUNS_PRESENTATION_MODE) => Notification::PresentationMode,
-        Ok(QUNS_BUSY) => Notification::Busy,
-        Ok(_) => Notification::Other,
-        Err(_) => Notification::Unavailable,
-    }
-}
-
-pub fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protection {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null()
-            || hwnd == GetDesktopWindow()
-            || hwnd == GetShellWindow()
-            || !IsWindowVisible(hwnd).as_bool()
-            || IsIconic(hwnd).as_bool()
-        {
-            return Protection::Normal;
-        }
-        let mut class = [0u16; 64];
-        let len = GetClassNameW(hwnd, &mut class);
-        if matches!(
-            String::from_utf16_lossy(&class[..len.max(0) as usize]).as_str(),
-            "WorkerW"
-                | "Progman"
-                | "Shell_TrayWnd"
-                | "Shell_SecondaryTrayWnd"
-                | "XamlExplorerHostIslandWindow"
-                | "MultitaskingViewFrame"
-                | "TaskSwitcherWnd"
-        ) {
-            return Protection::Normal;
-        }
-        let mut pid = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == GetCurrentProcessId() {
-            return Protection::Normal;
-        }
-        if !settings.protected_apps.is_empty() {
-            // Both keys must match: a recycled pid under a different window must re-query.
-            let cached = cache.hwnd == hwnd.0 as usize && cache.pid == pid;
-            let path = if cached {
-                Some(cache.path.clone())
-            } else {
-                let queried = query_image_path(pid);
-                if let Some(path) = &queried {
-                    *cache = ProtectionCache {
-                        hwnd: hwnd.0 as usize,
-                        pid,
-                        path: path.clone(),
-                    };
-                }
-                queried
-            };
-            if path.is_some_and(|path| {
-                settings
-                    .protected_apps
-                    .iter()
-                    .any(|rule| rule.replace('/', "\\").to_lowercase() == path)
-            }) {
-                return Protection::Strict;
-            }
-        }
-        if !settings.fullscreen_protection {
-            return Protection::Normal;
-        }
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        if IsZoomed(hwnd).as_bool()
-            || style & WS_CAPTION.0 == WS_CAPTION.0
-            || ex_style & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0
-        {
-            return Protection::Normal;
-        }
-        let mut rect = RECT::default();
-        // DWM frame bounds are physical pixels with at most a small border offset
-        // (magnified by display scaling), while GetWindowRect includes the
-        // invisible resize frame of thick-framed windows.
-        let mut tolerance = 8;
-        if DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut rect as *mut _ as _,
-            std::mem::size_of::<RECT>() as u32,
-        )
-        .is_err()
-        {
-            let mut measured = false;
-            let mut client = RECT::default();
-            if GetClientRect(hwnd, &mut client).is_ok() {
-                let mut top_left = POINT {
-                    x: client.left,
-                    y: client.top,
-                };
-                let mut bottom_right = POINT {
-                    x: client.right,
-                    y: client.bottom,
-                };
-                if ClientToScreen(hwnd, &mut top_left).as_bool()
-                    && ClientToScreen(hwnd, &mut bottom_right).as_bool()
-                {
-                    rect = RECT {
-                        left: top_left.x,
-                        top: top_left.y,
-                        right: bottom_right.x,
-                        bottom: bottom_right.y,
-                    };
-                    measured = true;
-                }
-            }
-            if !measured {
-                if GetWindowRect(hwnd, &mut rect).is_err() {
-                    return Protection::Normal;
-                }
-                tolerance = 24;
-            }
-        }
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if GetMonitorInfoW(monitor, &mut info).as_bool()
-            && fullscreen_rect(rect, info.rcMonitor, tolerance)
-        {
-            return Protection::Fullscreen;
-        }
-        Protection::Normal
-    }
-}
-
-fn query_image_path(pid: u32) -> Option<String> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let handle = OwnedHandle(handle);
-        let mut buffer = vec![0u16; 32768];
-        let mut length = buffer.len() as u32;
-        QueryFullProcessImageNameW(
-            handle.0,
-            PROCESS_NAME_WIN32,
-            PWSTR(buffer.as_mut_ptr()),
-            &mut length,
-        )
-        .ok()?;
-        Some(
-            String::from_utf16_lossy(&buffer[..length as usize])
-                .replace('/', "\\")
-                .to_lowercase(),
-        )
-    }
-}
-
-fn fullscreen_rect(rect: RECT, screen: RECT, tolerance: i32) -> bool {
-    (rect.left - screen.left).abs() <= tolerance
-        && (rect.top - screen.top).abs() <= tolerance
-        && (rect.right - screen.right).abs() <= tolerance
-        && (rect.bottom - screen.bottom).abs() <= tolerance
 }
 
 struct ComGuard;
@@ -509,401 +268,13 @@ pub fn launch(target: &Target) -> Result<(), LaunchError> {
     }
 }
 
-pub type Notify = Arc<dyn Fn(i32, String) + Send + Sync>;
-#[path = "frame_clock.rs"]
-mod frame_clock;
-pub use frame_clock::FrameClock;
-const HOTKEY_CONTROL: u32 = WM_APP + 11;
-struct HotkeyRequest {
-    enabled: bool,
-    spec: crate::hotkey::Shortcut,
-    reply: mpsc::SyncSender<Result<(), String>>,
-}
-pub struct Hotkey {
-    thread_id: u32,
-    join: Option<thread::JoinHandle<()>>,
-    /// The last `(shortcut label, enabled)` pair the worker confirmed. This is a log of what was
-    /// *requested*, not a belief about what the OS holds: `configure` clears it whenever the reply is
-    /// an error or never arrives, so the worst it can do is cause one redundant re-send. It used to
-    /// be the assumed registration, and a request that timed out left it behind — after which
-    /// `set_enabled(false)` compared against the stale value and could skip the unregistration the
-    /// OS still needed, leaving a "disabled" hotkey globally grabbed.
-    requested: Option<(String, bool)>,
-    sender: mpsc::Sender<HotkeyRequest>,
-}
-impl Hotkey {
-    pub fn new(notify: Notify, enabled: bool, shortcut: &str) -> Result<Self, String> {
-        // Parsed here so an unreadable shortcut saved in the database still fails startup where it
-        // used to, rather than only surfacing as a toast.
-        crate::hotkey::parse(shortcut)?;
-        let (tx, rx) = mpsc::sync_channel(1);
-        let (sender, receiver) = mpsc::channel::<HotkeyRequest>();
-        let worker_notify = notify.clone();
-        let join = thread::spawn(move || unsafe {
-            let mut message = MSG::default();
-            let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
-            let _ = tx.send(GetCurrentThreadId());
-            let mut registered: Option<(i32, crate::hotkey::Shortcut)> = None;
-            while GetMessageW(&mut message, None, 0, 0).0 > 0 {
-                if message.message == HOTKEY_CONTROL {
-                    while let Ok(request) = receiver.try_recv() {
-                        let same = registered
-                            .as_ref()
-                            .is_some_and(|(_, old)| *old == request.spec);
-                        let result = if same {
-                            if !request.enabled {
-                                let _ = UnregisterHotKey(None, registered.take().unwrap().0);
-                            }
-                            Ok(())
-                        } else {
-                            let id = if registered.as_ref().is_some_and(|(id, _)| *id == 1) {
-                                2
-                            } else {
-                                1
-                            };
-                            // Register the replacement first, retaining the old binding on conflict.
-                            match RegisterHotKey(
-                                None,
-                                id,
-                                HOT_KEY_MODIFIERS(request.spec.modifiers) | MOD_NOREPEAT,
-                                request.spec.key,
-                            ) {
-                                Ok(()) => {
-                                    if let Some((old, _)) = registered.take() {
-                                        let _ = UnregisterHotKey(None, old);
-                                    }
-                                    if request.enabled {
-                                        registered = Some((id, request.spec));
-                                    } else {
-                                        let _ = UnregisterHotKey(None, id);
-                                    }
-                                    Ok(())
-                                }
-                                Err(_) => Err("此呼出热键已被占用或不可用，已保留原热键".into()),
-                            }
-                        };
-                        let _ = request.reply.send(result);
-                    }
-                } else if message.message == WM_HOTKEY
-                    && registered
-                        .as_ref()
-                        .is_some_and(|(id, _)| *id as usize == message.wParam.0)
-                {
-                    worker_notify(1, String::new());
-                }
-            }
-            if let Some((id, _)) = registered {
-                let _ = UnregisterHotKey(None, id);
-            }
-        });
-        let mut hotkey = Self {
-            thread_id: rx.recv().map_err(|e| e.to_string())?,
-            join: Some(join),
-            requested: None,
-            sender,
-        };
-        if let Err(error) = hotkey.configure(shortcut, enabled) {
-            notify(2, format!("{error}；可用托盘找回窗口"));
-        }
-        Ok(hotkey)
-    }
-    pub fn configure(&mut self, shortcut: &str, enabled: bool) -> Result<(), String> {
-        let spec = crate::hotkey::parse(shortcut)?;
-        let (reply, rx) = mpsc::sync_channel(1);
-        self.sender
-            .send(HotkeyRequest {
-                enabled,
-                spec: spec.clone(),
-                reply,
-            })
-            .map_err(|e| e.to_string())?;
-        unsafe {
-            PostThreadMessageW(self.thread_id, HOTKEY_CONTROL, WPARAM(0), LPARAM(0))
-                .map_err(|e| e.to_string())?;
-        }
-        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(Ok(())) => {
-                self.requested = Some((shortcut.to_string(), enabled));
-                Ok(())
-            }
-            // The worker kept the previous binding.
-            Ok(Err(text)) => {
-                self.requested = None;
-                Err(text)
-            }
-            Err(e) => {
-                // The request stays queued and is applied whenever the pump reaches it, so this side
-                // must not remember an answer it never got: clearing the log makes the next call
-                // re-send instead of assuming the old pair still holds.
-                self.requested = None;
-                Err(e.to_string())
-            }
-        }
-    }
-    /// Re-applies `shortcut` unless the worker already confirmed exactly that pair. Called from the
-    /// protection tick, so the confirmed pair is what keeps it off the worker's queue every 500 ms.
-    pub fn set_enabled(&mut self, shortcut: &str, enabled: bool) {
-        if self
-            .requested
-            .as_ref()
-            .is_some_and(|(label, on)| label == shortcut && *on == enabled)
-        {
-            return;
-        }
-        let _ = self.configure(shortcut, enabled);
-    }
-}
-impl Drop for Hotkey {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-thread_local! {
-    static FOREGROUND_NOTIFY: std::cell::RefCell<Option<Notify>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-unsafe extern "system" fn foreground_event_proc(
-    _hook: HWINEVENTHOOK,
-    event: u32,
-    _hwnd: HWND,
-    id_object: i32,
-    id_child: i32,
-    _id_thread: u32,
-    _time: u32,
-) {
-    let interesting = matches!(
-        event,
-        EVENT_SYSTEM_FOREGROUND | EVENT_SYSTEM_MINIMIZEEND | EVENT_SYSTEM_MOVESIZEEND
-    );
-    // Anything that is not the window itself (a caret, a child item) fires far too often to be
-    // a protection signal.
-    if interesting && id_object == OBJID_WINDOW.0 && id_child == 0 {
-        FOREGROUND_NOTIFY.with(|slot| {
-            if let Some(notify) = slot.borrow().as_ref() {
-                notify(14, String::new());
-            }
-        });
-    }
-}
-
-/// Resolution and mode changes reach `HWND_BROADCAST`, which a message-only window never
-/// receives, so this watches from an ordinary hidden top-level window on the pump thread.
-unsafe extern "system" fn display_proc(
-    hwnd: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    if matches!(
-        message,
-        WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_THEMECHANGED
-    ) {
-        FOREGROUND_NOTIFY.with(|slot| {
-            if let Some(notify) = slot.borrow().as_ref() {
-                notify(
-                    if message == WM_DISPLAYCHANGE { 17 } else { 21 },
-                    String::new(),
-                );
-            }
-        });
-        return LRESULT(0);
-    }
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-}
-
-const DISPLAY_CLASS: PCWSTR = w!("Raptim.DisplayWatch");
-
-/// Delivers an immediate re-evaluation whenever the foreground window changes,
-/// instead of waiting for the polling timer.
-pub struct ForegroundWatch {
-    thread_id: u32,
-    join: Option<thread::JoinHandle<()>>,
-}
-impl ForegroundWatch {
-    pub fn new(notify: Notify) -> Result<Self, String> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        let join = thread::spawn(move || unsafe {
-            let mut message = MSG::default();
-            let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
-            FOREGROUND_NOTIFY.with(|slot| *slot.borrow_mut() = Some(notify));
-            // Out-of-context hooks require the installing thread to pump messages,
-            // which the loop below provides.
-            let hook = SetWinEventHook(
-                EVENT_SYSTEM_FOREGROUND,
-                EVENT_SYSTEM_MOVESIZEEND,
-                None,
-                Some(foreground_event_proc),
-                0,
-                0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-            );
-            let instance = HINSTANCE::default();
-            let class = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(display_proc),
-                hInstance: instance,
-                lpszClassName: DISPLAY_CLASS,
-                ..Default::default()
-            };
-            let registered = RegisterClassExW(&class);
-            let watch = if registered != 0 {
-                CreateWindowExW(
-                    WINDOW_EX_STYLE::default(),
-                    DISPLAY_CLASS,
-                    w!(""),
-                    WINDOW_STYLE::default(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    None,
-                    None,
-                    Some(instance),
-                    None,
-                )
-                .unwrap_or_default()
-            } else {
-                HWND::default()
-            };
-            let _ = tx.send(GetCurrentThreadId());
-            while GetMessageW(&mut message, None, 0, 0).0 > 0 {}
-            if !watch.0.is_null() {
-                let _ = DestroyWindow(watch);
-            }
-            if registered != 0 {
-                let _ = UnregisterClassW(DISPLAY_CLASS, instance.into());
-            }
-            if !hook.0.is_null() {
-                let _ = UnhookWinEvent(hook);
-            }
-            FOREGROUND_NOTIFY.with(|slot| *slot.borrow_mut() = None);
-        });
-        let thread_id = rx.recv().map_err(|e| e.to_string())?;
-        Ok(Self {
-            thread_id,
-            join: Some(join),
-        })
-    }
-}
-impl Drop for ForegroundWatch {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-pub struct Tray {
-    _icon: tray_icon::TrayIcon,
-    pause_hide: tray_icon::menu::CheckMenuItem,
-    pause_protection: tray_icon::menu::CheckMenuItem,
-}
-impl Tray {
-    pub fn new(notify: Notify) -> Result<Self, String> {
-        use tray_icon::{
-            Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
-            menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-        };
-        let menu = Menu::new();
-        let show = MenuItem::new("显示 Raptim", true, None);
-        let restore = MenuItem::new("恢复窗口位置", true, None);
-        let pause_hide = CheckMenuItem::new("暂停自动隐藏", true, false, None);
-        let pause_protection = CheckMenuItem::new("暂停游戏勿扰", true, false, None);
-        let settings = MenuItem::new("设置", true, None);
-        let exit = MenuItem::new("退出", true, None);
-        // Window · toggles · app · quit: the same four sections as the launcher's 更多 menu.
-        let (sep_window, sep_toggles, sep_app) = (
-            PredefinedMenuItem::separator(),
-            PredefinedMenuItem::separator(),
-            PredefinedMenuItem::separator(),
-        );
-        menu.append_items(&[
-            &show,
-            &restore,
-            &sep_window,
-            &pause_hide,
-            &pause_protection,
-            &sep_toggles,
-            &settings,
-            &sep_app,
-            &exit,
-        ])
-        .map_err(|e| e.to_string())?;
-        let ids = (
-            show.id().clone(),
-            restore.id().clone(),
-            settings.id().clone(),
-            exit.id().clone(),
-            pause_hide.id().clone(),
-            pause_protection.id().clone(),
-        );
-        let menu_notify = notify.clone();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let code = if event.id == ids.0 {
-                3
-            } else if event.id == ids.1 {
-                6
-            } else if event.id == ids.2 {
-                4
-            } else if event.id == ids.3 {
-                5
-            } else if event.id == ids.4 {
-                15
-            } else if event.id == ids.5 {
-                16
-            } else {
-                return;
-            };
-            menu_notify(code, String::new());
-        }));
-        TrayIconEvent::set_event_handler(Some(move |event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }
-            ) {
-                notify(3, String::new());
-            }
-        }));
-        let tray_rgba = image::load_from_memory(include_bytes!("../../ui/icons/raptim-tray.png"))
-            .map_err(|e| e.to_string())?
-            .into_rgba8();
-        let (width, height) = tray_rgba.dimensions();
-        let icon =
-            Icon::from_rgba(tray_rgba.into_raw(), width, height).map_err(|e| e.to_string())?;
-        let icon = TrayIconBuilder::new()
-            .with_tooltip("Raptim")
-            .with_icon(icon)
-            .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
-            .build()
-            .map_err(|e| e.to_string())?;
-        Ok(Self {
-            _icon: icon,
-            pause_hide,
-            pause_protection,
-        })
-    }
-    /// Keeps the two check marks honest after a toggle from any other entry point.
-    pub fn set_states(&self, paused: bool, protection_bypassed: bool) {
-        self.pause_hide.set_checked(paused);
-        self.pause_protection.set_checked(protection_bypassed);
-    }
-    pub fn set_tooltip(&self, text: &str) {
-        let _ = self._icon.set_tooltip(Some(text));
+fn child_insert_after(parent_topmost: bool, child_topmost: bool) -> HWND {
+    match (parent_topmost, child_topmost) {
+        (true, _) => HWND_TOPMOST,
+        (false, true) => HWND_NOTOPMOST,
+        // `HWND_NOTOPMOST` is a no-op when the child is already non-topmost, so
+        // `HWND_TOP` is required to raise it above its non-topmost owner.
+        (false, false) => HWND_TOP,
     }
 }
 
@@ -914,9 +285,11 @@ pub fn set_owner(child: &slint::Window, parent: &slint::Window) {
     unsafe {
         SetWindowLongPtrW(child_hwnd, GWLP_HWNDPARENT, owner.0 as isize);
         let pinned = GetWindowLongPtrW(owner, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize != 0;
+        let child_pinned =
+            GetWindowLongPtrW(child_hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize != 0;
         let _ = SetWindowPos(
             child_hwnd,
-            Some(if pinned { HWND_TOPMOST } else { HWND_NOTOPMOST }),
+            Some(child_insert_after(pinned, child_pinned)),
             0,
             0,
             0,
@@ -955,6 +328,110 @@ pub fn request_redraw_now(window: &slint::Window) -> bool {
             true
         })
         .unwrap_or(false)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsDirty {
+    Full,
+    Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PendingPaint {
+    Partial(RECT),
+    Full,
+}
+
+thread_local! {
+    static OS_DIRTY: RefCell<HashMap<isize, PendingPaint>> = RefCell::new(HashMap::new());
+}
+
+fn merge_pending_rect(existing: Option<PendingPaint>, rect: RECT) -> Option<PendingPaint> {
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return existing;
+    }
+    Some(match existing {
+        Some(PendingPaint::Full) => PendingPaint::Full,
+        Some(PendingPaint::Partial(prev)) => PendingPaint::Partial(RECT {
+            left: prev.left.min(rect.left),
+            top: prev.top.min(rect.top),
+            right: prev.right.max(rect.right),
+            bottom: prev.bottom.max(rect.bottom),
+        }),
+        None => PendingPaint::Partial(rect),
+    })
+}
+
+fn record_os_dirty_full(hwnd: HWND) {
+    OS_DIRTY.with(|map| {
+        map.borrow_mut().insert(hwnd.0 as isize, PendingPaint::Full);
+    });
+}
+
+fn record_os_dirty_rect(hwnd: HWND, rect: RECT) {
+    OS_DIRTY.with(|map| {
+        let mut map = map.borrow_mut();
+        let current = map.get(&(hwnd.0 as isize)).copied();
+        if let Some(next) = merge_pending_rect(current, rect) {
+            map.insert(hwnd.0 as isize, next);
+        }
+    });
+}
+
+fn remove_os_dirty(hwnd: HWND) {
+    OS_DIRTY.with(|map| {
+        map.borrow_mut().remove(&(hwnd.0 as isize));
+    });
+}
+
+pub fn surface_size(window: &slint::Window) -> slint::PhysicalSize {
+    use slint::winit_030::WinitWindowAccessor;
+    let current = window.size();
+    window
+        .with_winit_window(|w| {
+            let inner = w.inner_size();
+            slint::PhysicalSize::new(
+                current.width.max(inner.width),
+                current.height.max(inner.height),
+            )
+        })
+        .unwrap_or(current)
+}
+
+pub fn is_native_visible(window: &slint::Window) -> bool {
+    native_handle(window).is_some_and(|hwnd| unsafe { IsWindowVisible(hwnd).as_bool() })
+}
+
+pub fn surface_paintable(window: &slint::Window) -> bool {
+    let Some(hwnd) = native_handle(window) else {
+        return false;
+    };
+    let size = surface_size(window);
+    let visible =
+        unsafe { IsWindowVisible(hwnd).as_bool() && prop_value(hwnd, "Raptim.Cloaked") == 0 };
+    visible && size.width > 0 && size.height > 0
+}
+
+pub fn take_os_dirty(window: &slint::Window) -> Option<OsDirty> {
+    if !surface_paintable(window) {
+        return None;
+    }
+    let hwnd = native_handle(window)?;
+    let pending = OS_DIRTY.with(|map| map.borrow_mut().remove(&(hwnd.0 as isize)))?;
+    Some(match pending {
+        PendingPaint::Full => OsDirty::Full,
+        PendingPaint::Partial(r) => OsDirty::Rect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        },
+    })
 }
 
 /// Position in physical pixels on the parent's monitor, including negative origins.
@@ -1272,6 +749,44 @@ unsafe extern "system" fn frame_proc(
             WM_NCCALCSIZE | WM_NCPAINT => LRESULT(0),
             WM_NCACTIVATE => LRESULT(1),
             WM_ERASEBKGND => LRESULT(1),
+            WM_SHOWWINDOW => {
+                if wparam.0 != 0 {
+                    record_os_dirty_full(hwnd);
+                }
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+            WM_WINDOWPOSCHANGED => {
+                if lparam.0 != 0 {
+                    let pos = &*(lparam.0 as *const WINDOWPOS);
+                    if (pos.flags & SWP_SHOWWINDOW) != SET_WINDOW_POS_FLAGS(0) {
+                        record_os_dirty_full(hwnd);
+                    }
+                }
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+            WM_STYLECHANGED if wparam.0 as i32 == GWL_EXSTYLE.0 && lparam.0 != 0 => {
+                let styles = &*(lparam.0 as *const STYLESTRUCT);
+                if (styles.styleOld & WS_EX_LAYERED.0) != 0
+                    && (styles.styleNew & WS_EX_LAYERED.0) == 0
+                {
+                    record_os_dirty_full(hwnd);
+                }
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+            WM_DWMCOMPOSITIONCHANGED | WM_DISPLAYCHANGE | WM_DPICHANGED => {
+                record_os_dirty_full(hwnd);
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
+            WM_PAINT => {
+                // Capture OS-initiated update regions before winit/DefWindowProc validates them
+                // or turns them into RDW_INTERNALPAINT while buffered; Slint's software renderer
+                // otherwise skips BitBlt when nothing inside Slint state changed.
+                let mut update = RECT::default();
+                if GetUpdateRect(hwnd, Some(&mut update), false).as_bool() {
+                    record_os_dirty_rect(hwnd, update);
+                }
+                DefSubclassProc(hwnd, message, wparam, lparam)
+            }
             WM_STYLECHANGING if lparam.0 != 0 => {
                 // winit's set_visible / WindowFlags::apply_diff rewrites GWL_STYLE and
                 // GWL_EXSTYLE from its own flag cache (restoring WS_CAPTION and dropping
@@ -1285,11 +800,17 @@ unsafe extern "system" fn frame_proc(
                     }
                     styles.styleNew = style;
                 } else if wparam.0 as i32 == GWL_EXSTYLE.0 {
-                    styles.styleNew = (styles.styleNew & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
+                    let mut ex = (styles.styleNew & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
+                    let alpha = prop_value(hwnd, "Raptim.Alpha");
+                    if (1..=255).contains(&alpha) {
+                        ex |= WS_EX_LAYERED.0;
+                    }
+                    styles.styleNew = ex;
                 }
                 LRESULT(0)
             }
             WM_NCDESTROY => {
+                remove_os_dirty(hwnd);
                 clear_launcher_drag(hwnd);
                 let _ = RemoveWindowSubclass(hwnd, Some(frame_proc), id);
                 DefSubclassProc(hwnd, message, wparam, lparam)
@@ -1622,8 +1143,8 @@ pub fn set_collapsed_appearance(
             let cloak = windows::core::BOOL::from(false);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak as *const _ as _, 4);
             set_prop_value(hwnd, "Raptim.Cloaked", 0);
+            record_os_dirty_full(hwnd);
             crate::windowing::invalidate(window);
-            request_redraw_now(window);
         }
     }
 }
@@ -1687,27 +1208,39 @@ pub fn set_opacity(window: &slint::Window, opacity: f32) {
         return;
     };
     unsafe {
-        let alpha = (opacity.clamp(0., 1.) * 255.).round() as usize;
-        if GetPropW(hwnd, w!("Raptim.Alpha")).0 as usize == alpha + 1 {
+        let alpha = (opacity.clamp(0., 1.) * 255.).round() as u8;
+        let want_layered = alpha < 255;
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let has_layered = style & WS_EX_LAYERED.0 as isize != 0;
+        if GetPropW(hwnd, w!("Raptim.Alpha")).0 as usize == usize::from(alpha) + 1
+            && has_layered == want_layered
+        {
             return;
         }
-        let _ = SetPropW(hwnd, w!("Raptim.Alpha"), Some(HANDLE((alpha + 1) as _)));
-        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if opacity >= 1.0 {
-            if style & WS_EX_LAYERED.0 as isize != 0 {
+        let _ = SetPropW(
+            hwnd,
+            w!("Raptim.Alpha"),
+            Some(HANDLE((usize::from(alpha) + 1) as _)),
+        );
+        if !want_layered {
+            if has_layered {
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_LAYERED.0 as isize));
+                record_os_dirty_full(hwnd);
                 if window.is_visible() {
-                    window.request_redraw();
+                    let _ = RedrawWindow(
+                        Some(hwnd),
+                        None,
+                        None,
+                        RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
+                    );
+                    crate::windowing::invalidate(window);
                 }
             }
         } else {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
-            let _ = SetLayeredWindowAttributes(
-                hwnd,
-                COLORREF(0),
-                (opacity.clamp(0., 1.) * 255.) as u8,
-                LWA_ALPHA,
-            );
+            if !has_layered {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
+            }
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
         }
     }
 }
@@ -1743,6 +1276,12 @@ pub fn reveal_file(path: &Path) -> Result<(), String> {
         result
     }
 }
+pub fn is_topmost(window: &slint::Window) -> bool {
+    native_handle(window).is_some_and(|hwnd| unsafe {
+        GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize != 0
+    })
+}
+
 pub fn topmost(window: &slint::Window, enabled: bool) {
     let Some(hwnd) = native_handle(window) else {
         return;
@@ -1925,456 +1464,48 @@ pub fn app_has_focus() -> bool {
 pub fn window_active(window: &slint::Window) -> bool {
     native_handle(window).is_some_and(|hwnd| unsafe { GetForegroundWindow() == hwnd })
 }
-pub fn autostart_command(exe: &Path, data_dir: &Path) -> String {
-    let clean_dir = crate::paths::normal_path(data_dir);
-    format!(
-        "\"{}\" --data-dir \"{}\" --silent",
-        exe.display(),
-        clean_dir.display()
-    )
-}
-pub fn set_autostart(enabled: bool, data_dir: &Path) -> Result<(), String> {
-    use windows::Win32::System::Registry::*;
-    unsafe {
-        let mut key = HKEY::default();
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-            Some(0),
-            None,
-            REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
-            None,
-            &mut key,
-            None,
-        )
-        .ok()
-        .map_err(|e| e.to_string())?;
-        let result = if enabled {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let command = wide(&autostart_command(&exe, data_dir));
-            let bytes =
-                std::slice::from_raw_parts(command.as_ptr() as *const u8, command.len() * 2);
-            RegSetValueExW(key, w!("Raptim"), Some(0), REG_SZ, Some(bytes))
-                .ok()
-                .map_err(|e| e.to_string())
-        } else {
-            let code = RegDeleteValueW(key, w!("Raptim"));
-            if code == ERROR_FILE_NOT_FOUND {
-                Ok(())
-            } else {
-                code.ok().map_err(|e| e.to_string())
-            }
-        };
-        let _ = RegCloseKey(key);
-        result
-    }
-}
-/// Check whether the Windows `Run` entry and Task Manager approval match the saved preference.
-pub fn autostart_mismatch(data_dir: &Path, expected_enabled: bool) -> Option<String> {
-    use windows::Win32::System::Registry::*;
-    if !expected_enabled {
-        return None;
-    }
-    let exe = std::env::current_exe().ok()?;
-    let expected = autostart_command(&exe, data_dir);
-    unsafe {
-        let mut run_key = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-            Some(0),
-            KEY_QUERY_VALUE,
-            &mut run_key,
-        )
-        .is_err()
-        {
-            return Some("开机启动项未写入系统注册表，请重新开关生效".into());
-        }
-        let mut reg_type = REG_VALUE_TYPE::default();
-        let mut size = 0u32;
-        let query = RegQueryValueExW(
-            run_key,
-            w!("Raptim"),
-            None,
-            Some(&mut reg_type),
-            None,
-            Some(&mut size),
-        );
-        let actual = if query.is_ok() && reg_type == REG_SZ && size >= 2 {
-            let mut buf = vec![0u16; (size as usize).div_ceil(2)];
-            let mut read = size;
-            if RegQueryValueExW(
-                run_key,
-                w!("Raptim"),
-                None,
-                None,
-                Some(buf.as_mut_ptr().cast()),
-                Some(&mut read),
-            )
-            .is_ok()
-            {
-                let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
-                Some(String::from_utf16_lossy(&buf[..end]))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let _ = RegCloseKey(run_key);
-        let Some(actual) = actual else {
-            return Some("开机启动项未写入系统注册表，请重新开关生效".into());
-        };
-        if !actual.trim().eq_ignore_ascii_case(expected.trim()) {
-            return Some("程序路径、数据目录或静默参数已变更，请重新开关「开机启动」更新".into());
-        }
-        let mut approved = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run"),
-            Some(0),
-            KEY_QUERY_VALUE,
-            &mut approved,
-        )
-        .is_ok()
-        {
-            let mut buf = [0u8; 16];
-            let mut read = buf.len() as u32;
-            let mut kind = REG_VALUE_TYPE::default();
-            if RegQueryValueExW(
-                approved,
-                w!("Raptim"),
-                None,
-                Some(&mut kind),
-                Some(buf.as_mut_ptr()),
-                Some(&mut read),
-            )
-            .is_ok()
-                && read >= 1
-                && (buf[0] & 1 == 1)
-            {
-                let _ = RegCloseKey(approved);
-                return Some("系统任务管理器已禁用开机启动，请在任务管理器启用或重新开关".into());
-            }
-            let _ = RegCloseKey(approved);
-        }
-    }
-    None
-}
-/// Extract the Windows Shell icon (including shortcut resolution) and save PNG pixels.
-pub fn shell_icon(path: &Path) -> Vec<u8> {
-    let Ok(_com) = ComGuard::new() else {
-        return vec![];
-    };
-    unsafe {
-        let mut info = SHFILEINFOW::default();
-        let name = wide(&path.to_string_lossy().replace('/', "\\"));
-        if SHGetFileInfoW(
-            PCWSTR(name.as_ptr()),
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            Some(&mut info),
-            std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_SYSICONINDEX,
-        ) == 0
-        {
-            return vec![];
-        }
-        icon_by_index(info.iIcon)
-    }
-}
-
-/// Packaged applications have no file system path: their icon is served by the AppsFolder
-/// namespace, so the display name is parsed into an item id and looked up in the same image list.
-pub fn app_icon(aumid: &str) -> Vec<u8> {
-    if !aumid.contains('!') || aumid.contains('\\') {
-        return Vec::new();
-    }
-    let Ok(_com) = ComGuard::new() else {
-        return vec![];
-    };
-    unsafe {
-        let name = wide(&format!("shell:AppsFolder\\{aumid}"));
-        let mut id: *mut Common::ITEMIDLIST = std::ptr::null_mut();
-        if SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut id, 0, None).is_err() {
-            return Vec::new();
-        }
-        let _item = TaskMemIdl(id);
-        let mut info = SHFILEINFOW::default();
-        if SHGetFileInfoW(
-            PCWSTR(id as *const u16),
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            Some(&mut info),
-            std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_PIDL | SHGFI_SYSICONINDEX,
-        ) == 0
-        {
-            return Vec::new();
-        }
-        icon_by_index(info.iIcon)
-    }
-}
-
-/// Single dispatch used by every icon call site: a web page is asked for its own icon, a packaged
-/// app is resolved through the Shell namespace, and everything else is a path on disk.
-pub fn icon_for(target: &Target, base: &Path) -> Vec<u8> {
-    match target {
-        Target::Url { url } => web_icon::fetch(url),
-        Target::App { aumid } => app_icon(aumid),
-        other => shell_icon(&crate::paths::absolute(other.value(), base)),
-    }
-}
-
-/// Draw one system image-list entry onto a transparent square and encode it as PNG.
-unsafe fn icon_by_index(index: i32) -> Vec<u8> {
-    use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
-    unsafe {
-        let (icon, size) = [
-            (SHIL_JUMBO as i32, 256),
-            (SHIL_EXTRALARGE as i32, 48),
-            (SHIL_LARGE as i32, 32),
-        ]
-        .into_iter()
-        .find_map(|(list, size)| {
-            SHGetImageList::<IImageList>(list)
-                .ok()
-                .and_then(|images| images.GetIcon(index, ILD_TRANSPARENT.0).ok())
-                .map(|icon| (icon, size))
-        })
-        .unwrap_or((
-            windows::Win32::UI::WindowsAndMessaging::HICON::default(),
-            32,
-        ));
-        if icon.is_invalid() {
-            return vec![];
-        }
-        let dc = CreateCompatibleDC(None);
-        if dc.is_invalid() {
-            let _ = DestroyIcon(icon);
-            return vec![];
-        }
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size,
-                biHeight: -size,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut bits = std::ptr::null_mut();
-        let Ok(bitmap) = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-        else {
-            let _ = DeleteDC(dc);
-            let _ = DestroyIcon(icon);
-            return vec![];
-        };
-        let old = SelectObject(dc, bitmap.into());
-        std::ptr::write_bytes(bits, 0, (size * size * 4) as usize);
-        let result = DrawIconEx(dc, 0, 0, icon, size, size, 0, None, DI_NORMAL);
-        let mut bytes =
-            std::slice::from_raw_parts(bits as *const u8, (size * size * 4) as usize).to_vec();
-        // Legacy mask-based icons have no alpha. Drawing on white and black
-        // recovers coverage, including opaque black pixels (not a color key).
-        if bytes.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
-            std::ptr::write_bytes(bits, 255, (size * size * 4) as usize);
-            if DrawIconEx(dc, 0, 0, icon, size, size, 0, None, DI_NORMAL).is_ok() {
-                let white =
-                    std::slice::from_raw_parts(bits as *const u8, (size * size * 4) as usize);
-                for (p, w) in bytes
-                    .as_chunks_mut::<4>()
-                    .0
-                    .iter_mut()
-                    .zip(white.as_chunks::<4>().0)
-                {
-                    p[3] = 255 - w[0].saturating_sub(p[0]);
-                }
-            }
-        }
-        let _ = SelectObject(dc, old);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(dc);
-        let _ = DestroyIcon(icon);
-        if result.is_err() {
-            return vec![];
-        }
-        for p in bytes.as_chunks_mut::<4>().0 {
-            p.swap(0, 2);
-            if p[3] > 0 && p[3] < 255 {
-                let a = p[3] as u32;
-                for c in &mut p[..3] {
-                    *c = ((*c as u32 * 255 / a).min(255)) as u8;
-                }
-            }
-        }
-        image::RgbaImage::from_raw(size as u32, size as u32, bytes)
-            .and_then(|i| crate::icons::encode(i).ok())
-            .unwrap_or_default()
-    }
-}
 
 pub fn close_menu_focus(window: &slint::Window) {
     focus(window);
 }
 
+#[path = "autostart.rs"]
+mod autostart;
+#[path = "discovery.rs"]
+mod discovery;
+#[path = "drop_target.rs"]
+pub mod drop_target;
 #[path = "fluent_menu.rs"]
 mod fluent_menu;
+#[path = "frame_clock.rs"]
+mod frame_clock;
+#[path = "hotkey_worker.rs"]
+mod hotkey_worker;
+#[path = "protection.rs"]
+mod protection;
 #[path = "shell_actions.rs"]
 mod shell_actions;
+#[path = "tray.rs"]
+mod tray;
 #[path = "web_icon.rs"]
 mod web_icon;
+
+pub use autostart::{autostart_command, autostart_mismatch, set_autostart};
+pub use discovery::{
+    DiscoveredApp, app_icon, discover_installed_entries, icon_for, installed_apps, shell_icon,
+};
+pub use frame_clock::FrameClock;
+pub use hotkey_worker::Hotkey;
+pub use protection::{
+    ForegroundWatch, ProtectionCache, collect_signals, notification_state, protection,
+    protection_cached,
+};
 pub use shell_actions::{
     create_shortcut_in, desktop_shortcut, known_folder_path, resolve_lnk_file, resolve_url_file,
     shell_context_menu,
 };
+pub use tray::Tray;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct DiscoveredApp {
-    pub name: String,
-    pub detail: String,
-    pub target: Target,
-    pub icon_source: Option<std::path::PathBuf>,
-}
-
-fn is_noise_shortcut(name: &str, target: &Target) -> bool {
-    let low_name = name.to_lowercase();
-    let low_val = target.value().to_lowercase();
-    [
-        "uninstall",
-        "uninst",
-        "卸载",
-        "readme",
-        "读我",
-        "帮助",
-        "manual",
-        "license",
-        "用户协议",
-    ]
-    .iter()
-    .any(|kw| low_name.contains(kw))
-        || low_val.contains("unins0")
-        || low_val.contains("uninstall")
-}
-
-fn collect_shortcuts_in(
-    dir: &Path,
-    depth: u8,
-    self_exe: &str,
-    seen_keys: &mut std::collections::HashSet<String>,
-    out: &mut Vec<DiscoveredApp>,
-) {
-    if depth > 4 {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if ft.is_dir() && !ft.is_symlink() {
-            collect_shortcuts_in(&path, depth + 1, self_exe, seen_keys, out);
-            continue;
-        }
-        if !ft.is_file() {
-            continue;
-        }
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if !matches!(ext.as_str(), "lnk" | "url") {
-            continue;
-        }
-        let Some(name) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        let target = if ext == "url" {
-            match resolve_url_file(&path) {
-                Some(url) => Target::Url { url },
-                None => Target::Shortcut {
-                    path: path.to_string_lossy().into_owned(),
-                    show: ShowMode::Normal,
-                },
-            }
-        } else {
-            resolve_lnk_file(&path).unwrap_or_else(|| Target::Shortcut {
-                path: path.to_string_lossy().into_owned(),
-                show: ShowMode::Normal,
-            })
-        };
-        if target.validate().is_err() || is_noise_shortcut(&name, &target) {
-            continue;
-        }
-        if !self_exe.is_empty()
-            && target
-                .value()
-                .replace('/', "\\")
-                .eq_ignore_ascii_case(self_exe)
-        {
-            continue;
-        }
-        if seen_keys.insert(target.duplicate_key()) {
-            let detail = target.value().to_string();
-            out.push(DiscoveredApp {
-                name,
-                detail,
-                target,
-                icon_source: Some(path),
-            });
-        }
-    }
-}
-
-/// Discover installed applications from Start Menu shortcuts and packaged AppsFolder entries.
-pub fn discover_installed_entries() -> Vec<DiscoveredApp> {
-    let self_exe = std::env::current_exe()
-        .map(|p| {
-            crate::paths::normal_path(&p)
-                .to_string_lossy()
-                .replace('/', "\\")
-        })
-        .unwrap_or_default();
-    let mut seen_keys = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for folder in [&FOLDERID_CommonPrograms, &FOLDERID_Programs] {
-        if let Ok(dir) = known_folder_path(folder) {
-            collect_shortcuts_in(&dir, 0, &self_exe, &mut seen_keys, &mut out);
-        }
-    }
-    let seen_names: std::collections::HashSet<String> =
-        out.iter().map(|d| d.name.to_lowercase()).collect();
-    for (aumid, name) in installed_apps() {
-        let target = Target::App {
-            aumid: aumid.clone(),
-        };
-        if seen_names.contains(&name.to_lowercase()) || target.validate().is_err() {
-            continue;
-        }
-        if seen_keys.insert(target.duplicate_key()) {
-            out.push(DiscoveredApp {
-                name,
-                detail: aumid,
-                target,
-                icon_source: None,
-            });
-        }
-    }
-    out.sort_by_key(|a| a.name.to_lowercase());
-    out
-}
 pub fn show_menu(
     window: &slint::Window,
     items: &[crate::menus::MenuItem],
@@ -2432,12 +1563,11 @@ pub fn restore_saved(window: &slint::Window, state: &crate::session::WindowState
     }
 }
 
-#[path = "drop_target.rs"]
-pub mod drop_target;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use discovery::app_option;
+    use protection::fullscreen_rect;
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
         RECT {
@@ -2484,5 +1614,33 @@ mod tests {
         assert_eq!(classify_wait(WAIT_OBJECT_0), Wait::Stop);
         assert_eq!(classify_wait(WAIT_EVENT(WAIT_OBJECT_0.0 + 1)), Wait::Summon);
         assert_eq!(classify_wait(WAIT_EVENT(u32::MAX)), Wait::Retry);
+    }
+
+    #[test]
+    fn merges_os_dirty_rects_without_losing_full_paint() {
+        assert_eq!(merge_pending_rect(None, rect(10, 10, 10, 30)), None);
+        assert_eq!(
+            merge_pending_rect(None, rect(10, 20, 40, 60)),
+            Some(PendingPaint::Partial(rect(10, 20, 40, 60)))
+        );
+        assert_eq!(
+            merge_pending_rect(
+                Some(PendingPaint::Partial(rect(10, 20, 40, 60))),
+                rect(25, 5, 80, 50)
+            ),
+            Some(PendingPaint::Partial(rect(10, 5, 80, 60)))
+        );
+        assert_eq!(
+            merge_pending_rect(Some(PendingPaint::Full), rect(10, 20, 40, 60)),
+            Some(PendingPaint::Full)
+        );
+    }
+
+    #[test]
+    fn resolves_child_z_order_from_parent_and_child_topmost_bits() {
+        assert_eq!(child_insert_after(true, false), HWND_TOPMOST);
+        assert_eq!(child_insert_after(true, true), HWND_TOPMOST);
+        assert_eq!(child_insert_after(false, true), HWND_NOTOPMOST);
+        assert_eq!(child_insert_after(false, false), HWND_TOP);
     }
 }

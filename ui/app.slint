@@ -66,6 +66,8 @@ component Tile inherits Rectangle {
     callback can-drop(data-transfer) -> bool;
     callback drop-before(data-transfer, bool) -> bool;
     property <bool> insert-after;
+    property <color> kind-tint: item.kind == 2 ? #b68422 : item.kind == 3 ? #278879 : item.kind == 5 ? #8065b9 : Palette.accent-background;
+    property <image> kind-fallback-icon: item.kind == 2 ? @image-url("icons/folder.svg") : item.kind == 3 ? @image-url("icons/web.svg") : item.kind == 1 ? @image-url("icons/file.svg") : item.kind == 5 ? @image-url("icons/app.svg") : @image-url("icons/program.svg");
     border-radius: 8px;
     opacity: tile-drag.dragging ? 0.4 : 1;
     background: (root.batch-mode && item.checked) || (root.search-result && selected) ? Theme.selection : touch.has-hover ? Theme.navigation : transparent;
@@ -81,7 +83,7 @@ component Tile inherits Rectangle {
         dropped(event) => { return root.drop-before(event.data,root.list-mode ? event.position.y > self.height / 2 : event.position.x > self.width / 2) ? DragAction.move : DragAction.none; }
         tile-drag := DragArea {
             enabled: !root.search-result && root.sortable;
-            drag-image: root.item.drag-icon.width > 0 ? root.item.drag-icon : @image-url("icons/program.svg"); drag-image-offset-x: 18; drag-image-offset-y: 18;
+            drag-image: root.item.drag-icon.width > 0 ? root.item.drag-icon : root.kind-fallback-icon; drag-image-offset-x: 18; drag-image-offset-y: 18;
             allow-move: true;
             data: root.make-drag();
             Rectangle {
@@ -90,10 +92,9 @@ component Tile inherits Rectangle {
                     padding: 6px; spacing: 4px; alignment: center;
                     HorizontalLayout { alignment: center;
                         Rectangle { width: root.icon-size; height: root.icon-size; border-radius: 8px;
-                            property <color> tint: item.kind == 2 ? #b68422 : item.kind == 3 ? #278879 : item.kind == 5 ? #8065b9 : Palette.accent-background;
-                            background: item.icon.width > 0 ? transparent : Theme.surface.mix(self.tint, 0.87);
+                            background: item.icon.width > 0 ? transparent : Theme.surface.mix(root.kind-tint, 0.87);
                             Image { x: item.icon.width > 0 ? 0px : 6px; y: self.x; width: item.icon.width > 0 ? root.icon-size : root.icon-size - 12px; height: self.width;
-                                source: item.icon.width > 0 ? item.icon : item.kind == 2 ? @image-url("icons/folder.svg") : item.kind == 3 ? @image-url("icons/web.svg") : item.kind == 1 ? @image-url("icons/file.svg") : item.kind == 5 ? @image-url("icons/app.svg") : @image-url("icons/program.svg"); colorize: item.icon.width > 0 ? #0000 : parent.tint;
+                                source: item.icon.width > 0 ? item.icon : root.kind-fallback-icon; colorize: item.icon.width > 0 ? #0000 : root.kind-tint;
                             }
                         }
                     }
@@ -101,7 +102,12 @@ component Tile inherits Rectangle {
                 }
                 if root.list-mode: HorizontalLayout {
                     padding: 12px; spacing: 12px;
-                    Image { width: 28px; height: 28px; source: item.icon.width > 0 ? item.icon : @image-url("icons/program.svg"); colorize: item.icon.width > 0 ? #0000 : Palette.accent-background; }
+                    Rectangle { width: 28px; height: 28px; border-radius: 6px;
+                        background: item.icon.width > 0 ? transparent : Theme.surface.mix(root.kind-tint, 0.87);
+                        Image { x: item.icon.width > 0 ? 0px : 5px; y: self.x; width: item.icon.width > 0 ? 28px : 18px; height: self.width;
+                            source: item.icon.width > 0 ? item.icon : root.kind-fallback-icon; colorize: item.icon.width > 0 ? #0000 : root.kind-tint;
+                        }
+                    }
                     VerticalLayout { spacing: 3px;
                         Text { text: item.name; color: Palette.foreground; overflow: elide; }
                         Text { text: item.detail; color: Palette.alternate-foreground; font-size: 12px; overflow: elide; }
@@ -293,7 +299,6 @@ export component MainWindow inherits AppWindow {
     in-out property <length> external-x: -1px;
     in-out property <length> external-y: -1px;
     in-out property <int> external-category;
-    callback external-drop(string);
 
     in property <bool> busy;
     out property <bool> search-focused: search-input.has-focus;
@@ -304,7 +309,6 @@ export component MainWindow inherits AppWindow {
     callback edit(int);
     callback native-menu(int, int);
     callback copy-to(int, int);
-    callback refresh-icon-ready(string);
     callback add;
     callback add-files;
     callback move(int, int);
@@ -404,13 +408,8 @@ export component MainWindow inherits AppWindow {
     callback quit;
     callback request-hide;
     callback escape;
-    callback native-event(int, string);
-    callback launch-finished(string);
+    callback flush-events;
     callback relocate;
-    callback file-selected(int, string);
-    callback files-ready(string);
-    callback icon-ready(string);
-    callback icons-ready(string);
     pure callback make-drag(int) -> data-transfer;
     callback can-drop(data-transfer) -> bool;
     callback drop-before(data-transfer, int, bool) -> bool;
@@ -837,7 +836,9 @@ export component MainWindow inherits AppWindow {
 
 export component EditorWindow inherits AppWindow {
     in-out property <bool> window-active <=> root.frame-active;
+    in-out property <bool> topmost-window;
     in property <bool> editing;
+    always-on-top: root.topmost-window;
     title: root.editing ? "编辑项目" : "添加项目";
     preferred-width: 520px; preferred-height: 650px;
     min-width: 460px; min-height: 480px;
@@ -893,7 +894,11 @@ export component EditorWindow inherits AppWindow {
                         }
                         HorizontalLayout { spacing: 12px; alignment: start;
                             Text { width: 64px; text: "图标"; color: Palette.foreground; vertical-alignment: center; }
-                            Image { width: 40px; height: 40px; source: root.entry-icon.width > 0 ? root.entry-icon : @image-url("icons/file.svg"); }
+                            Image {
+                                width: 40px; height: 40px;
+                                source: root.entry-icon.width > 0 ? root.entry-icon : root.kind == 2 ? @image-url("icons/folder.svg") : root.kind == 3 ? @image-url("icons/web.svg") : root.kind == 1 ? @image-url("icons/file.svg") : root.kind == 5 ? @image-url("icons/app.svg") : @image-url("icons/program.svg");
+                                colorize: root.entry-icon.width > 0 ? #0000 : (root.kind == 2 ? #b68422 : root.kind == 3 ? #278879 : root.kind == 5 ? #8065b9 : Palette.accent-background);
+                            }
                             Button { text: "选择图标"; clicked => { root.browse-icon(); } }
                             Button { text: root.kind == 3 ? "提取网页图标" : root.kind == 5 ? "提取应用图标" : "从目标提取"; clicked => { root.reset-icon(); } }
                         }
@@ -1022,6 +1027,8 @@ export component SettingsWindow inherits AppWindow {
     in property <string> rust-version;
     in property <bool> composing;
     in-out property <bool> window-active <=> root.frame-active;
+    in-out property <bool> topmost-window;
+    always-on-top: root.topmost-window;
     title: "设置 · Raptim";
     preferred-width: 660px; preferred-height: 480px;
     min-width: 580px; min-height: 400px;

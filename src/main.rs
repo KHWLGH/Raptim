@@ -20,37 +20,35 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+mod app_editor;
+mod app_events;
+mod app_input;
 mod app_session;
+mod app_settings;
+mod app_tools;
 mod ui_commands;
 
-struct EditorSession {
-    _drop: Option<platform::drop_target::Registration>,
-    drop_failed: bool,
-    generation: u64,
-    window: EditorWindow,
-    original: Entry,
-    icon: Vec<u8>,
-    icon_attempted: bool,
-    collections: Vec<i64>,
-}
+use app_editor::{EditorSession, open_editor};
+use app_events::{AppEvent, DialogKind, EventSink};
+use app_input::{bind_main_input, install_keys, install_settings_keys};
+use app_settings::Deferred;
+use app_tools::BrokenEntry;
+
 #[derive(Clone, Copy)]
 struct DraggedEntry(i64);
 #[derive(Clone, Copy)]
 struct DraggedCollection(i64);
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct BrokenEntry {
-    id: i64,
-    name: String,
-    target: String,
-    reason: String,
-    relocatable: bool,
-}
+
 fn dragged_id(data: &slint::DataTransfer) -> Option<i64> {
     data.user_data()?
         .downcast_ref::<DraggedEntry>()
         .map(|v| v.0)
 }
+
 struct App {
+    events: EventSink,
+    events_rx: std::sync::mpsc::Receiver<AppEvent>,
     protection_resume: raptim::session::ProtectionResume,
     editor_generation: u64,
     batch_expanded: std::collections::HashSet<i64>,
@@ -139,6 +137,7 @@ struct App {
     discovered_checked: Vec<bool>,
     broken_items: Vec<BrokenEntry>,
 }
+
 fn strings(values: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
     Rc::new(VecModel::from(
         values
@@ -148,6 +147,7 @@ fn strings(values: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
     ))
     .into()
 }
+
 /// Everything a row displays except the icon, which the icon cache owns separately.
 type ItemSignature = (
     i32,
@@ -158,6 +158,7 @@ type ItemSignature = (
     SharedString,
     i32,
 );
+
 fn item_signatures(items: &[Item]) -> Vec<ItemSignature> {
     items
         .iter()
@@ -174,11 +175,55 @@ fn item_signatures(items: &[Item]) -> Vec<ItemSignature> {
         })
         .collect()
 }
+
 impl App {
     fn wants_topmost(&self) -> bool {
         self.policy.protection() == Protection::Normal
             && (self.saved_window.always_on_top || self.main.get_pinned())
     }
+
+    fn child_topmost(&self) -> bool {
+        platform::is_topmost(self.main.window()) || self.wants_topmost()
+    }
+
+    fn apply_main_topmost(&self, enabled: bool) {
+        platform::topmost(self.main.window(), enabled);
+        self.sync_child_layering();
+    }
+
+    fn sync_child_layering(&self) {
+        let main_topmost = platform::is_topmost(self.main.window());
+        if let Some(ui) = self.settings_ui.get()
+            && ui.window().is_visible()
+        {
+            ui.set_topmost_window(main_topmost);
+            platform::set_owner(ui.window(), self.main.window());
+        }
+        if let Some(editor) = &self.editor
+            && editor.window.window().is_visible()
+        {
+            editor.window.set_topmost_window(main_topmost);
+            platform::set_owner(editor.window.window(), self.main.window());
+        }
+    }
+
+    fn show_child_window(
+        &self,
+        child: &slint::Window,
+    ) -> std::result::Result<(), slint::PlatformError> {
+        let weak = self.weak_self.clone();
+        let sink = self.events.clone();
+        windowing::show_child_with(child, self.main.window(), move || {
+            if let Some(app) = weak.upgrade()
+                && let Ok(s) = app.try_borrow()
+            {
+                s.apply_theme();
+            } else {
+                sink.send(AppEvent::ThemeChanged);
+            }
+        })
+    }
+
     fn auto_hide_guard(&self) -> raptim::policy::AutoHideGuard {
         raptim::policy::AutoHideGuard {
             editor: self
@@ -198,12 +243,14 @@ impl App {
                 || windowing::has_popup(self.main.window()),
         }
     }
+
     fn dock_overhang_for(&self, edge: raptim::docking::Edge) -> i32 {
         match self.dock_overhang {
             Some((applied, pad)) if applied == edge => pad,
             _ => 0,
         }
     }
+
     fn sync_dock_overhang(&mut self) {
         let scale = self.main.window().scale_factor();
         let wanted = if self.settings.edge_hide {
@@ -265,6 +312,7 @@ impl App {
             platform::request_redraw_now(self.main.window());
         }
     }
+
     fn edge_strip_px(&self) -> i32 {
         if self.settings.edge_strip_visible {
             self.settings.edge_strip_width_px as i32
@@ -272,12 +320,14 @@ impl App {
             0
         }
     }
+
     fn sync_edge_ui(&self) {
         let scale = self.main.window().scale_factor().max(0.5);
         self.main.set_edge_progress(self.edge_progress);
         self.main
             .set_edge_strip_size(self.edge_strip_px() as f32 / scale);
     }
+
     fn apply_theme(&self) {
         let mode = self.settings.theme_mode;
         let changed = platform::apply_window_theme(self.main.window(), mode, false);
@@ -288,6 +338,7 @@ impl App {
             platform::apply_window_theme(editor.window.window(), mode, changed);
         }
     }
+
     fn sync_edge_appearance(&self) {
         self.sync_edge_ui();
         let appearance = raptim::docking::collapsed_appearance(
@@ -299,6 +350,7 @@ impl App {
         );
         platform::set_collapsed_appearance(self.main.window(), appearance);
     }
+
     /// Appearance only: un-fade and slide the window back to its docked rectangle. Refuses to
     /// touch the window while any protection holds, so a background tick can never reveal it.
     fn reveal_edge(&mut self) {
@@ -328,9 +380,10 @@ impl App {
             platform::decorate(self.main.window());
             windowing::invalidate(self.main.window());
             self.apply_theme();
-            platform::topmost(self.main.window(), self.wants_topmost());
+            self.apply_main_topmost(self.wants_topmost());
         }
     }
+
     /// A user-initiated summon. Clearing `protected_edge_waiting` means "the collapsed recovery
     /// state is consumed", which only this path is allowed to decide.
     fn user_summon_edge(&mut self) {
@@ -338,6 +391,7 @@ impl App {
         self.reveal_edge();
         self.edge_since = Instant::now();
     }
+
     /// Deterministic collapsed state, used when protection interrupts an in-flight slide.
     fn settle_edge_hidden(&mut self) {
         self.edge_motion = None;
@@ -346,16 +400,19 @@ impl App {
         self.edge_hold.clear();
         self.sync_edge_appearance();
     }
+
     /// Applies the current temporary pin, then refreshes the tray check marks.
     fn apply_pin(&mut self) {
         self.user_summon_edge();
-        platform::topmost(self.main.window(), self.wants_topmost());
+        self.apply_main_topmost(self.wants_topmost());
         self.sync_tray_states();
     }
+
     fn sync_tray_states(&self) {
         self.tray
             .set_states(self.main.get_pinned(), self.policy.bypass());
     }
+
     /// Manual override for one run only: the hotkey, tray and edge entries obey it, and it is
     /// never written to the database so a launcher cannot be left invisible over a game.
     fn toggle_protection_bypass(&mut self) {
@@ -369,6 +426,7 @@ impl App {
             "已恢复游戏勿扰判定"
         });
     }
+
     fn animate_edge(&mut self, hidden: bool) {
         if self.policy.protection() != Protection::Normal {
             self.settle_edge_hidden();
@@ -376,6 +434,9 @@ impl App {
         }
         if hidden {
             self.edge_hold.clear();
+        } else {
+            self.focus_hide.reset();
+            platform::set_opacity(self.main.window(), 1.);
         }
         self.protected_edge_waiting = false;
         if self.edge_hidden == hidden && self.edge_motion.is_some() {
@@ -400,8 +461,9 @@ impl App {
         }
         // Keep the same z-order throughout the slide; restore the user's level
         // only once the reveal has settled.
-        platform::topmost(self.main.window(), true);
+        self.apply_main_topmost(true);
     }
+
     fn tick_window(&mut self, advance_motion: bool) {
         let now = Instant::now();
         // This guard has to stay first: it is what releases a drag when the window hides or
@@ -458,6 +520,7 @@ impl App {
             }
             self.search_was_open = self.main.get_search_open();
             self.render_search();
+            self.update_visible_icons();
         }
         let cursor = platform::cursor();
         if self.edge_progress == 0.
@@ -545,8 +608,6 @@ impl App {
             }
         }
         let paused = (!self.protected_edge_waiting && self.auto_hide_guard().paused())
-            // Ordered so the collapsed state (edge_progress == 1.) short-circuits before the
-            // GetAsyncKeyState and GetWindowRect round-trips, which it can never use.
             || (self.edge_progress == 0.
                 && platform::mouse_down()
                 && platform::geometry(self.main.window())
@@ -606,8 +667,6 @@ impl App {
                         now,
                     );
                 if pointer_inside || holding || self.edge_motion.is_some() {
-                    // Stay open while the pointer is inside, an explicit summon holds focus,
-                    // or a reveal slide is still finishing.
                     self.edge_since = now;
                 } else if self.edge_since.elapsed()
                     >= Duration::from_millis(u64::from(self.settings.edge_collapse_delay_ms))
@@ -639,11 +698,13 @@ impl App {
                     self.edge_motion = None;
                     if !self.edge_hidden {
                         platform::finish_edge_motion(self.main.window());
-                        platform::topmost(self.main.window(), self.wants_topmost());
+                        self.apply_main_topmost(self.wants_topmost());
                     }
                 }
                 self.sync_edge_appearance();
-                if self.edge_progress > 0.60 || done {
+                if done && !self.edge_hidden {
+                    windowing::invalidate(self.main.window());
+                } else if self.edge_progress > 0.60 || done {
                     platform::request_redraw_now(self.main.window());
                 }
             }
@@ -662,15 +723,10 @@ impl App {
             }
         }
     }
+
     /// Cursor distance from the reveal band beyond which the collapsed poll drops to half rate.
     const APPROACH_MARGIN_PX: i32 = 96;
-    /// A docked launcher spends almost all of its life collapsed, so the interaction timer lands
-    /// here on nearly every tick. This does only what that state needs; everything else
-    /// `tick_window` checks is covered by an event instead — focus changes arrive as winit Focused
-    /// (native event 8), an external move as Moved (event 10), and a display change moves the
-    /// window and so also reaches event 10. A reveal runs on the frame clock, whose first frame is
-    /// a full tick, so the dock rectangle is re-clamped before the window reaches the screen.
-    /// Returns false when this is not the collapsed steady state and a full tick is required.
+
     fn collapsed_probe(&mut self) -> bool {
         self.collapsed_far = false;
         let (Some((edge, rect)), true) = (self.dock, self.edge_hidden) else {
@@ -712,87 +768,50 @@ impl App {
         true
     }
 
-    fn convert_editor_path(&mut self, relative: bool) {
-        let Some(entry) = self.editor_draft() else {
-            return;
-        };
-        match raptim::paths::convert_target(&entry.target, &self.data_dir, relative) {
-            Ok(target) => {
-                if let Some(session) = &self.editor {
-                    session.window.set_target(target.value().into());
-                    if let Target::Program { working_dir, .. } = target {
-                        session.window.set_working_dir(working_dir.into());
-                    }
-                    session.window.set_error("".into());
-                }
-            }
-            Err(e) => {
-                if let Some(session) = &self.editor {
-                    session.window.set_error(e.to_string().into());
-                }
-            }
-        }
-    }
-    fn extract_editor_icon(&mut self) {
-        let Some(session) = &mut self.editor else {
-            return;
-        };
-        let kind = session.window.get_kind();
-        session.icon_attempted = true;
-        let requested_target = session.window.get_target().to_string();
-        // The lookup only ever needs the target string, so the path kinds share one variant here.
-        let value = requested_target.trim().trim_matches('"').to_string();
-        let target = match kind {
-            3 => Target::Url {
-                url: normalize_url(&value).unwrap_or(value),
-            },
-            5 => Target::App { aumid: value },
-            _ => Target::File { path: value },
-        };
-        self.icon_epoch += 1;
-        self.icon_pending = true;
-        let epoch = self.icon_epoch;
-        let base = self.data_dir.clone();
-        let weak = self.main.as_weak();
-        std::thread::spawn(move || {
-            let icon = platform::icon_for(&target, &base);
-            let value = serde_json::to_string(&(epoch, requested_target, icon)).unwrap();
-            let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_icon_ready(value.into()));
-        });
-    }
     /// Fill the icons of entries that have none. Every lookup blocks — a Shell call or a favicon
     /// fetch — so the work goes to a background thread and lands in batches.
     fn fill_icons(&self, wanted: Vec<(i64, Target)>) {
+        let wanted = wanted
+            .into_iter()
+            .map(|(id, target)| (id, target, None))
+            .collect();
+        self.fill_icons_with_sources(wanted);
+    }
+
+    fn fill_icons_with_sources(&self, wanted: Vec<(i64, Target, Option<PathBuf>)>) {
         if wanted.is_empty() {
             return;
         }
         let base = self.data_dir.clone();
         let epoch = self.data_epoch;
-        let weak = self.main.as_weak();
+        let sink = self.events.clone();
         std::thread::spawn(move || {
             let mut batch = Vec::new();
-            for (id, target) in wanted {
-                let icon = platform::icon_for(&target, &base);
+            for (id, target, source) in wanted {
+                let icon = source
+                    .as_deref()
+                    .map(platform::shell_icon)
+                    .filter(|bytes| !bytes.is_empty())
+                    .unwrap_or_else(|| platform::icon_for(&target, &base));
                 if !icon.is_empty() {
                     batch.push((id, target.duplicate_key(), icon));
                 }
                 if batch.len() >= 16 {
-                    let value =
-                        serde_json::to_string(&(epoch, std::mem::take(&mut batch))).unwrap();
-                    if weak
-                        .upgrade_in_event_loop(move |ui| ui.invoke_icons_ready(value.into()))
-                        .is_err()
-                    {
-                        return;
-                    }
+                    sink.send(AppEvent::BatchIconsReady {
+                        epoch,
+                        icons: std::mem::take(&mut batch),
+                    });
                 }
             }
             if !batch.is_empty() {
-                let value = serde_json::to_string(&(epoch, batch)).unwrap();
-                let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_icons_ready(value.into()));
+                sink.send(AppEvent::BatchIconsReady {
+                    epoch,
+                    icons: batch,
+                });
             }
         });
     }
+
     fn status(&self, text: impl ToString) {
         let text = text.to_string();
         if self.policy.protection() != Protection::Normal {
@@ -801,30 +820,35 @@ impl App {
         }
         self.main.set_status(text.into());
     }
+
     fn refresh(&mut self) -> Result<()> {
-        if let Some(initial) = self.initial.take() {
+        let rehashed: std::collections::HashSet<i64> = if let Some(initial) = self.initial.take() {
             self.collections = initial.collections;
             self.entries = initial.entries;
+            self.entries.iter().map(|e| e.id).collect()
         } else {
-            self.store.ensure_categories()?;
             self.collections = self.store.collections()?;
-            self.entries = self.store.entries()?;
-        }
+            let (entries, rehashed) = self.store.entries_reusing_icons(&self.entries)?;
+            self.entries = entries;
+            rehashed
+        };
         self.search_index.sync(&self.entries);
         let ids: std::collections::HashSet<_> = self.entries.iter().map(|e| e.id).collect();
         self.icon_cache.retain(&ids);
+        let prev_index = std::mem::take(&mut self.icon_index);
         self.icon_index = self
             .entries
             .iter()
             .enumerate()
             .map(|(index, e)| {
-                (
-                    e.id,
-                    raptim::icons::IconKey {
-                        fingerprint: raptim::icons::fingerprint(&e.icon),
-                        index,
-                    },
-                )
+                let fingerprint = if !rehashed.contains(&e.id)
+                    && let Some(prev) = prev_index.get(&e.id)
+                {
+                    prev.fingerprint
+                } else {
+                    raptim::icons::fingerprint(&e.icon)
+                };
+                (e.id, raptim::icons::IconKey { fingerprint, index })
             })
             .collect();
         self.eligible = None;
@@ -844,6 +868,7 @@ impl App {
             .collect();
         self.rebuild_navigation()
     }
+
     fn rebuild_navigation(&mut self) -> Result<()> {
         if !self
             .collections
@@ -909,9 +934,11 @@ impl App {
         self.restore_view();
         Ok(())
     }
+
     fn collection_name(&self, id: i64) -> SharedString {
         self.collection_names.get(&id).cloned().unwrap_or_default()
     }
+
     fn render_items(&mut self) {
         let items: Vec<_> = self
             .entries
@@ -932,6 +959,7 @@ impl App {
         self.update_visible_icons();
         self.main.window().request_redraw();
     }
+
     fn display_item(&self, e: &Entry, search: bool) -> Item {
         Item {
             drag_icon: if self.visible_icons.contains(&e.id) {
@@ -957,6 +985,7 @@ impl App {
             kind: e.target.kind_index(),
         }
     }
+
     fn render_search(&mut self) {
         let scope = self.main.get_search_scope();
         let scope_key = (scope, self.group, self.collection);
@@ -1013,6 +1042,7 @@ impl App {
             self.icon_bands.clear();
         }
     }
+
     fn evaluate(&mut self) {
         let mut signals = platform::collect_signals(&self.settings, &mut self.protection_cache);
         signals.auxiliary_open = self.auto_hide_guard().auxiliary_open();
@@ -1021,14 +1051,14 @@ impl App {
         self.apply_protection(decide(signals), Instant::now(), hold);
         self.last_evaluated = Instant::now();
     }
-    /// Win-event and display broadcasts are only hints that something may have changed, and a
-    /// fullscreen video can deliver them far faster than a shell query costs.
+
     fn evaluate_suggested(&mut self) {
         if self.last_evaluated.elapsed() < Duration::from_millis(120) {
             return;
         }
         self.evaluate();
     }
+
     fn apply_protection(&mut self, signal: Protection, now: Instant, hold: bool) {
         let previous = self.policy.protection();
         let changed = self.policy.update(signal, now, hold);
@@ -1070,7 +1100,6 @@ impl App {
             && previous != Protection::Normal
             && self.policy.protection() == Protection::Normal
         {
-            // Strict -> Fullscreen is a de-escalation but still not a moment to show anything.
             self.restore_protected_edge();
             let deferred = self.notices.borrow_mut().take();
             if !deferred.is_empty() {
@@ -1078,13 +1107,12 @@ impl App {
             }
         }
     }
+
     fn allowed(&mut self, source: ShowSource) -> bool {
         let ticket = self.policy.ticket();
         self.evaluate();
         let allowed = self.policy.allows(source, ticket);
         if !allowed {
-            // Release builds discard stderr, so the block reason has to reach the log to be
-            // diagnosable at all.
             raptim::diagnostics::protection(
                 "blocked",
                 &format!("{source:?}"),
@@ -1094,6 +1122,7 @@ impl App {
         }
         allowed
     }
+
     fn dismiss_search_state(&mut self) {
         if !self.main.get_search_open() {
             return;
@@ -1102,8 +1131,10 @@ impl App {
         self.main.set_query("".into());
         self.search_was_open = false;
         self.render_search();
+        self.update_visible_icons();
         self.main.invoke_restore_grid_focus();
     }
+
     fn hide_all(&mut self) {
         self.protected_edge_waiting = false;
         self.protection_resume.cancel();
@@ -1111,6 +1142,7 @@ impl App {
         self.dismiss_search_state();
         self.hide_windows();
     }
+
     fn hide_windows(&mut self) {
         self.save_window(true);
         self.edge_hold.clear();
@@ -1129,18 +1161,24 @@ impl App {
         platform::topmost(self.main.window(), false);
         if let Some(ui) = self.settings_ui.get() {
             let _ = ui.hide();
+            ui.set_topmost_window(false);
+            platform::topmost(ui.window(), false);
         }
         if let Some(editor) = &self.editor {
             windowing::close_popups(editor.window.window());
             let _ = editor.window.hide();
+            editor.window.set_topmost_window(false);
+            platform::topmost(editor.window.window(), false);
         }
-        // Keep exactly the band the first revealed frame paints, drop the LRU tail the user
-        // scrolled past. Nothing re-decodes on the way back in, so the reveal stays one frame.
-        // A hide right after a search toggle flushes everything instead: render_search clears
-        // visible_icons without repopulating it.
+        // Keep the current viewport band hot in cache so re-summoning paints complete icons on the
+        // very first frame. If a preceding search update cleared `visible_icons`, repopulate it first.
+        if self.visible_icons.is_empty() {
+            self.update_visible_icons();
+        }
         self.icon_cache.retain(&self.visible_icons);
         self.main.invoke_close_popups();
     }
+
     fn show_main(&mut self, source: ShowSource) {
         let silent = std::mem::take(&mut self.silent_startup);
         if !self.allowed(source) {
@@ -1189,9 +1227,12 @@ impl App {
         let visible_edge = self.main.window().is_visible()
             && self.dock.is_some()
             && (self.edge_progress > 0. || self.edge_motion.is_some());
-        if !self.main.window().is_visible() {
+        if !self.main.window().is_visible()
+            || (platform::native_ready(self.main.window())
+                && !platform::is_native_visible(self.main.window()))
+        {
             if platform::native_ready(self.main.window()) {
-                platform::topmost(self.main.window(), self.wants_topmost());
+                self.apply_main_topmost(self.wants_topmost());
             }
             if let Err(e) = windowing::show(self.main.window()) {
                 self.status(e);
@@ -1204,13 +1245,11 @@ impl App {
             self.edge_since = Instant::now();
         } else {
             self.user_summon_edge();
+            windowing::invalidate(self.main.window());
         }
         self.schedule_interaction();
         platform::launcher_window(self.main.window());
-        platform::topmost(
-            self.main.window(),
-            self.edge_motion.is_some() || self.wants_topmost(),
-        );
+        self.apply_main_topmost(self.edge_motion.is_some() || self.wants_topmost());
         platform::focus(self.main.window());
         self.focus_hide.reset();
         if self.dock.is_some() && self.settings.edge_hide && !self.edge_hidden {
@@ -1218,292 +1257,24 @@ impl App {
                 .arm(Instant::now(), platform::app_has_focus());
         }
         if self.settings_open {
-            let _ = windowing::show_child(self.settings_ui.window(), self.main.window());
+            self.settings_ui.set_topmost_window(self.child_topmost());
+            let _ = self.show_child_window(self.settings_ui.window());
         }
         if let Some(editor) = &self.editor {
-            let _ = windowing::show_child(editor.window.window(), self.main.window());
+            editor.window.set_topmost_window(self.child_topmost());
+            let _ = self.show_child_window(editor.window.window());
         }
         self.apply_theme();
     }
-    fn show_settings(&mut self) {
-        if !self.allowed(ShowSource::Settings) {
-            return;
-        }
-        self.user_summon_edge();
-        if self.settings_ui.get().is_none() {
-            match create_settings(
-                &self.weak_self.upgrade().expect("live application"),
-                self.main.as_weak(),
-                &self.data_dir,
-            ) {
-                Ok(ui) => {
-                    let _ = self.settings_ui.0.set(ui);
-                }
-                Err(e) => {
-                    self.status(e);
-                    return;
-                }
-            }
-        }
-        self.sync_settings_ui();
-        self.show_main(ShowSource::Settings);
-        self.settings_open = true;
-        if let Err(error) = windowing::show_child(self.settings_ui.window(), self.main.window()) {
-            self.settings_open = false;
-            self.status(error);
-        } else {
-            self.apply_theme();
-        }
-    }
-    fn close_settings(&mut self) {
-        self.settings_ui.set_recording_hotkey(false);
-        self.sync_settings_ui();
-        self.focus_hide.reset();
-        self.edge_since = Instant::now();
-        if let Err(error) = windowing::close_child(self.settings_ui.window(), self.main.window()) {
-            self.status(error);
-            return;
-        }
-        self.settings_open = false;
-        self.evaluate();
-    }
-    fn sync_main_settings(&self) {
-        self.main.set_double_click(self.settings.double_click);
-        self.main.set_type_to_search(self.settings.type_to_search);
-        self.main.set_icon_size(i32::from(self.settings.icon_size));
-        self.main.set_list_view(self.settings.list_view);
-        self.main.set_hover_switch(self.settings.hover_switch);
-        self.main
-            .set_hover_delay(self.settings.hover_delay_ms as i32);
-        self.sync_edge_ui();
-        self.tray
-            .set_tooltip(&format!("Raptim · {}", self.settings.hotkey));
-    }
-    fn sync_settings_ui(&self) {
-        self.sync_main_settings();
-        if self.settings_ui.get().is_none() {
-            return;
-        }
-        self.settings_ui
-            .set_hotkey_text(self.settings.hotkey.clone().into());
-        self.settings_ui.set_protected_error("".into());
-        self.settings_ui
-            .set_theme_mode(i32::from(self.settings.theme_mode));
-        self.settings_ui.set_autostart(self.settings.autostart);
-        self.settings_ui.set_autostart_warning(
-            platform::autostart_mismatch(&self.data_dir, self.settings.autostart)
-                .unwrap_or_default()
-                .into(),
-        );
-        self.settings_ui
-            .set_double_click(self.settings.double_click);
-        self.settings_ui
-            .set_type_to_search(self.settings.type_to_search);
-        self.settings_ui.set_edge_hide(self.settings.edge_hide);
-        self.settings_ui
-            .set_keep_topmost(self.saved_window.always_on_top);
-        self.settings_ui
-            .set_edge_strip_visible(self.settings.edge_strip_visible);
-        self.settings_ui
-            .set_edge_strip_width(self.settings.edge_strip_width_px as i32);
-        self.settings_ui
-            .set_edge_collapse_delay(self.settings.edge_collapse_delay_ms as i32);
-        self.settings_ui
-            .set_hide_on_focus_loss(self.settings.hide_on_focus_loss);
-        self.settings_ui
-            .set_hover_switch(self.settings.hover_switch);
-        self.settings_ui
-            .set_hover_delay(self.settings.hover_delay_ms as i32);
-        self.settings_ui
-            .set_relative_paths(self.settings.relative_paths);
-        self.settings_ui
-            .set_hide_after_launch(self.settings.hide_after_launch);
-        self.settings_ui
-            .set_protection_log(self.settings.protection_log);
-        self.settings_ui.set_protection_bypass(self.policy.bypass());
-        self.settings_ui
-            .set_fullscreen_protection(self.settings.fullscreen_protection);
-        self.settings_ui
-            .set_protected_apps(strings(self.settings.protected_apps.clone()));
-        self.settings_ui
-            .set_has_error_log(raptim::diagnostics::error_log_path().is_some_and(|p| p.exists()));
-    }
-    fn settings_value(&self) -> Settings {
-        let mut draft = self.settings.clone();
-        draft.hotkey = self.settings_ui.get_hotkey_text().to_string();
-        draft.theme_mode = self.settings_ui.get_theme_mode().clamp(0, 2) as u8;
-        draft.autostart = self.settings_ui.get_autostart();
-        draft.double_click = self.settings_ui.get_double_click();
-        draft.type_to_search = self.settings_ui.get_type_to_search();
-        draft.edge_hide = self.settings_ui.get_edge_hide();
-        draft.edge_strip_visible = self.settings_ui.get_edge_strip_visible();
-        draft.edge_strip_width_px = self.settings_ui.get_edge_strip_width() as u32;
-        draft.edge_collapse_delay_ms = self.settings_ui.get_edge_collapse_delay() as u32;
-        draft.hide_on_focus_loss = self.settings_ui.get_hide_on_focus_loss();
-        draft.hover_switch = self.settings_ui.get_hover_switch();
-        draft.hover_delay_ms = self.settings_ui.get_hover_delay() as u32;
-        draft.relative_paths = self.settings_ui.get_relative_paths();
-        draft.hide_after_launch = self.settings_ui.get_hide_after_launch();
-        draft.fullscreen_protection = self.settings_ui.get_fullscreen_protection();
-        draft.protection_log = self.settings_ui.get_protection_log();
-        draft.protected_apps = self
-            .settings_ui
-            .get_protected_apps()
-            .iter()
-            .map(|path| path.trim().trim_matches('"').to_string())
-            .filter(|path| !path.is_empty())
-            .collect();
-        draft
-    }
-    fn apply_settings(&mut self, field: i32) {
-        if field == 3 {
-            self.save_window(true);
-            let mut state = self.saved_window.clone();
-            state.always_on_top = self.settings_ui.get_keep_topmost();
-            match self.store.save_window_state(&state) {
-                Ok(()) => {
-                    self.saved_window = state;
-                    self.window_candidate = None;
-                    platform::topmost(
-                        self.main.window(),
-                        self.wants_topmost()
-                            || (self.policy.protection() == Protection::Normal && self.edge_hidden),
-                    );
-                    self.settings_ui.set_status("".into());
-                }
-                Err(e) => {
-                    self.settings_ui
-                        .set_keep_topmost(self.saved_window.always_on_top);
-                    self.settings_ui.set_status(e.to_string().into());
-                }
-            }
-            return;
-        }
-        let draft = self.settings_value();
-        if let Err(e) = raptim::storage::validate_settings(&draft) {
-            if field == 1 {
-                // Roll the list back so an invalid entry cannot leak into the
-                // next settings_value read from another field's apply.
-                self.settings_ui
-                    .set_protected_apps(strings(self.settings.protected_apps.clone()));
-                self.settings_ui.set_protected_error(e.to_string().into());
-            } else {
-                self.settings_ui.set_status(e.to_string().into());
-            }
-            return;
-        }
-        if field == 1 {
-            self.settings_ui.set_protected_error("".into());
-        }
-        if draft == self.settings {
-            self.settings_ui.set_status("".into());
-            return;
-        }
-        if draft.hotkey != self.settings.hotkey
-            && let Err(error) = self
-                .hotkey
-                .configure(&draft.hotkey, self.policy.hotkey_enabled())
-        {
-            self.settings_ui
-                .set_hotkey_text(self.settings.hotkey.clone().into());
-            self.settings_ui.set_hotkey_error(error.into());
-            return;
-        }
-        if draft.autostart != self.settings.autostart
-            && let Err(e) = platform::set_autostart(draft.autostart, &self.data_dir)
-        {
-            self.sync_settings_ui();
-            self.settings_ui.set_status(e.into());
-            return;
-        }
-        match self.store.save_settings(&draft) {
-            Ok(()) => {
-                self.user_summon_edge();
-                if !draft.edge_hide {
-                    self.protection_resume.cancel();
-                    self.dock = None;
-                    self.edge_hold.clear();
-                }
-                self.settings = draft;
-                self.sync_dock_overhang();
-                if !self.settings.edge_hide {
-                    platform::decorate(self.main.window());
-                }
-                raptim::diagnostics::set_protection_log(self.settings.protection_log);
-                self.settings_ui.set_hotkey_error("".into());
-                self.settings_ui.set_autostart_warning(
-                    platform::autostart_mismatch(&self.data_dir, self.settings.autostart)
-                        .unwrap_or_default()
-                        .into(),
-                );
-                self.sync_main_settings();
-                self.apply_theme();
-                self.settings_ui.set_status("".into());
-                self.evaluate();
-            }
-            Err(e) => {
-                if draft.hotkey != self.settings.hotkey {
-                    let _ = self
-                        .hotkey
-                        .configure(&self.settings.hotkey, self.policy.hotkey_enabled());
-                }
-                if draft.autostart != self.settings.autostart {
-                    let _ = platform::set_autostart(self.settings.autostart, &self.data_dir);
-                }
-                self.sync_settings_ui();
-                self.settings_ui.set_status(e.to_string().into());
-            }
-        }
-    }
-    fn add_protected_app(&mut self, path: String) {
-        let normalize = |path: &str| -> String {
-            path.trim()
-                .trim_matches('"')
-                .replace('/', "\\")
-                .to_lowercase()
-        };
-        let path = path.trim().trim_matches('"').to_string();
-        if path.is_empty() {
-            return;
-        }
-        if self
-            .settings
-            .protected_apps
-            .iter()
-            .any(|existing| normalize(existing) == normalize(&path))
-        {
-            self.settings_ui
-                .set_protected_error("该程序已在保护列表中".into());
-            return;
-        }
-        if self.settings.protected_apps.len() >= 100 {
-            self.settings_ui
-                .set_protected_error("严格保护程序最多 100 项".into());
-            return;
-        }
-        let mut list = self.settings.protected_apps.clone();
-        list.push(path);
-        self.settings_ui.set_protected_apps(strings(list));
-        self.apply_settings(1);
-    }
-    fn remove_protected(&mut self, index: i32) {
-        if index < 0 {
-            return;
-        }
-        let mut list = self.settings.protected_apps.clone();
-        if (index as usize) >= list.len() {
-            return;
-        }
-        list.remove(index as usize);
-        self.settings_ui.set_protected_apps(strings(list));
-        self.apply_settings(1);
-    }
+
     fn launch_elevated(&mut self, id: i64) {
         self.launch_with_elevation(id, true);
     }
+
     fn launch(&mut self, id: i64) {
         self.launch_with_elevation(id, false);
     }
+
     fn launch_with_elevation(&mut self, id: i64, elevated: bool) {
         if self.main.get_busy() || !self.allowed(ShowSource::Hotkey) {
             return;
@@ -1542,7 +1313,7 @@ impl App {
         }
         self.main.set_busy(true);
         self.main.set_status("".into());
-        let weak = self.main.as_weak();
+        let sink = self.events.clone();
         let settings = self.settings.clone();
         std::thread::spawn(move || {
             let failure = if platform::protection(&settings) == Protection::Normal {
@@ -1558,231 +1329,10 @@ impl App {
                     relocatable: false,
                 })
             };
-            // An empty payload still means success, matching the previous callback contract.
-            let payload = failure
-                .map(|failure| serde_json::to_string(&failure).unwrap_or_default())
-                .unwrap_or_default();
-            let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_launch_finished(payload.into()));
+            sink.send(AppEvent::LaunchFinished(failure));
         });
     }
-    /// Arms the in-window relocate panel. Returns false when the target has no path to
-    /// re-point, so callers can fall back to a plain status message.
-    fn show_relocate(&mut self, id: i64, message: &str, error_relocatable: bool) -> bool {
-        let Some(entry) = self.entries.iter().find(|e| e.id == id) else {
-            return false;
-        };
-        // Two independent questions, and the shipped build asked only one of them. Does this class
-        // of failure mean "the path we hold does not resolve" — as opposed to a declined elevation,
-        // a refused permission or an unclassified system error? And does this target have a path to
-        // re-point at all?
-        if !error_relocatable || !entry.target.relocatable() {
-            return false;
-        }
-        self.relocate_pending = id;
-        self.main.set_relocate_name(entry.name.clone().into());
-        self.main.set_relocate_target(entry.target.value().into());
-        self.main.set_relocate_message(message.into());
-        self.main.set_relocate_open(true);
-        true
-    }
-    fn begin_relocate(&mut self) {
-        if self.relocate_pending == 0 {
-            return;
-        }
-        self.dialog(7);
-    }
-    fn apply_relocate(&mut self, value: String) -> Result<()> {
-        let id = self.relocate_pending;
-        let Some(original) = self.entries.iter().find(|e| e.id == id).cloned() else {
-            self.relocate_pending = 0;
-            return Ok(());
-        };
-        let mut updated = original.clone();
-        updated.target = original.target.with_path(&value)?;
-        // The embedded icon was extracted from the target this entry used to point at.
-        updated.icon = Vec::new();
-        self.store.update_targets_checked(&[updated], &[original])?;
-        self.relocate_pending = 0;
-        self.main.set_relocate_open(false);
-        self.broken_items.retain(|item| item.id != id);
-        if self.main.get_broken_open() {
-            self.sync_broken_ui();
-        }
-        self.report_refresh();
-        Ok(())
-    }
-    fn editor_draft(&self) -> Option<Entry> {
-        let session = self.editor.as_ref()?;
-        let ui = &session.window;
-        let value = ui.get_target().trim().trim_matches('"').to_string();
-        let target = match ui.get_kind() {
-            0 => Target::Program {
-                path: value,
-                arguments: ui.get_arguments().to_string(),
-                working_dir: ui.get_working_dir().trim().trim_matches('"').into(),
-                elevated: ui.get_elevated(),
-                show: ShowMode::from_index(ui.get_show_mode()),
-            },
-            1 => Target::File { path: value },
-            2 => Target::Folder { path: value },
-            3 => Target::Url {
-                url: normalize_url(&value).unwrap_or(value),
-            },
-            4 => Target::Shortcut {
-                path: value,
-                show: ShowMode::from_index(ui.get_show_mode()),
-            },
-            _ => Target::App { aumid: value },
-        };
-        Some(Entry {
-            icon: session.icon.clone(),
-            id: session.original.id,
-            position: session.original.position,
-            collection_id: *session
-                .collections
-                .iter()
-                .find(|id| **id == i64::from(ui.get_collection_id()))?,
-            name: ui.get_entry_name().trim().into(),
-            aliases: ui.get_aliases().to_string(),
-            notes: ui.get_notes().to_string(),
-            target,
-        })
-    }
-    fn editor_dirty(&self) -> bool {
-        self.editor
-            .as_ref()
-            .is_some_and(|e| self.editor_draft().as_ref() != Some(&e.original))
-    }
-    fn save_editor(&mut self) {
-        if self.icon_pending {
-            if let Some(e) = &self.editor {
-                e.window.set_error("正在读取图标，请稍候保存".into());
-            }
-            return;
-        }
-        if self.file_dialog_open {
-            return;
-        }
-        let Some(mut entry) = self.editor_draft() else {
-            return;
-        };
-        if entry.id == 0
-            && self.settings.relative_paths
-            && let Ok(target) = raptim::paths::convert_target(&entry.target, &self.data_dir, true)
-        {
-            entry.target = target;
-        }
-        if let Err(e) = entry.validate() {
-            if let Some(session) = &self.editor {
-                session.window.set_error(e.to_string().into());
-            }
-            return;
-        }
-        let fetch_url_icon = matches!(entry.target, Target::Url { .. })
-            && self
-                .editor
-                .as_ref()
-                .is_some_and(|session| !session.icon_attempted && session.icon.is_empty());
-        if !fetch_url_icon
-            && self
-                .editor
-                .as_ref()
-                .is_some_and(|session| !session.icon_attempted && session.icon.is_empty())
-        {
-            self.saving_editor = true;
-            if let Some(session) = &self.editor {
-                session.window.set_saving(true);
-            }
-            self.extract_editor_icon();
-            return;
-        }
-        match self.store.save_entry(&entry) {
-            Ok(saved_id) => {
-                let target = entry.target.clone();
-                self.drop_editor();
-                self.report_refresh();
-                if fetch_url_icon {
-                    self.fill_icons(vec![(saved_id, target)]);
-                }
-                if self.quitting {
-                    self.request_quit();
-                }
-            }
-            Err(e) => {
-                if let Some(session) = &self.editor {
-                    session.window.set_error(e.to_string().into());
-                }
-            }
-        }
-    }
-    fn cancel_editor(&mut self) {
-        if self.saving_editor {
-            self.saving_editor = false;
-            self.icon_epoch += 1;
-            self.icon_pending = false;
-            if let Some(session) = &self.editor {
-                session.window.set_saving(false);
-            }
-        }
-        if self.file_dialog_open {
-            return;
-        }
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|session| session.window.get_discard_confirm())
-        {
-            if let Some(session) = &self.editor {
-                session.window.set_discard_confirm(false);
-                session.window.invoke_focus_name();
-            }
-            self.quitting = false;
-            return;
-        }
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|session| session.window.get_collection_open())
-        {
-            if let Some(session) = &self.editor {
-                session.window.set_collection_open(false);
-                session.window.invoke_focus_name();
-            }
-            return;
-        }
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|session| session.window.get_picker_open())
-        {
-            self.close_app_picker();
-            return;
-        }
-        if self.editor_dirty() {
-            self.editor
-                .as_ref()
-                .unwrap()
-                .window
-                .set_discard_confirm(true);
-        } else {
-            self.drop_editor();
-            if self.quitting {
-                self.request_quit();
-            }
-        }
-    }
-    fn drop_editor(&mut self) {
-        self.focus_hide.reset();
-        self.edge_since = Instant::now();
-        self.icon_epoch += 1;
-        self.icon_pending = false;
-        self.saving_editor = false;
-        self.editor_generation = self.editor_generation.wrapping_add(1);
-        if let Some(mut session) = self.editor.take() {
-            session._drop.take();
-            let _ = windowing::close_child(session.window.window(), self.main.window());
-        }
-    }
+
     fn request_quit(&mut self) {
         self.protection_resume.cancel();
         self.save_window(true);
@@ -1797,14 +1347,17 @@ impl App {
         self.quitting = true;
         if self.editor_dirty() {
             if self.allowed(ShowSource::Editor) {
+                let topmost = self.child_topmost();
                 let editor = self.editor.as_ref().unwrap();
+                editor.window.set_topmost_window(topmost);
                 editor.window.set_discard_confirm(true);
-                let _ = windowing::show_child(editor.window.window(), self.main.window());
+                let _ = self.show_child_window(editor.window.window());
             }
             return;
         }
         let _ = slint::quit_event_loop();
     }
+
     fn report_refresh(&mut self) {
         if self.main.get_category_id() as i64 == self.collection {
             self.remember_view();
@@ -1813,16 +1366,17 @@ impl App {
             self.status(e);
         }
     }
-    fn dialog(&mut self, kind: i32) {
+
+    fn dialog(&mut self, kind: DialogKind) {
         if self.file_dialog_open || !self.allowed(ShowSource::Settings) {
             return;
         }
         let folder = match kind {
-            0 => self
+            DialogKind::EditorTarget => self
                 .editor
                 .as_ref()
                 .is_some_and(|s| s.window.get_kind() == 2),
-            7 => self.entries.iter().any(|e| {
+            DialogKind::RelocateTarget => self.entries.iter().any(|e| {
                 e.id == self.relocate_pending && matches!(e.target, Target::Folder { .. })
             }),
             _ => false,
@@ -1830,40 +1384,40 @@ impl App {
         self.file_dialog_open = true;
         self.user_summon_edge();
         self.dialog_collection = self.collection;
-        let weak = self.main.as_weak();
+        let sink = self.events.clone();
         std::thread::spawn(move || {
             let dialog = rfd::FileDialog::new();
-            if kind == 5 {
+            if kind == DialogKind::AddFiles {
                 let paths = dialog.pick_files().unwrap_or_default();
-                let value = serde_json::to_string(&paths).unwrap_or_default();
-                let _ = weak
-                    .upgrade_in_event_loop(move |ui| ui.invoke_file_selected(kind, value.into()));
+                sink.send(AppEvent::FilesPicked(paths));
                 return;
             }
             let path = match kind {
-                0 if folder => dialog.pick_folder(),
-                0 => dialog.pick_file(),
-                6 => dialog
+                DialogKind::EditorTarget if folder => dialog.pick_folder(),
+                DialogKind::EditorTarget => dialog.pick_file(),
+                DialogKind::EditorIcon => dialog
                     .add_filter("图标", &["png", "jpg", "jpeg", "ico"])
                     .pick_file(),
-                1 => dialog.add_filter("程序", &["exe"]).pick_file(),
-                2 => dialog
+                DialogKind::ProtectedApp => dialog.add_filter("程序", &["exe"]).pick_file(),
+                DialogKind::ExportJson => dialog
                     .add_filter("Raptim 导出", &["json"])
                     .set_file_name("raptim-export.json")
                     .save_file(),
-                7 if folder => dialog.pick_folder(),
-                7 => dialog.pick_file(),
-                8 => dialog.pick_folder(),
-                _ => dialog.add_filter("Raptim 导出", &["json"]).pick_file(),
+                DialogKind::RelocateTarget if folder => dialog.pick_folder(),
+                DialogKind::RelocateTarget => dialog.pick_file(),
+                DialogKind::EditorWorkingDir => dialog.pick_folder(),
+                DialogKind::RestoreJson | DialogKind::AddFiles => {
+                    dialog.add_filter("Raptim 导出", &["json"]).pick_file()
+                }
             };
             let value = path
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let _ =
-                weak.upgrade_in_event_loop(move |ui| ui.invoke_file_selected(kind, value.into()));
+            sink.send(AppEvent::FileSelected { kind, value });
         });
     }
-    fn file_selected(&mut self, kind: i32, value: String) -> Result<()> {
+
+    fn file_selected(&mut self, kind: DialogKind, value: String) -> Result<()> {
         self.file_dialog_open = false;
         self.focus_hide.reset();
         self.edge_since = Instant::now();
@@ -1872,7 +1426,7 @@ impl App {
         }
         let path = PathBuf::from(&value);
         match kind {
-            6 => {
+            DialogKind::EditorIcon => {
                 let icon = raptim::icons::from_file(&path)?;
                 self.icon_epoch += 1;
                 self.icon_pending = false;
@@ -1881,14 +1435,10 @@ impl App {
                     session.icon = icon;
                 }
             }
-            5 => {
-                let paths: Vec<PathBuf> = serde_json::from_str(&value)?;
-                self.queue_files(paths, self.dialog_collection)?;
-            }
-            0 => {
+            DialogKind::AddFiles => {}
+            DialogKind::EditorTarget => {
                 if let Some(session) = &self.editor {
                     session.window.set_target(value.into());
-
                     if session.window.get_entry_name().is_empty() {
                         session.window.set_entry_name(
                             path.file_stem()
@@ -1922,16 +1472,17 @@ impl App {
                         session.window.set_kind(4);
                     }
                 }
+                self.extract_editor_icon();
             }
-            8 => {
+            DialogKind::EditorWorkingDir => {
                 if let Some(session) = &self.editor {
                     session.window.set_working_dir(value.into());
                 }
             }
-            1 => {
+            DialogKind::ProtectedApp => {
                 self.add_protected_app(value);
             }
-            2 => {
+            DialogKind::ExportJson => {
                 use std::io::Write;
                 let bytes = serde_json::to_vec_pretty(&self.store.export()?)?;
                 let mut file = std::fs::OpenOptions::new()
@@ -1942,8 +1493,8 @@ impl App {
                 file.sync_all()?;
                 self.settings_ui.set_status("已导出".into());
             }
-            7 => self.apply_relocate(value)?,
-            _ => {
+            DialogKind::RelocateTarget => self.apply_relocate(value)?,
+            DialogKind::RestoreJson => {
                 if self.editor.is_some() {
                     return Err(Error::Invalid("请先保存或取消项目编辑".into()));
                 }
@@ -1957,10 +1508,6 @@ impl App {
                 }
                 let data: Export = serde_json::from_slice(&bytes)?;
                 raptim::storage::validate_export(&data)?;
-                // `validate_export` answers about the raw value, so an export stays legal whatever
-                // directory it was written on. This answers about the identity the rows are about to
-                // be indexed under: two spellings of one file pass the first gate and land on a
-                // single `dup_key`, which makes both of them uneditable from then on.
                 if let Some(name) = self.store.export_clash(&data.entries) {
                     return Err(Error::Invalid(format!(
                         "同一分类内有指向同一目标的不同写法：{name}；未改动数据"
@@ -1978,11 +1525,9 @@ impl App {
                 self.settings_ui.set_restore_confirm(true);
             }
         }
-        if kind == 0 {
-            self.extract_editor_icon();
-        }
         Ok(())
     }
+
     fn queue_files(&mut self, paths: Vec<PathBuf>, collection: i64) -> Result<()> {
         let overflow = self.pending_files.len() + paths.len() > 500;
         // Keep one overflow sentinel item so the worker rejects the entire drop,
@@ -1996,6 +1541,7 @@ impl App {
         }
         Ok(())
     }
+
     fn process_files(&mut self) {
         if self.importing
             || self.pending_files.is_empty()
@@ -2006,13 +1552,13 @@ impl App {
         self.importing = true;
         self.status("正在读取文件…");
         let paths = std::mem::take(&mut self.pending_files);
-        let weak = self.main.as_weak();
+        let sink = self.events.clone();
         std::thread::spawn(move || {
             let result = raptim::importing::file_entries(paths).map_err(|e| e.to_string());
-            let value = serde_json::to_string(&result).expect("serializable import result");
-            let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_files_ready(value.into()));
+            sink.send(AppEvent::FilesReady(result));
         });
     }
+
     fn restore(&mut self) -> Result<()> {
         if self.importing || !self.pending_files.is_empty() || self.main.get_busy() {
             return Err(Error::Invalid("请先等待文件收录完成，再恢复数据".into()));
@@ -2047,6 +1593,7 @@ impl App {
         self.evaluate();
         Ok(())
     }
+
     fn should_poll_tick(&self) -> bool {
         self.main.window().is_visible()
             || self
@@ -2060,6 +1607,7 @@ impl App {
             || self.policy.protection() != Protection::Normal
             || self.protected_edge_waiting
     }
+
     fn toggle_hotkey_visibility(&mut self) {
         let can_toggle_off = self.main.window().is_visible()
             && !self.edge_hidden
@@ -2085,6 +1633,7 @@ impl App {
             self.show_main(ShowSource::Hotkey);
         }
     }
+
     fn step_category(&mut self, step: i32) {
         if !self.finish_inline() {
             return;
@@ -2122,803 +1671,6 @@ impl App {
             self.status(e);
         }
     }
-    fn begin_discover_apps(&mut self) {
-        if self.main.get_busy() {
-            return;
-        }
-        if !self.finish_inline() {
-            return;
-        }
-        self.user_summon_edge();
-        self.discovered_apps.clear();
-        self.discovered_checked.clear();
-        self.main
-            .set_discover_target_name(self.collection_name(self.collection));
-        self.main.set_discover_filter("".into());
-        self.main.set_discover_items(ModelRc::default());
-        self.main.set_discover_selected_count(0);
-        self.main.set_discover_loading(true);
-        self.main.set_discover_open(true);
-        self.main.invoke_focus_discover_filter();
-
-        let existing: std::collections::HashSet<String> = self
-            .entries
-            .iter()
-            .filter(|e| e.collection_id == self.collection)
-            .map(|e| raptim::paths::resolve_for_shell(&e.target, &self.data_dir).duplicate_key())
-            .collect();
-        let data_dir = self.data_dir.clone();
-        let weak = self.main.as_weak();
-        std::thread::spawn(move || {
-            let mut apps = platform::discover_installed_entries();
-            apps.retain(|app| {
-                let key = raptim::paths::resolve_for_shell(&app.target, &data_dir).duplicate_key();
-                !existing.contains(&key)
-            });
-            let payload = serde_json::to_string(&apps).unwrap_or_else(|_| "[]".into());
-            let _ =
-                weak.upgrade_in_event_loop(move |ui| ui.invoke_native_event(18, payload.into()));
-        });
-    }
-    fn render_discover_list(&mut self) {
-        let needle = self.main.get_discover_filter().trim().to_lowercase();
-        let mut options = Vec::new();
-        let mut selected_count = 0i32;
-        for (index, app) in self.discovered_apps.iter().enumerate() {
-            if !needle.is_empty()
-                && !app.name.to_lowercase().contains(&needle)
-                && !app.detail.to_lowercase().contains(&needle)
-            {
-                continue;
-            }
-            let checked = self.discovered_checked.get(index).copied().unwrap_or(false);
-            if checked {
-                selected_count += 1;
-            }
-            options.push(DiscoverOption {
-                checked,
-                index: index as i32,
-                name: app.name.clone().into(),
-                detail: app.detail.clone().into(),
-                kind: app.target.kind_index(),
-            });
-        }
-        self.main.set_discover_selected_count(selected_count);
-        self.main
-            .set_discover_items(Rc::new(VecModel::from(options)).into());
-    }
-    fn toggle_discovered(&mut self, idx: i32) {
-        let Ok(index) = usize::try_from(idx) else {
-            return;
-        };
-        if let Some(flag) = self.discovered_checked.get_mut(index) {
-            *flag = !*flag;
-            self.render_discover_list();
-        }
-    }
-    fn select_all_discovered(&mut self, checked: bool) {
-        let needle = self.main.get_discover_filter().trim().to_lowercase();
-        for (index, app) in self.discovered_apps.iter().enumerate() {
-            if (needle.is_empty()
-                || app.name.to_lowercase().contains(&needle)
-                || app.detail.to_lowercase().contains(&needle))
-                && let Some(flag) = self.discovered_checked.get_mut(index)
-            {
-                *flag = checked;
-            }
-        }
-        self.render_discover_list();
-    }
-    fn import_discovered(&mut self) {
-        if self.discovered_apps.is_empty() {
-            return;
-        }
-        let needle = self.main.get_discover_filter().trim().to_lowercase();
-        let mut new_entries = Vec::new();
-        for (index, app) in self.discovered_apps.iter().enumerate() {
-            if !self.discovered_checked.get(index).copied().unwrap_or(false) {
-                continue;
-            }
-            if !needle.is_empty()
-                && !app.name.to_lowercase().contains(&needle)
-                && !app.detail.to_lowercase().contains(&needle)
-            {
-                continue;
-            }
-            let mut target = app.target.clone();
-            if self.settings.relative_paths
-                && let Ok(rel) = raptim::paths::convert_target(&target, &self.data_dir, true)
-            {
-                target = rel;
-            }
-            new_entries.push(Entry {
-                id: 0,
-                collection_id: self.collection,
-                name: app.name.clone(),
-                aliases: String::new(),
-                notes: String::new(),
-                target,
-                position: 0,
-                icon: Vec::new(),
-            });
-        }
-        if new_entries.is_empty() {
-            self.status("请先勾选要导入的软件");
-            return;
-        }
-        match self.store.add_entries(&new_entries) {
-            Ok((added, skipped)) => {
-                self.main.set_discover_open(false);
-                self.main.invoke_focus_browser();
-                self.report_refresh();
-                let wanted: Vec<_> = self
-                    .entries
-                    .iter()
-                    .filter(|e| {
-                        e.collection_id == self.collection
-                            && e.icon.is_empty()
-                            && !matches!(e.target, Target::Url { .. })
-                    })
-                    .map(|e| (e.id, e.target.clone()))
-                    .collect();
-                self.fill_icons(wanted);
-                self.status(if skipped > 0 {
-                    format!("已导入 {added} 项，跳过 {skipped} 项重复")
-                } else {
-                    format!("已导入 {added} 项软件")
-                });
-            }
-            Err(e) => self.status(e),
-        }
-    }
-    fn begin_broken_check(&mut self) {
-        if !self.finish_inline() {
-            return;
-        }
-        self.user_summon_edge();
-        self.broken_items.clear();
-        self.main.set_broken_items(ModelRc::default());
-        self.main.set_broken_loading(true);
-        self.main.set_broken_open(true);
-        let entries = self.entries.clone();
-        let data_dir = self.data_dir.clone();
-        let epoch = self.data_epoch;
-        let weak = self.main.as_weak();
-        std::thread::spawn(move || {
-            let installed: std::collections::HashSet<String> = platform::installed_apps()
-                .into_iter()
-                .map(|(aumid, _)| aumid.to_lowercase())
-                .collect();
-            let mut found = Vec::new();
-            for entry in entries {
-                let resolved = raptim::paths::resolve_for_shell(&entry.target, &data_dir);
-                let reason = match &resolved {
-                    Target::Url { .. } => None,
-                    Target::App { aumid } => {
-                        if installed.contains(&aumid.to_lowercase()) {
-                            None
-                        } else {
-                            Some("未找到对应的已安装应用")
-                        }
-                    }
-                    Target::Folder { path } => {
-                        let p = std::path::Path::new(path);
-                        let low = path.to_ascii_lowercase();
-                        if low.starts_with("shell:") || low.starts_with("::{") || p.is_dir() {
-                            None
-                        } else {
-                            Some("目标文件夹不存在")
-                        }
-                    }
-                    Target::Program { path, .. }
-                    | Target::File { path }
-                    | Target::Shortcut { path, .. } => {
-                        let p = std::path::Path::new(path);
-                        let low = path.to_ascii_lowercase();
-                        let on_path =
-                            matches!(resolved, Target::Program { .. }) && command_exists(path);
-                        if low.starts_with("shell:")
-                            || low.starts_with("::{")
-                            || p.exists()
-                            || on_path
-                        {
-                            None
-                        } else {
-                            Some("目标文件或快捷方式不存在")
-                        }
-                    }
-                };
-                if let Some(reason) = reason {
-                    found.push(BrokenEntry {
-                        id: entry.id,
-                        name: entry.name,
-                        target: entry.target.value().to_string(),
-                        reason: reason.to_string(),
-                        relocatable: entry.target.relocatable(),
-                    });
-                }
-            }
-            let payload = serde_json::to_string(&(epoch, found)).unwrap_or_default();
-            let _ =
-                weak.upgrade_in_event_loop(move |ui| ui.invoke_native_event(19, payload.into()));
-        });
-    }
-    fn sync_broken_ui(&self) {
-        let items: Vec<_> = self
-            .broken_items
-            .iter()
-            .map(|b| BrokenOption {
-                id: b.id as i32,
-                name: b.name.clone().into(),
-                target: b.target.clone().into(),
-                reason: b.reason.clone().into(),
-                relocatable: b.relocatable,
-            })
-            .collect();
-        self.main
-            .set_broken_items(Rc::new(VecModel::from(items)).into());
-    }
-    fn remove_broken_entry(&mut self, id: i64) {
-        if self.editor.as_ref().is_some_and(|e| e.original.id == id) {
-            self.status("请先关闭此项目的编辑窗口");
-            return;
-        }
-        if let Err(e) = self.store.delete_entry(id) {
-            self.status(e);
-            return;
-        }
-        self.broken_items.retain(|item| item.id != id);
-        self.sync_broken_ui();
-        if self.main.get_selected_id() == id as i32 {
-            self.main.set_selected_id(0);
-        }
-        self.report_refresh();
-    }
-}
-
-fn command_exists(command: &str) -> bool {
-    let trimmed = command.trim().trim_matches('"');
-    if trimmed.is_empty()
-        || trimmed.contains('\\')
-        || trimmed.contains('/')
-        || trimmed.contains(':')
-    {
-        return false;
-    }
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    let has_ext = std::path::Path::new(trimmed).extension().is_some();
-    let exts: Vec<String> = if has_ext {
-        vec![String::new()]
-    } else {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
-            .split(';')
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .collect()
-    };
-    for dir in std::env::split_paths(&path_var) {
-        for ext in &exts {
-            let candidate = if ext.is_empty() {
-                dir.join(trimmed)
-            } else {
-                dir.join(format!("{trimmed}{ext}"))
-            };
-            if candidate.is_file() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
-    let mut state = app.borrow_mut();
-    if id != 0 && state.main.get_batch_mode() {
-        return;
-    }
-    if state.file_dialog_open {
-        state.status("请先关闭文件选择窗口");
-        return;
-    }
-    if !state.allowed(ShowSource::Editor) {
-        return;
-    }
-    state.user_summon_edge();
-    if let Some(session) = &state.editor
-        && (session.original.id == id || state.editor_dirty())
-    {
-        if session.original.id != id {
-            session.window.set_error("请先保存或取消当前编辑".into());
-        }
-        let _ = windowing::show_child(session.window.window(), state.main.window());
-        state.apply_theme();
-        return;
-    }
-    state.drop_editor();
-    let entry = if id == 0 {
-        Entry {
-            icon: Vec::new(),
-            id: 0,
-            collection_id: state.collection,
-            name: String::new(),
-            aliases: String::new(),
-            notes: String::new(),
-            target: Target::Program {
-                path: String::new(),
-                arguments: String::new(),
-                working_dir: String::new(),
-                elevated: false,
-                show: ShowMode::default(),
-            },
-            position: 0,
-        }
-    } else {
-        let Some(e) = state.entries.iter().find(|e| e.id == id) else {
-            return;
-        };
-        e.clone()
-    };
-    let ui = match EditorWindow::new() {
-        Ok(ui) => ui,
-        Err(e) => {
-            state.status(e);
-            return;
-        }
-    };
-    ui.set_entry_icon(raptim::icons::display(&entry.icon));
-    ui.set_entry_name(entry.name.clone().into());
-    ui.set_target(entry.target.value().into());
-    ui.set_aliases(entry.aliases.clone().into());
-    ui.set_notes(entry.notes.clone().into());
-    ui.set_editing(id != 0);
-    ui.set_kind(entry.target.kind_index());
-    ui.set_show_mode(match &entry.target {
-        Target::Program { show, .. } | Target::Shortcut { show, .. } => show.index(),
-        _ => 0,
-    });
-    if let Target::Program {
-        arguments,
-        working_dir,
-        elevated,
-        ..
-    } = &entry.target
-    {
-        ui.set_arguments(arguments.clone().into());
-        ui.set_working_dir(working_dir.clone().into());
-        ui.set_elevated(*elevated);
-    }
-    let collections: Vec<_> = state
-        .collections
-        .iter()
-        .filter(|c| c.parent_id.is_some())
-        .map(|c| c.id)
-        .collect();
-    ui.set_collection_id(entry.collection_id as i32);
-    ui.set_collection_name(state.collection_name(entry.collection_id));
-    ui.set_collection_open(false);
-    ui.set_collection_cursor(0);
-    macro_rules! bind {
-        ($method:ident, $action:expr) => {{
-            let weak = Rc::downgrade(app);
-            ui.$method(move || {
-                if let Some(app) = weak.upgrade() {
-                    ($action)(&mut app.borrow_mut());
-                }
-            });
-        }};
-    }
-    bind!(on_pick_app, |s: &mut App| s.open_app_picker());
-    bind!(on_pick_collection, |s: &mut App| s.pick_collection());
-    bind!(on_picker_refilter, |s: &mut App| s.refresh_app_list());
-    {
-        let weak = Rc::downgrade(app);
-        ui.on_picker_confirm(move |aumid, name| {
-            if let Some(app) = weak.upgrade() {
-                app.borrow_mut()
-                    .choose_app(aumid.to_string(), name.to_string());
-            }
-        });
-    }
-    {
-        let weak = Rc::downgrade(app);
-        ui.on_collection_node(move |id| {
-            if let Some(app) = weak.upgrade() {
-                app.borrow_mut().collection_node(id);
-            }
-        });
-        let weak = Rc::downgrade(app);
-        ui.on_collection_key(move |delta| {
-            if let Some(app) = weak.upgrade() {
-                app.borrow_mut().collection_key(delta);
-            }
-        });
-    }
-    bind!(on_save, |s: &mut App| s.save_editor());
-    bind!(on_cancel, |s: &mut App| s.cancel_editor());
-    bind!(on_browse, |s: &mut App| s.dialog(0));
-    bind!(on_browse_working_dir, |s: &mut App| s.dialog(8));
-    bind!(on_browse_icon, |s: &mut App| s.dialog(6));
-    bind!(on_reset_icon, |s: &mut App| s.extract_editor_icon());
-    let weak = Rc::downgrade(app);
-    ui.on_convert_path(move |relative| {
-        if let Some(app) = weak.upgrade() {
-            app.borrow_mut().convert_editor_path(relative);
-        }
-    });
-    bind!(on_discard, |s: &mut App| {
-        s.drop_editor();
-        if s.quitting {
-            s.request_quit();
-        }
-    });
-    bind!(on_keep_editing, |s: &mut App| {
-        s.quitting = false;
-    });
-    let weak = Rc::downgrade(app);
-    ui.window().on_close_requested(move || {
-        if let Some(app) = weak.upgrade() {
-            app.borrow_mut().cancel_editor();
-        }
-        slint::CloseRequestResponse::KeepWindowShown
-    });
-    let weak = Rc::downgrade(app);
-    ui.on_icon_path(move |path| {
-        if let Some(app) = weak.upgrade() {
-            let mut s = app.borrow_mut();
-            if !s.file_dialog_open
-                && !s.saving_editor
-                && let Err(e) = s.file_selected(6, path.to_string())
-                && let Some(session) = &s.editor
-            {
-                session.window.set_error(e.to_string().into());
-            }
-        }
-    });
-    let icon_weak = ui.as_weak();
-    let native_weak = state.main.as_weak();
-    let generation = state.editor_generation;
-    let weak = ui.as_weak();
-    let compose_weak = ui.as_weak();
-    install_keys(
-        ui.window(),
-        state.main.as_weak(),
-        move |key| {
-            use slint::winit_030::winit::keyboard::{Key, NamedKey};
-            let Some(ui) = weak.upgrade() else {
-                return false;
-            };
-            if key.logical == &Key::Named(NamedKey::Escape) {
-                ui.invoke_cancel();
-                true
-            } else if key.modifiers.control_key()
-                && !key.modifiers.alt_key()
-                && key.logical == &Key::Named(NamedKey::Enter)
-                && !ui.get_discard_confirm()
-                && !ui.get_collection_open()
-                && !ui.get_picker_open()
-            {
-                ui.invoke_save();
-                true
-            } else {
-                false
-            }
-        },
-        move |event| {
-            if matches!(
-                event,
-                slint::winit_030::winit::event::WindowEvent::Focused(_)
-                    | slint::winit_030::winit::event::WindowEvent::Resized(_)
-                    | slint::winit_030::winit::event::WindowEvent::RedrawRequested
-            ) {
-                let _ = native_weak.upgrade_in_event_loop(move |ui| {
-                    ui.invoke_native_event(12, generation.to_string().into())
-                });
-            }
-            if let slint::winit_030::winit::event::WindowEvent::Focused(active) = event
-                && let Some(ui) = icon_weak.upgrade()
-            {
-                ui.set_window_active(*active);
-            }
-        },
-        move |active| {
-            if let Some(ui) = compose_weak.upgrade() {
-                ui.set_composing(active);
-            }
-        },
-        None,
-    );
-    ui.window().set_size(slint::LogicalSize::new(520., 650.));
-    state.editor = Some(EditorSession {
-        _drop: None,
-        drop_failed: false,
-        generation,
-        window: ui.clone_strong(),
-        icon: entry.icon.clone(),
-        icon_attempted: false,
-        original: entry,
-        collections,
-    });
-    if let Err(e) = windowing::show_child(ui.window(), state.main.window()) {
-        state.status(e);
-    } else {
-        state.apply_theme();
-    }
-    let weak = state.main.as_weak();
-    slint::Timer::single_shot(Duration::ZERO, move || {
-        if let Some(ui) = weak.upgrade() {
-            ui.invoke_native_event(12, generation.to_string().into());
-        }
-    });
-    if state
-        .editor
-        .as_ref()
-        .is_some_and(|e| e.icon.is_empty() && !e.window.get_target().is_empty())
-    {
-        state.extract_editor_icon();
-    }
-}
-
-struct KeyAction<'a> {
-    logical: &'a slint::winit_030::winit::keyboard::Key,
-    modifiers: slint::winit_030::winit::keyboard::ModifiersState,
-}
-
-fn type_search_char<'a>(key: &'a KeyAction<'a>) -> Option<&'a str> {
-    if key.modifiers.control_key() || key.modifiers.alt_key() || key.modifiers.super_key() {
-        return None;
-    }
-    let slint::winit_030::winit::keyboard::Key::Character(text) = key.logical else {
-        return None;
-    };
-    if text.is_empty() || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return None;
-    }
-    Some(text.as_str())
-}
-
-fn apply_common_winit_event(
-    window: &slint::Window,
-    event: &slint::winit_030::winit::event::WindowEvent,
-    main_weak: &slint::Weak<MainWindow>,
-    full_frame_pending: &mut bool,
-    modifiers: &mut slint::winit_030::winit::keyboard::ModifiersState,
-) -> Option<slint::winit_030::EventResult> {
-    use slint::winit_030::{EventResult, winit::event::WindowEvent};
-    match event {
-        WindowEvent::ModifiersChanged(value) => *modifiers = value.state(),
-        WindowEvent::ThemeChanged(_) => {
-            let _ = main_weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(21, "".into()));
-            return Some(EventResult::PreventDefault);
-        }
-        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-            platform::refresh_geometry(window);
-            *full_frame_pending = true;
-        }
-        WindowEvent::RedrawRequested => {
-            windowing::prepare_tooltips(window);
-            if *full_frame_pending {
-                *full_frame_pending = false;
-                windowing::mark_full_frame(window);
-            }
-        }
-        _ => {}
-    }
-    None
-}
-
-fn apply_ime_signal(
-    composition: &mut raptim::gestures::CompositionGuard,
-    value: &slint::winit_030::winit::event::Ime,
-) -> bool {
-    use raptim::gestures::ImeSignal;
-    use slint::winit_030::winit::event::Ime;
-    let signal = match value {
-        Ime::Preedit(_, cursor) => ImeSignal::Preedit {
-            has_cursor: cursor.is_some(),
-        },
-        Ime::Commit(_) => ImeSignal::Commit,
-        Ime::Enabled | Ime::Disabled => ImeSignal::Disabled,
-    };
-    composition.apply(signal)
-}
-
-fn install_keys(
-    window: &slint::Window,
-    main_weak: slint::Weak<MainWindow>,
-    action: impl Fn(&KeyAction) -> bool + 'static,
-    event_action: impl Fn(&slint::winit_030::winit::event::WindowEvent) + 'static,
-    compose_sink: impl Fn(bool) + 'static,
-    drag_guard: Option<slint::Weak<MainWindow>>,
-) {
-    use slint::winit_030::{
-        EventResult, WinitWindowAccessor,
-        winit::{
-            event::{ElementState, WindowEvent},
-            keyboard::{Key, ModifiersState, NamedKey},
-        },
-    };
-    let guard_drag = drag_guard.is_some();
-    let mut gesture = raptim::gestures::DragGuard::default();
-    let mut pointer = (0., 0.);
-    let mut full_frame_pending = false;
-    let mut composition = raptim::gestures::CompositionGuard::default();
-    let mut modifiers = ModifiersState::empty();
-    let mut launcher = platform::LauncherProbe::default();
-    window.on_winit_window_event(move |window, event| {
-        if guard_drag {
-            launcher.ensure(window);
-        }
-        event_action(event);
-        if guard_drag {
-            use slint::winit_030::winit::event::MouseButton;
-            match event {
-                WindowEvent::CursorMoved { position, .. } => {
-                    let p = position.to_logical::<f64>(window.scale_factor() as f64);
-                    pointer = (p.x, p.y);
-                    if gesture.suppress_move(pointer, Instant::now()) {
-                        return EventResult::PreventDefault;
-                    }
-                }
-                WindowEvent::MouseInput {
-                    state,
-                    button: MouseButton::Left,
-                    ..
-                } => {
-                    let top = drag_guard
-                        .as_ref()
-                        .and_then(|w| w.upgrade())
-                        .map_or(44., |ui| {
-                            44. + if ui.get_dock_edge() == 2 {
-                                f64::from(ui.get_dock_overhang())
-                            } else {
-                                0.
-                            }
-                        });
-                    if *state == ElementState::Pressed && pointer.1 >= top {
-                        gesture.press(pointer, Instant::now());
-                    } else if *state == ElementState::Released && gesture.release() {
-                        window.dispatch_event(slint::platform::WindowEvent::PointerExited);
-                    }
-                }
-                WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. } => {
-                    gesture.reset();
-                }
-                _ => {}
-            }
-        }
-        if let Some(result) = apply_common_winit_event(
-            window,
-            event,
-            &main_weak,
-            &mut full_frame_pending,
-            &mut modifiers,
-        ) {
-            return result;
-        }
-        match event {
-            WindowEvent::Ime(value) => {
-                compose_sink(apply_ime_signal(&mut composition, value));
-            }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if composition.active() {
-                    // Enter belongs to the candidate window while composing; characters must
-                    // still reach the focused editor, which is the only commit-text channel.
-                    return if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
-                        EventResult::PreventDefault
-                    } else {
-                        EventResult::Propagate
-                    };
-                }
-                if windowing::has_popup(window) {
-                    return EventResult::Propagate;
-                }
-                if action(&KeyAction {
-                    logical: &event.logical_key,
-                    modifiers,
-                }) {
-                    return EventResult::PreventDefault;
-                }
-            }
-            _ => {}
-        }
-        EventResult::Propagate
-    });
-}
-
-fn install_settings_keys(ui: &SettingsWindow, main_weak: slint::Weak<MainWindow>) {
-    use slint::winit_030::{
-        EventResult, WinitWindowAccessor,
-        winit::{
-            event::{ElementState, WindowEvent},
-            keyboard::{Key, NamedKey, PhysicalKey},
-        },
-    };
-    let weak = ui.as_weak();
-    let mut modifiers = slint::winit_030::winit::keyboard::ModifiersState::empty();
-    let mut composition = raptim::gestures::CompositionGuard::default();
-    let mut full_frame_pending = false;
-    ui.window().on_winit_window_event(move |window, event| {
-        if let Some(result) = apply_common_winit_event(
-            window,
-            event,
-            &main_weak,
-            &mut full_frame_pending,
-            &mut modifiers,
-        ) {
-            return result;
-        }
-        match event {
-            WindowEvent::Focused(active) => {
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_window_active(*active);
-                }
-            }
-            WindowEvent::Ime(value) => {
-                let active = apply_ime_signal(&mut composition, value);
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_composing(active);
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if let Some(ui) = weak.upgrade() {
-                    if ui.get_recording_hotkey() {
-                        // A key pressed while composing belongs to the input method, not to the
-                        // shortcut being recorded.
-                        if composition.active() {
-                            return EventResult::PreventDefault;
-                        }
-                        if event.logical_key == Key::Named(NamedKey::Escape) {
-                            ui.invoke_captured_hotkey("".into());
-                            return EventResult::PreventDefault;
-                        }
-                        let name = match event.physical_key {
-                            PhysicalKey::Code(code) => {
-                                raptim::hotkey::physical_name(&format!("{code:?}"))
-                            }
-                            _ => None,
-                        };
-                        let Some(name) = name else {
-                            return EventResult::PreventDefault;
-                        };
-                        // Query at keydown as well: some layouts consume Alt/Ctrl modifier events.
-                        let native_modifiers = platform::key_modifiers();
-                        let mut parts = vec![];
-                        if modifiers.control_key() || native_modifiers & 2 != 0 {
-                            parts.push("Ctrl".to_string());
-                        }
-                        if modifiers.alt_key() || native_modifiers & 1 != 0 {
-                            parts.push("Alt".to_string());
-                        }
-                        if modifiers.shift_key() || native_modifiers & 4 != 0 {
-                            parts.push("Shift".to_string());
-                        }
-                        if modifiers.super_key() || native_modifiers & 8 != 0 {
-                            parts.push("Win".to_string());
-                        }
-                        parts.push(name);
-                        ui.invoke_captured_hotkey(parts.join("+").into());
-                        return EventResult::PreventDefault;
-                    }
-                    if !composition.active()
-                        && event.logical_key == Key::Named(NamedKey::Escape)
-                        && !windowing::has_popup(window)
-                    {
-                        if ui.get_restore_confirm() {
-                            ui.set_restore_confirm(false);
-                        } else {
-                            ui.invoke_cancel();
-                        }
-                        return EventResult::PreventDefault;
-                    }
-                }
-            }
-            _ => {}
-        }
-        EventResult::Propagate
-    });
 }
 
 fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -2966,12 +1718,9 @@ fn run_at_with_mode(
     data_dir: PathBuf,
     silent_startup: bool,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Startup timeline. Each mark records ms since `run_at` began, on the same origin as every
     std::fs::create_dir_all(&data_dir)?;
     let data_dir = data_dir.canonicalize()?;
     raptim::diagnostics::attach(&data_dir);
-    // Release builds have no console, so a worker-thread panic is otherwise silent. Still print
-    // to stderr: the test harness relies on the default rendering of a failing panic.
     std::panic::set_hook(Box::new(|info| {
         let location = info.location().map_or_else(
             || "<未知位置>".into(),
@@ -2990,6 +1739,7 @@ fn run_at_with_mode(
         return Ok(());
     };
     let mut store = Store::open(&data_dir.join("raptim.db"))?;
+    store.ensure_categories()?;
     let initial = store.take_initial()?;
     let settings = initial.settings.clone();
     raptim::diagnostics::set_protection_log(settings.protection_log);
@@ -3017,15 +1767,13 @@ fn run_at_with_mode(
     let signals = platform::collect_signals(&settings, &mut platform::ProtectionCache::default());
     policy.update(decide(signals), Instant::now(), signals.hold_release());
     let native_epoch = Arc::new(AtomicU64::new(policy.ticket()));
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let events = EventSink::new(events_tx, main.as_weak());
     let epoch = native_epoch.clone();
-    let weak = main.as_weak();
-    let notify: platform::Notify = Arc::new(move |code, text| {
-        let text = if matches!(code, 1 | 3 | 4 | 6 | 7) {
-            epoch.load(Ordering::SeqCst).to_string()
-        } else {
-            text
-        };
-        let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_native_event(code, text.into()));
+    let notify_sink = events.clone();
+    let notify: platform::Notify = Arc::new(move |signal| {
+        let ticket = epoch.load(Ordering::SeqCst);
+        notify_sink.send(AppEvent::Native(signal, ticket));
     });
     let hotkey = platform::Hotkey::new(notify.clone(), policy.hotkey_enabled(), &settings.hotkey)
         .map_err(Error::Invalid)?;
@@ -3037,7 +1785,10 @@ fn run_at_with_mode(
     let tray = platform::Tray::new(notify).map_err(Error::Invalid)?;
     #[cfg(debug_assertions)]
     eprintln!("tray ready");
+    let cache_sink = events.clone();
     let app = Rc::new(RefCell::new(App {
+        events: events.clone(),
+        events_rx,
         protection_resume: Default::default(),
         editor_generation: 0,
         batch_expanded: Default::default(),
@@ -3086,12 +1837,9 @@ fn run_at_with_mode(
         edge_hold: Default::default(),
         edge_since: Instant::now(),
         search_index: Default::default(),
-        icon_cache: {
-            let weak = main.as_weak();
-            raptim::icons::Cache::new(move || {
-                let _ = weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(9, "".into()));
-            })
-        },
+        icon_cache: raptim::icons::Cache::new(move || {
+            cache_sink.send(AppEvent::ViewportChanged);
+        }),
         icon_index: Default::default(),
         visible_icons: Default::default(),
         items_signature: Default::default(),
@@ -3123,7 +1871,38 @@ fn run_at_with_mode(
         broken_items: Vec::new(),
     }));
     app.borrow_mut().weak_self = Rc::downgrade(&app);
-    macro_rules! bind { ($ui:ident, $callback:ident, |$s:ident $(,$arg:ident)*| $body:block) => { { let weak = Rc::downgrade(&app); $ui.$callback(move |$($arg),*| { if let Some(app) = weak.upgrade() { #[allow(unused_mut)] let mut $s = app.borrow_mut(); $body } }); } }; }
+    {
+        let weak = Rc::downgrade(&app);
+        main.on_flush_events(move || {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            loop {
+                let next = app
+                    .try_borrow()
+                    .ok()
+                    .and_then(|s| s.events_rx.try_recv().ok());
+                let Some(event) = next else {
+                    break;
+                };
+                if let Ok(mut s) = app.try_borrow_mut() {
+                    s.handle_event(event);
+                }
+            }
+        });
+    }
+    macro_rules! bind {
+        ($ui:ident, $callback:ident, |$s:ident $(,$arg:ident)*| $body:block) => {{
+            let weak = Rc::downgrade(&app);
+            $ui.$callback(move |$($arg),*| {
+                if let Some(app) = weak.upgrade() {
+                    #[allow(unused_mut)]
+                    let mut $s = app.borrow_mut();
+                    $body
+                }
+            });
+        }};
+    }
     bind!(main, on_search, |s, _query| {
         s.reset_batch_selection();
         s.main.set_selected_id(0);
@@ -3167,104 +1946,7 @@ fn run_at_with_mode(
         }
     });
     bind!(main, on_add_files, |s| {
-        s.dialog(5);
-    });
-    bind!(main, on_refresh_icon_ready, |s, value| {
-        if let Ok((epoch, id, key, old, icon)) =
-            serde_json::from_str::<(u64, i64, String, Vec<u8>, Vec<u8>)>(&value)
-        {
-            if epoch != s.data_epoch {
-                return;
-            }
-            if icon.is_empty() {
-                s.status("无法从目标提取图标，保留当前图标");
-                return;
-            }
-            // The caller handed over `old` so a reply to a stale request cannot overwrite a newer
-            // icon, which is also what the row must still hold for the band sweep to be correct.
-            let usable = s
-                .icon_index
-                .get(&id)
-                .and_then(|slot| s.entries.get(slot.index))
-                .is_some_and(|e| e.target.duplicate_key() == key && e.icon == old);
-            if usable && s.replace_icon(id, icon) {
-                s.update_visible_icons();
-                s.status("图标缓存已刷新");
-            }
-        }
-    });
-    bind!(main, on_icons_ready, |s, value| {
-        if let Ok((epoch, icons)) =
-            serde_json::from_str::<(u64, Vec<(i64, String, Vec<u8>)>)>(&value)
-        {
-            if epoch != s.data_epoch {
-                return;
-            }
-            let mut applied = false;
-            for (id, key, icon) in icons {
-                let stale = s
-                    .icon_index
-                    .get(&id)
-                    .and_then(|slot| s.entries.get(slot.index))
-                    .is_none_or(|e| !e.icon.is_empty() || e.target.duplicate_key() != key);
-                if stale {
-                    continue;
-                }
-                applied |= s.replace_icon(id, icon);
-            }
-            if applied {
-                s.update_visible_icons();
-            }
-        }
-    });
-    bind!(main, on_icon_ready, |s, value| {
-        if let Ok((epoch, requested_target, icon)) =
-            serde_json::from_str::<(u64, String, Vec<u8>)>(&value)
-            && epoch == s.icon_epoch
-        {
-            s.icon_pending = false;
-            if let Some(session) = &mut s.editor {
-                if session.window.get_target().as_str() != requested_target {
-                    session.icon_attempted = false;
-                    session.window.set_saving(false);
-                    session.window.set_error("目标已更改，请重新保存".into());
-                    s.saving_editor = false;
-                    return;
-                }
-                session.window.set_entry_icon(raptim::icons::display(&icon));
-                session.icon = icon;
-                session.window.set_saving(false);
-            }
-            if s.saving_editor {
-                s.saving_editor = false;
-                s.save_editor();
-            }
-        }
-    });
-    bind!(main, on_files_ready, |s, value| {
-        s.importing = false;
-        let result = serde_json::from_str::<std::result::Result<Vec<Entry>, String>>(&value)
-            .map_err(|e| e.to_string())
-            .and_then(|r| r)
-            .and_then(|mut entries| {
-                if s.settings.relative_paths {
-                    for entry in &mut entries {
-                        if let Ok(t) =
-                            raptim::paths::convert_target(&entry.target, &s.data_dir, true)
-                        {
-                            entry.target = t;
-                        }
-                    }
-                }
-                s.store.add_entries(&entries).map_err(|e| e.to_string())
-            });
-        match result {
-            Ok((added, duplicates)) => {
-                s.status(format!("已添加 {added} 项，跳过 {duplicates} 项重复目标"));
-                s.report_refresh();
-            }
-            Err(e) => s.status(format!("未添加：{e}")),
-        }
+        s.dialog(DialogKind::AddFiles);
     });
     bind!(main, on_choose_group, |s, id| {
         if !s.finish_inline() {
@@ -3305,21 +1987,6 @@ fn run_at_with_mode(
             s.update_selection();
         } else {
             s.launch(i64::from(id));
-        }
-    });
-    bind!(main, on_launch_finished, |s, error| {
-        s.main.set_busy(false);
-        s.evaluate();
-        if error.is_empty() {
-            if s.settings.hide_after_launch && !s.auto_hide_guard().paused() {
-                s.hide_all();
-            }
-        } else if let Ok(failure) = serde_json::from_str::<Failure>(&error) {
-            s.status(failure.message.clone());
-            s.show_relocate(failure.entry, &failure.message, failure.relocatable);
-        } else {
-            // A payload we cannot parse must still tell the user the launch failed.
-            s.status(error);
         }
     });
     bind!(main, on_relocate, |s| {
@@ -3374,11 +2041,7 @@ fn run_at_with_mode(
         platform::decorate(s.main.window());
         let p = s.main.window().position();
         s.drag = Some((platform::cursor(), (p.x, p.y)));
-        // Undocked, `interaction_interval` would arm nothing, and the button-release that ends
-        // the drag is only observed from a tick.
         s.schedule_interaction();
-        // The Slint press callback is the authority. Delaying this until a timer
-        // and polling GetAsyncKeyState can drop an entire quick startup drag.
         platform::begin_launcher_drag(s.main.window());
     });
     bind!(main, on_convert_path, |s, id, relative| {
@@ -3408,77 +2071,31 @@ fn run_at_with_mode(
                 .as_ref()
                 .is_some_and(|e| e.original.id == i64::from(id))
             {
-                s.dialog(6);
+                s.dialog(DialogKind::EditorIcon);
             }
         }
     });
     bind!(main, on_settings, |s| {
         s.show_settings();
     });
-    bind!(main, on_external_drop, |s, payload| {
-        if !s.allowed(ShowSource::Editor) {
-            s.main.set_drop_hover(false);
-            return;
-        }
-        let destination = if s.main.get_external_category() != 0 {
-            s.category_for(i64::from(s.main.get_external_category()))
-        } else {
-            s.collection
-        };
-        s.main.set_drop_hover(false);
-        match serde_json::from_str::<raptim::importing::ExternalDrop>(&payload) {
-            Ok(raptim::importing::ExternalDrop::Files(paths)) => {
-                if paths.is_empty() {
-                    s.status("每次最多添加 500 项");
-                } else if let Err(e) = s.queue_files(paths, destination) {
-                    s.status(e);
-                }
-            }
-            Ok(raptim::importing::ExternalDrop::Text(text)) => {
-                match raptim::importing::url_entries(&text, destination)
-                    .and_then(|entries| s.store.add_entries(&entries))
-                {
-                    Ok((added, duplicates)) => {
-                        s.status(format!("已添加 {added} 项，跳过 {duplicates} 项重复目标"));
-                        s.report_refresh();
-                        // Nothing restarts the launcher to pick these up, so the favicons are
-                        // fetched here rather than by the startup pass.
-                        let wanted: Vec<_> = s
-                            .entries
-                            .iter()
-                            .filter(|e| e.icon.is_empty() && matches!(e.target, Target::Url { .. }))
-                            .map(|e| (e.id, e.target.clone()))
-                            .collect();
-                        s.fill_icons(wanted);
-                    }
-                    Err(e) => s.status(e),
-                }
-            }
-            Err(e) => s.status(e),
-        }
-    });
-    let interaction_weak = main.as_weak();
+    let interaction_sink = events.clone();
     main.on_interaction_changed(move || {
-        let weak = interaction_weak.clone();
+        let sink = interaction_sink.clone();
         slint::Timer::single_shot(Duration::ZERO, move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.invoke_native_event(8, "".into());
-            }
+            sink.send(AppEvent::WindowInteraction);
         });
     });
     let viewport_pending = Rc::new(std::cell::Cell::new(false));
-    let viewport_weak = main.as_weak();
+    let viewport_sink = events.clone();
     main.on_viewport_changed(move || {
         if viewport_pending.replace(true) {
             return;
         }
         let pending = viewport_pending.clone();
-        let weak = viewport_weak.clone();
+        let sink = viewport_sink.clone();
         slint::Timer::single_shot(Duration::ZERO, move || {
             pending.set(false);
-            if let Some(ui) = weak.upgrade() {
-                ui.invoke_native_event(9, "".into());
-            }
+            sink.send(AppEvent::ViewportChanged);
         });
     });
     bind!(main, on_search_scope_changed, |s| {
@@ -3574,7 +2191,6 @@ fn run_at_with_mode(
             s.update_selection();
         } else if s.main.get_search_open() {
             s.dismiss_search_state();
-            s.update_visible_icons();
         } else if s.main.get_selected_id() != 0 {
             s.main.set_selected_id(0);
             s.main.set_keyboard_focus(false);
@@ -3614,115 +2230,6 @@ fn run_at_with_mode(
     bind!(main, on_broken_remove, |s, id| {
         s.remove_broken_entry(i64::from(id));
     });
-    bind!(main, on_native_event, |s, code, text| {
-        if matches!(code, 1 | 3 | 4 | 6 | 7) && text.parse::<u64>().ok() != Some(s.policy.ticket())
-        {
-            return;
-        }
-        match code {
-            1 => s.toggle_hotkey_visibility(),
-            2 => s.status(text),
-            3 => s.show_main(ShowSource::Tray),
-            7 => s.show_main(ShowSource::SecondaryInstance),
-            8 => {
-                s.initialize_native_state();
-                s.tick_window(false);
-                s.schedule_interaction();
-            }
-            10 => {
-                s.initialize_native_state();
-                // SetWindowPos during animation generates Moved events. Feeding
-                // those back into tick_window creates a frame-per-message loop.
-                if s.edge_motion.is_none() {
-                    s.tick_window(false);
-                    s.schedule_interaction();
-                }
-            }
-            9 => s.update_visible_icons(),
-            14 | 17 => s.evaluate_suggested(),
-            15 => {
-                s.main.set_pinned(!s.main.get_pinned());
-                s.apply_pin();
-            }
-            16 => s.toggle_protection_bypass(),
-            18 => {
-                if let Ok(apps) = serde_json::from_str::<Vec<platform::DiscoveredApp>>(&text) {
-                    s.discovered_checked = vec![false; apps.len()];
-                    s.discovered_apps = apps;
-                    s.main.set_discover_loading(false);
-                    s.render_discover_list();
-                    if s.main.get_discover_open() {
-                        s.main.invoke_focus_discover_filter();
-                    }
-                }
-            }
-            19 => {
-                if let Ok((epoch, items)) = serde_json::from_str::<(u64, Vec<BrokenEntry>)>(&text)
-                    && epoch == s.data_epoch
-                {
-                    s.broken_items = items;
-                    s.main.set_broken_loading(false);
-                    s.sync_broken_ui();
-                }
-            }
-            20 => {
-                if let Ok(step) = text.parse::<i32>() {
-                    s.step_category(step);
-                }
-            }
-            12 => {
-                if let Ok(generation) = text.parse() {
-                    s.install_editor_drop(generation);
-                }
-            }
-            13 => {
-                if let Ok((generation, path)) = serde_json::from_str::<(u64, String)>(&text)
-                    && s.editor
-                        .as_ref()
-                        .is_some_and(|e| e.generation == generation)
-                    && !s.file_dialog_open
-                    && !s.saving_editor
-                    && let Err(e) = s.file_selected(6, path)
-                    && let Some(editor) = &s.editor
-                {
-                    editor.window.set_error(e.to_string().into());
-                }
-            }
-            11 => {
-                if text
-                    .parse()
-                    .ok()
-                    .is_some_and(|generation| s.frame_clock.acknowledge(generation))
-                {
-                    s.tick_window(true);
-                    s.schedule_interaction();
-                }
-            }
-            4 => s.show_settings(),
-            5 => s.request_quit(),
-            6 if s.allowed(ShowSource::Restore) => {
-                s.show_main(ShowSource::Restore);
-                s.dock = None;
-                s.edge_hold.clear();
-                s.sync_dock_overhang();
-                platform::restore_position(s.main.window());
-                platform::decorate(s.main.window());
-            }
-            21 => s.apply_theme(),
-            _ => {}
-        }
-    });
-    bind!(main, on_file_selected, |s, kind, value| {
-        if let Err(e) = s.file_selected(kind, value.to_string()) {
-            s.status(&e);
-            if let Some(ui) = s.settings_ui.get() {
-                ui.set_status(e.to_string().into());
-            }
-            if let Some(editor) = &s.editor {
-                editor.window.set_error(e.to_string().into());
-            }
-        }
-    });
     bind!(main, on_manage_group, |s, id| {
         s.begin_collection_action(id, if id == 0 { 0 } else { 2 }, 0);
     });
@@ -3745,304 +2252,7 @@ fn run_at_with_mode(
         }
         slint::CloseRequestResponse::KeepWindowShown
     });
-    let weak = main.as_weak();
-    let drop_weak = main.as_weak();
-    let compose_weak = main.as_weak();
-    install_keys(
-        main.window(),
-        main.as_weak(),
-        move |key| {
-            use slint::winit_030::winit::keyboard::{Key, NamedKey};
-            let Some(ui) = weak.upgrade() else {
-                return false;
-            };
-            let control = key.modifiers.control_key();
-            let shift = key.modifiers.shift_key();
-            let alt = key.modifiers.alt_key();
-            let super_key = key.modifiers.super_key();
-
-            if ui.get_discover_open() || ui.get_broken_open() {
-                if key.logical == &Key::Named(NamedKey::Escape) {
-                    ui.invoke_escape();
-                    return true;
-                }
-                return false;
-            }
-            if ui.get_batch_target_open() || ui.get_batch_confirm() {
-                if key.logical == &Key::Named(NamedKey::Escape) {
-                    ui.invoke_escape();
-                    return true;
-                }
-                if ui.get_batch_confirm() && key.logical == &Key::Named(NamedKey::Enter) {
-                    ui.invoke_batch_execute(2, 0);
-                    return true;
-                }
-                return control
-                    && matches!(
-                        key.logical,
-                        Key::Character(c) if c.eq_ignore_ascii_case("a") || c.eq_ignore_ascii_case("f")
-                    );
-            }
-            if ui.get_collection_delete()
-                || ui.get_confirm_delete()
-                || ui.get_relocate_open()
-                || ui.get_conversion_open()
-            {
-                if key.logical == &Key::Named(NamedKey::Escape) {
-                    ui.invoke_escape();
-                    return true;
-                }
-                return false;
-            }
-            if key.logical == &Key::Named(NamedKey::Escape) {
-                ui.invoke_escape();
-                return true;
-            }
-            if control
-                && !alt
-                && !super_key
-                && matches!(key.logical, Key::Character(c) if c.eq_ignore_ascii_case("f"))
-            {
-                ui.invoke_focus_search();
-                return true;
-            }
-            if control
-                && !alt
-                && !super_key
-                && matches!(key.logical, Key::Character(c) if c.eq_ignore_ascii_case("a"))
-                && ui.get_batch_mode()
-                && !ui.get_search_focused()
-                && ui.get_inline_kind() == 0
-                && !ui.get_more_open()
-            {
-                if !ui.get_batch_all_selected() {
-                    ui.invoke_batch_all();
-                }
-                return true;
-            }
-            if control
-                && !alt
-                && !super_key
-                && matches!(key.logical, Key::Character(c) if c.eq_ignore_ascii_case("n"))
-                && ui.get_inline_kind() == 0
-                && !ui.get_batch_mode()
-                && !ui.get_search_focused()
-            {
-                ui.invoke_add();
-                return true;
-            }
-            if control
-                && !alt
-                && !super_key
-                && matches!(key.logical, Key::Character(c) if c.as_str() == ",")
-                && ui.get_inline_kind() == 0
-            {
-                ui.invoke_settings();
-                return true;
-            }
-            if control
-                && !alt
-                && !super_key
-                && key.logical == &Key::Named(NamedKey::Tab)
-                && ui.get_inline_kind() == 0
-                && !ui.get_batch_mode()
-                && !ui.get_search_open()
-            {
-                ui.invoke_native_event(20, if shift { "-1" } else { "1" }.into());
-                return true;
-            }
-            if ui.get_inline_kind() != 0 {
-                return false;
-            }
-            if ui.get_search_open() {
-                if matches!(
-                    key.logical,
-                    Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
-                ) {
-                    let items = ui.get_results();
-                    let count = items.row_count();
-                    if count == 0 {
-                        return true;
-                    }
-                    let current = (0..count).find(|i| {
-                        items
-                            .row_data(*i)
-                            .is_some_and(|item| item.id == ui.get_selected_id())
-                    });
-                    let next = if key.logical == &Key::Named(NamedKey::ArrowDown) {
-                        current.map_or(0, |i| (i + 1).min(count - 1))
-                    } else {
-                        current.map_or(count - 1, |i| i.saturating_sub(1))
-                    };
-                    if let Some(item) = items.row_data(next) {
-                        ui.set_selected_id(item.id);
-                        ui.invoke_reveal_result(next as i32);
-                    }
-                    return true;
-                }
-                if key.logical == &Key::Named(NamedKey::Enter) && ui.get_selected_id() != 0 {
-                    if shift && !control && !alt {
-                        ui.invoke_item_action(ui.get_selected_id(), 3);
-                        return true;
-                    }
-                    if alt && !control && !shift {
-                        ui.invoke_edit(ui.get_selected_id());
-                        return true;
-                    }
-                    if !ui.get_search_focused() && !control && !alt && !shift {
-                        ui.invoke_launch(ui.get_selected_id());
-                        return true;
-                    }
-                }
-                if !ui.get_search_focused()
-                    && !control
-                    && !alt
-                    && !shift
-                    && key.logical == &Key::Named(NamedKey::F2)
-                    && ui.get_selected_id() != 0
-                {
-                    ui.invoke_edit(ui.get_selected_id());
-                    return true;
-                }
-                return false;
-            }
-
-            if matches!(
-                key.logical,
-                Key::Named(
-                    NamedKey::ArrowLeft
-                        | NamedKey::ArrowRight
-                        | NamedKey::ArrowUp
-                        | NamedKey::ArrowDown
-                        | NamedKey::Home
-                        | NamedKey::End
-                )
-            ) && !control
-                && !alt
-            {
-                let items = ui.get_items();
-                let count = items.row_count();
-                if count == 0 {
-                    return false;
-                }
-                let cols = if ui.get_list_view() {
-                    1usize
-                } else {
-                    (ui.get_grid_columns().max(1)) as usize
-                };
-                let current = (0..count).find(|i| {
-                    items
-                        .row_data(*i)
-                        .is_some_and(|item| item.id == ui.get_selected_id())
-                });
-                let next = match key.logical {
-                    Key::Named(NamedKey::ArrowRight) => {
-                        current.map_or(0, |i| (i + 1).min(count - 1))
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        current.map_or(count - 1, |i| i.saturating_sub(1))
-                    }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        current.map_or(0, |i| (i + cols).min(count - 1))
-                    }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        current.map_or(count - 1, |i| i.saturating_sub(cols))
-                    }
-                    Key::Named(NamedKey::Home) => 0,
-                    _ => count - 1,
-                };
-                if let Some(item) = items.row_data(next) {
-                    ui.set_keyboard_focus(true);
-                    ui.set_selected_id(item.id);
-                    ui.invoke_reveal_grid_row((next / cols) as i32);
-                }
-                return true;
-            }
-
-            if ui.get_batch_mode() {
-                if key.logical == &Key::Named(NamedKey::Space)
-                    && !control
-                    && !alt
-                    && ui.get_selected_id() != 0
-                {
-                    ui.invoke_launch(ui.get_selected_id());
-                    return true;
-                }
-                return false;
-            }
-
-            if ui.get_selected_id() != 0 {
-                if key.logical == &Key::Named(NamedKey::Enter) {
-                    if shift && !control && !alt {
-                        ui.invoke_item_action(ui.get_selected_id(), 3);
-                        return true;
-                    }
-                    if alt && !control && !shift {
-                        ui.invoke_edit(ui.get_selected_id());
-                        return true;
-                    }
-                    if !control && !alt && !shift {
-                        ui.invoke_launch(ui.get_selected_id());
-                        return true;
-                    }
-                }
-                if key.logical == &Key::Named(NamedKey::F2) && !control && !alt && !shift {
-                    ui.invoke_edit(ui.get_selected_id());
-                    return true;
-                }
-                if key.logical == &Key::Named(NamedKey::Delete) && !control && !alt && !shift {
-                    let items = ui.get_items();
-                    let name = (0..items.row_count())
-                        .find_map(|i| {
-                            items
-                                .row_data(i)
-                                .filter(|item| item.id == ui.get_selected_id())
-                                .map(|item| item.name)
-                        })
-                        .unwrap_or_default();
-                    ui.set_delete_name(name);
-                    ui.set_inline_error("".into());
-                    ui.set_confirm_delete(true);
-                    return true;
-                }
-            }
-
-            if ui.get_type_to_search()
-                && !ui.get_more_open()
-                && let Some(ch) = type_search_char(key)
-            {
-                ui.invoke_start_type_search(ch.into());
-                return true;
-            }
-            false
-        },
-        move |event| {
-            use slint::winit_030::winit::event::WindowEvent;
-            if let Some(ui) = drop_weak.upgrade() {
-                match event {
-                    WindowEvent::Moved(_) => {
-                        let weak = ui.as_weak();
-                        let _ =
-                            weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(10, "".into()));
-                    }
-                    WindowEvent::Focused(_)
-                    | WindowEvent::Resized(_)
-                    | WindowEvent::ScaleFactorChanged { .. } => {
-                        let weak = ui.as_weak();
-                        let _ =
-                            weak.upgrade_in_event_loop(|ui| ui.invoke_native_event(8, "".into()));
-                    }
-                    _ => {}
-                }
-            }
-        },
-        move |active| {
-            if let Some(ui) = compose_weak.upgrade() {
-                ui.set_composing(active);
-            }
-        },
-        Some(main.as_weak()),
-    );
+    bind_main_input(&main, events);
     ui_commands::bind_ui_commands(&app);
     {
         let mut s = app.borrow_mut();
@@ -4058,8 +2268,6 @@ fn run_at_with_mode(
     });
     {
         let s = app.borrow();
-        // Addresses are left out: a favicon costs a round trip, and a launch is the wrong moment to
-        // pay for it. They are fetched when an entry is added or when the cache is refreshed.
         let wanted: Vec<_> = s
             .entries
             .iter()
@@ -4090,10 +2298,8 @@ fn run_at_with_mode(
     slint::run_event_loop_until_quit()?;
     Ok(())
 }
+
 fn main() {
-    // Slint and tray-icon share muda's process-global, single-assignment handler.
-    // Application menus use TrackPopupMenuEx directly; widget popups stay in Slint
-    // so neither path takes muda's tray handler. Set before worker threads exist.
     unsafe {
         std::env::set_var("SLINT_NO_MUDA", "1");
     }
@@ -4128,159 +2334,11 @@ fn main() {
         .show();
 }
 
-struct Deferred<T>(std::cell::OnceCell<T>);
-impl<T> Default for Deferred<T> {
-    fn default() -> Self {
-        Self(std::cell::OnceCell::new())
-    }
-}
-impl<T> Deferred<T> {
-    fn get(&self) -> Option<&T> {
-        self.0.get()
-    }
-}
-impl<T> std::ops::Deref for Deferred<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        self.get().expect("auxiliary window initialized before use")
-    }
-}
-fn create_settings(
-    app: &Rc<RefCell<App>>,
-    main_weak: slint::Weak<MainWindow>,
-    data: &std::path::Path,
-) -> std::result::Result<SettingsWindow, slint::PlatformError> {
-    let settings_ui = SettingsWindow::new()?;
-    settings_ui.set_rust_version(env!("RAPTIM_RUST_VERSION").into());
-    settings_ui.set_data_path(
-        raptim::paths::normal_path(data)
-            .to_string_lossy()
-            .as_ref()
-            .into(),
-    );
-    settings_ui
-        .window()
-        .set_size(slint::LogicalSize::new(660., 480.));
-    install_settings_keys(&settings_ui, main_weak);
-    macro_rules! bind { ($ui:ident, $callback:ident, |$s:ident $(,$arg:ident)*| $body:block) => { { let weak = Rc::downgrade(app); $ui.$callback(move |$($arg),*| { if let Some(app) = weak.upgrade() { #[allow(unused_mut)] let mut $s = app.borrow_mut(); $body } }); } }; }
-    settings_ui.on_open_rust(|| {
-        let _ = platform::launch(&Target::Url {
-            url: "https://www.rust-lang.org/".into(),
-        });
-    });
-    settings_ui.on_open_slint(|| {
-        let _ = platform::launch(&Target::Url {
-            url: "https://slint.dev/".into(),
-        });
-    });
-    bind!(settings_ui, on_record_hotkey, |s| {
-        s.settings_ui
-            .set_recording_hotkey(!s.settings_ui.get_recording_hotkey());
-        s.settings_ui.set_hotkey_error("".into());
-        let enabled = !s.settings_ui.get_recording_hotkey() && s.policy.hotkey_enabled();
-        let label = s.settings.hotkey.clone();
-        s.hotkey.set_enabled(&label, enabled);
-        // A foreground request still goes through the policy, even from the settings window.
-        if s.allowed(ShowSource::Settings) {
-            platform::focus(s.settings_ui.window());
-        }
-    });
-    bind!(settings_ui, on_reset_hotkey, |s| {
-        s.settings_ui.set_recording_hotkey(false);
-        s.settings_ui
-            .set_hotkey_text(raptim::hotkey::DEFAULT.into());
-        s.apply_settings(2);
-        s.evaluate();
-    });
-    bind!(settings_ui, on_captured_hotkey, |s, value| {
-        s.settings_ui.set_recording_hotkey(false);
-        if !value.is_empty() {
-            match raptim::hotkey::parse(&value) {
-                Ok(shortcut) => {
-                    s.settings_ui.set_hotkey_text(shortcut.label.into());
-                    s.apply_settings(2);
-                }
-                Err(error) => {
-                    s.settings_ui.set_hotkey_error(error.into());
-                    s.settings_ui.set_recording_hotkey(true);
-                }
-            }
-        }
-        s.evaluate();
-    });
-    bind!(settings_ui, on_protection_bypass_changed, |s, enabled| {
-        if s.policy.bypass() != enabled {
-            s.toggle_protection_bypass();
-        }
-    });
-    bind!(settings_ui, on_change, |s, field| {
-        s.apply_settings(field);
-    });
-    bind!(settings_ui, on_browse_game, |s| {
-        s.dialog(1);
-    });
-    bind!(settings_ui, on_add_protected_app, |s, value| {
-        s.add_protected_app(value.to_string());
-        s.settings_ui.set_protected_input("".into());
-    });
-    bind!(settings_ui, on_remove_protected_app, |s, index| {
-        s.remove_protected(index);
-    });
-    bind!(settings_ui, on_export_data, |s| {
-        s.dialog(2);
-    });
-    bind!(settings_ui, on_import_data, |s| {
-        s.dialog(4);
-    });
-    bind!(settings_ui, on_confirm_restore, |s| {
-        if let Err(e) = s.restore() {
-            s.settings_ui.set_status(e.to_string().into());
-        }
-    });
-    bind!(settings_ui, on_restore_position, |s| {
-        s.show_main(ShowSource::Restore);
-        s.dock = None;
-        s.edge_hold.clear();
-        s.sync_dock_overhang();
-        platform::restore_position(s.main.window());
-        platform::decorate(s.main.window());
-        s.save_window(true);
-    });
-    bind!(settings_ui, on_open_data_dir, |s| {
-        if let Err(e) = platform::launch(&Target::Folder {
-            path: s.data_dir.to_string_lossy().into_owned(),
-        }) {
-            s.settings_ui.set_status(e.message().into());
-        }
-    });
-    bind!(settings_ui, on_open_error_log, |s| {
-        if let Some(path) = raptim::diagnostics::error_log_path()
-            && path.exists()
-        {
-            if let Err(e) = platform::reveal_file(&path) {
-                s.settings_ui.set_status(e.into());
-            }
-        } else {
-            s.settings_ui.set_has_error_log(false);
-        }
-    });
-    bind!(settings_ui, on_cancel, |s| {
-        s.close_settings();
-    });
-    let weak = Rc::downgrade(app);
-    settings_ui.window().on_close_requested(move || {
-        if let Some(app) = weak.upgrade() {
-            let mut s = app.borrow_mut();
-            s.close_settings();
-        }
-        slint::CloseRequestResponse::KeepWindowShown
-    });
-    Ok(settings_ui)
-}
-
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use app_input::{KeyAction, type_search_char};
+    use app_tools::command_exists;
     use slint::winit_030::winit::keyboard::{Key, ModifiersState, NamedKey};
 
     #[test]

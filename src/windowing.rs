@@ -15,20 +15,48 @@ pub fn invalidate(window: &slint::Window) {
 /// surface (resize, scale-factor and theme changes); a partial dirty region can otherwise
 /// retain old tiles. This deliberately does not request another frame.
 pub fn mark_full_frame(window: &slint::Window) {
+    let size = crate::platform::surface_size(window);
+    mark_physical_rect(window, 0, 0, size.width as i32, size.height as i32);
+}
+
+pub fn mark_physical_rect(window: &slint::Window, left: i32, top: i32, right: i32, bottom: i32) {
     prepare_tooltips(window);
+    let Some((x, y, width, height)) =
+        physical_rect_to_logical(left, top, right, bottom, window.scale_factor())
+    else {
+        return;
+    };
     use i_slint_core::{
         lengths::{LogicalPoint, LogicalRect, LogicalSize},
         window::WindowInner,
     };
-    let size = window.size().to_logical(window.scale_factor());
-    let region = LogicalRect::new(
-        LogicalPoint::new(0., 0.),
-        LogicalSize::new(size.width, size.height),
-    );
+    let region = LogicalRect::new(LogicalPoint::new(x, y), LogicalSize::new(width, height));
     WindowInner::from_pub(window)
         .window_adapter()
         .renderer()
         .mark_dirty_region(region.into());
+}
+
+fn physical_rect_to_logical(
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale_factor: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    if right <= left || bottom <= top || right <= 0 || bottom <= 0 {
+        return None;
+    }
+    let scale = if scale_factor.is_finite() && scale_factor > 0. {
+        scale_factor
+    } else {
+        1.
+    };
+    let x0 = (left.max(0) as f32 / scale).floor();
+    let y0 = (top.max(0) as f32 / scale).floor();
+    let x1 = (right as f32 / scale).ceil();
+    let y1 = (bottom as f32 / scale).ceil();
+    Some((x0, y0, (x1 - x0).max(1.), (y1 - y0).max(1.)))
 }
 
 /// Slint 1.18 still wraps custom Tooltip content in the styled ToolTipImpl.
@@ -69,6 +97,18 @@ pub fn prepare_tooltips(window: &slint::Window) {
     }
 }
 
+fn clamp_to_work_area(window: &slint::Window) {
+    if let Some((rect, work)) = crate::platform::geometry(window) {
+        let size = window.size();
+        if rect.width > work.width || rect.height > work.height {
+            window.set_size(slint::PhysicalSize::new(
+                size.width.min(work.width.max(1) as u32),
+                size.height.min(work.height.max(1) as u32),
+            ));
+        }
+    }
+}
+
 pub fn show(window: &slint::Window) -> Result<(), slint::PlatformError> {
     let existed = crate::platform::native_ready(window);
     crate::platform::skip_taskbar(window);
@@ -80,22 +120,8 @@ pub fn show(window: &slint::Window) -> Result<(), slint::PlatformError> {
     }
     window.show()?;
     crate::platform::decorate(window);
-    if let Some((rect, work)) = crate::platform::geometry(window) {
-        let size = window.size();
-        if rect.width > work.width || rect.height > work.height {
-            window.set_size(slint::PhysicalSize::new(
-                size.width.min(work.width.max(1) as u32),
-                size.height.min(work.height.max(1) as u32),
-            ));
-        }
-    }
-    if existed {
-        if !crate::platform::request_redraw_now(window) {
-            window.request_redraw();
-        }
-    } else {
-        invalidate(window);
-    }
+    clamp_to_work_area(window);
+    invalidate(window);
     Ok(())
 }
 pub fn has_popup(window: &slint::Window) -> bool {
@@ -108,17 +134,82 @@ pub fn close_popups(window: &slint::Window) {
     i_slint_core::window::WindowInner::from_pub(window).close_all_popups();
 }
 
+fn finish_child_show(child: &slint::Window, parent: &slint::Window) {
+    crate::platform::skip_taskbar(child);
+    crate::platform::decorate(child);
+    clamp_to_work_area(child);
+    crate::platform::set_owner(child, parent);
+    crate::platform::center_child(child, parent);
+    crate::platform::focus(child);
+    invalidate(child);
+}
+
 pub fn show_child(
     child: &slint::Window,
     parent: &slint::Window,
 ) -> Result<(), slint::PlatformError> {
+    show_child_with(child, parent, || {})
+}
+
+fn schedule_child_finish(
+    child_adapter: std::rc::Weak<dyn i_slint_core::window::WindowAdapter>,
+    parent_adapter: std::rc::Weak<dyn i_slint_core::window::WindowAdapter>,
+    delay: std::time::Duration,
+    attempts_left: u8,
+    on_async_ready: impl FnOnce() + 'static,
+) {
+    slint::Timer::single_shot(delay, move || {
+        let (Some(child_adapter_rc), Some(parent_adapter_rc)) =
+            (child_adapter.upgrade(), parent_adapter.upgrade())
+        else {
+            return;
+        };
+        let child = child_adapter_rc.window();
+        let parent = parent_adapter_rc.window();
+        if !child.is_visible() {
+            return;
+        }
+        if crate::platform::native_ready(child) {
+            finish_child_show(child, parent);
+            on_async_ready();
+        } else if attempts_left > 0 {
+            schedule_child_finish(
+                child_adapter,
+                parent_adapter,
+                std::time::Duration::from_millis(16),
+                attempts_left - 1,
+                on_async_ready,
+            );
+        }
+    });
+}
+
+pub fn show_child_with(
+    child: &slint::Window,
+    parent: &slint::Window,
+    on_async_ready: impl FnOnce() + 'static,
+) -> Result<(), slint::PlatformError> {
     crate::platform::center_child(child, parent);
     crate::platform::set_owner(child, parent);
     show(child)?;
-    // The first show creates the native handle and can change DPI / constrained size.
-    crate::platform::set_owner(child, parent);
-    crate::platform::center_child(child, parent);
-    crate::platform::focus(child);
+    if crate::platform::native_ready(child) {
+        crate::platform::set_owner(child, parent);
+        crate::platform::center_child(child, parent);
+        crate::platform::focus(child);
+        return Ok(());
+    }
+    // Slint's winit backend defers HWND creation until the event loop's next
+    // about_to_wait pass, so owner, decoration and foreground must run once it exists.
+    use i_slint_core::window::WindowInner;
+    let child_adapter = std::rc::Rc::downgrade(&WindowInner::from_pub(child).window_adapter());
+    let parent_adapter = std::rc::Rc::downgrade(&WindowInner::from_pub(parent).window_adapter());
+    schedule_child_finish(
+        child_adapter,
+        parent_adapter,
+        std::time::Duration::ZERO,
+        20,
+        on_async_ready,
+    );
     Ok(())
 }
 
@@ -204,6 +295,19 @@ mod tests {
                 }
             ),
             (1400, 440)
+        );
+    }
+
+    #[test]
+    fn converts_physical_update_rects_outward_to_logical_bounds() {
+        assert_eq!(physical_rect_to_logical(0, 0, 0, 100, 1.5), None);
+        assert_eq!(
+            physical_rect_to_logical(1, 0, 50, 200, 1.5),
+            Some((0., 0., 34., 134.))
+        );
+        assert_eq!(
+            physical_rect_to_logical(-5, -3, 10, 10, 1.25),
+            Some((0., 0., 8., 8.))
         );
     }
 }

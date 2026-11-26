@@ -13,20 +13,62 @@ struct Document {
     initials: Vec<String>,
     notes: String,
 }
-fn romanize(text: &str) -> (String, String) {
+fn romanize(text: &str) -> (String, Vec<String>) {
     let mut full = String::new();
-    let mut initials = String::new();
+    let mut char_initials = String::new();
+    let mut word_initials = String::new();
+    let mut camel_initials = String::new();
+    let mut at_word_start = true;
+    let mut prev_ascii_lower = false;
+
     for c in text.chars() {
         if let Some(p) = c.to_pinyin() {
-            full.push_str(p.plain());
-            initials.push(p.plain().chars().next().unwrap());
+            let plain = p.plain();
+            full.push_str(plain);
+            if let Some(first) = plain.chars().next() {
+                char_initials.push(first);
+                word_initials.push(first);
+                camel_initials.push(first);
+            }
+            at_word_start = true;
+            prev_ascii_lower = false;
         } else {
-            full.push(c);
-            initials.push(c);
+            for low in c.to_lowercase() {
+                full.push(low);
+                char_initials.push(low);
+            }
+            if c.is_alphanumeric() {
+                let low = c.to_lowercase().next().unwrap_or(c);
+                if at_word_start {
+                    word_initials.push(low);
+                    camel_initials.push(low);
+                } else if c.is_uppercase() && prev_ascii_lower {
+                    camel_initials.push(low);
+                }
+                at_word_start = false;
+                prev_ascii_lower = c.is_ascii_lowercase();
+            } else {
+                at_word_start = true;
+                prev_ascii_lower = false;
+            }
         }
     }
-    (full.to_lowercase(), initials.to_lowercase())
+    let mut initials = vec![char_initials];
+    if !word_initials.is_empty() && !initials.contains(&word_initials) {
+        initials.push(word_initials);
+    }
+    if !camel_initials.is_empty() && !initials.contains(&camel_initials) {
+        initials.push(camel_initials);
+    }
+    (full, initials)
 }
+
+fn split_aliases(aliases: &str) -> impl Iterator<Item = &str> {
+    aliases
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | ';' | '；' | '、' | '|'))
+        .filter(|s| !s.is_empty())
+}
+
 impl SearchIndex {
     pub fn sync(&mut self, entries: &[Entry]) {
         let ids: std::collections::HashSet<_> = entries.iter().map(|e| e.id).collect();
@@ -42,10 +84,21 @@ impl SearchIndex {
                 continue;
             }
             let source = (e.name.clone(), e.aliases.clone(), e.notes.clone());
-            let names: Vec<_> = std::iter::once(e.name.to_lowercase())
-                .chain(e.aliases.split_whitespace().map(str::to_lowercase))
+            let raw_tokens: Vec<&str> = std::iter::once(e.name.as_str())
+                .chain(split_aliases(&e.aliases))
                 .collect();
-            let (full, initials) = names.iter().map(|n| romanize(n)).unzip();
+            let names: Vec<String> = raw_tokens.iter().map(|s| s.to_lowercase()).collect();
+            let mut full = Vec::with_capacity(raw_tokens.len());
+            let mut initials = Vec::new();
+            for token in &raw_tokens {
+                let (f, init_list) = romanize(token);
+                full.push(f);
+                for init in init_list {
+                    if !initials.contains(&init) {
+                        initials.push(init);
+                    }
+                }
+            }
             self.documents.insert(
                 e.id,
                 Document {
@@ -151,5 +204,42 @@ mod tests {
         index.sync(&entries);
         assert!(index.query("jsq", &entries).is_empty());
         assert_eq!(index.query("zd", &entries), [1]);
+    }
+    #[test]
+    fn english_word_and_camel_initials_and_punctuation_separated_aliases() {
+        let entries = vec![
+            Entry {
+                id: 1,
+                collection_id: 1,
+                name: "Visual Studio Code".into(),
+                aliases: "编辑器,vscode，代码;ide".into(),
+                notes: String::new(),
+                target: Target::Url {
+                    url: "https://code.visualstudio.com".into(),
+                },
+                position: 0,
+                icon: vec![],
+            },
+            Entry {
+                id: 2,
+                collection_id: 1,
+                name: "GitHub Desktop".into(),
+                aliases: String::new(),
+                notes: String::new(),
+                target: Target::Url {
+                    url: "https://desktop.github.com".into(),
+                },
+                position: 1,
+                icon: vec![],
+            },
+        ];
+        let mut index = SearchIndex::default();
+        index.sync(&entries);
+        assert_eq!(index.query("vsc", &entries), [1]);
+        assert_eq!(index.query("vscode", &entries), [1]);
+        assert_eq!(index.query("bjq", &entries), [1]);
+        assert_eq!(index.query("ide", &entries), [1]);
+        assert_eq!(index.query("gd", &entries), [2]);
+        assert_eq!(index.query("ghd", &entries), [2]);
     }
 }
