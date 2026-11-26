@@ -4,7 +4,7 @@
 
 # Raptim
 
-**轻量级 Windows 本地快速启动器 —— 快速检索 · 贴边收纳 · 游戏勿扰 · 单目录便携**
+**一款面向 Windows 的轻量本地启动器**
 
 [![License](https://img.shields.io/badge/license-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim/stargazers)
@@ -24,38 +24,32 @@
 
 ## 项目简介
 
-Raptim 是一款面向 Windows 的本地快速启动器，基于 **Rust** 与 **Slint 1.18.0（Fluent 控件 · winit 后端 · 软件渲染器）** 构建，使用内置 **SQLite（WAL 模式）** 在单个数据目录保存全部配置、分组与图标。应用不依赖 WebView、JavaScript 或 C#，不内置磁盘索引（Everything）、账号、云服务或换肤系统，仅在用户保存/拖入网址或手动刷新网页图标时按需请求目标站点图标。
+Raptim 用于集中收纳常用的程序、文件、文件夹、网址和系统应用，平时可贴边自动隐藏，需要时通过全局热键或鼠标贴边即可呼出，输入名称或拼音就能打开目标。
 
-> **当前状态**：本地开发预览版本（`0.0.0`），界面文案与文档以简体中文维护。
+软件基于 **Rust**、**Slint** 与内置 **SQLite** 原生编写，不依赖 WebView、GC 运行时或后台全盘扫描，所有数据离线保存在本地目录中（仅在添加或刷新网址项目时按需请求站点图标）。
 
-## 功能特性
+> 当前处于本地开发预览阶段（`0.0.0`），界面与文档均以简体中文维护。
 
-### 组织与视图
+## 技术栈与选型原因
 
-- **双层分类结构**：标题栏下方提供可横向滚动的一级分组栏，左侧提供支持名称换行的纵向子分类栏；两栏尾部均配备就近「＋」按钮新建分组/子分类（空白处不弹菜单），支持 `F2` 就地改名、同级拖拽排序、分类跨分组移动及迁移/直接删除约束。
-- **自适应多视图**：项目区支持小（最多 5 列）/ 中（最多 4 列）/ 大（最多 3 列）图标网格与单列列表视图，窄窗自动减少列数；悬停显示名称、完整路径或网址及最多 6 行备注，状态提示条 6 秒自动隐藏并合并重复提示。
-- **单页滚动编辑**：支持程序、文件、文件夹、网址（自动补全 `https://`）、快捷方式、打包应用（`shell:AppsFolder` 列表选择）六类目标；程序与快捷方式支持普通 / 最大化 / 最小化打开方式，编辑窗支持未保存保护与拖入单张图片作图标。
+| 技术层 | 选型 | 选型原因 |
+| --- | --- | --- |
+| 核心语言与构建 | Rust 1.92+（Edition 2024） | 原生编译且无垃圾回收停顿，不依赖额外运行时；Release 开启 `opt-level = "z"`、`lto = "thin"` 与 `strip = true`，直接产出轻巧的单可执行文件 |
+| 界面与渲染 | Slint 1.18.0（Fluent 样式、winit 后端与软件渲染器） | `.slint` 声明式界面在编译期转为机器码，避开 WebView / Electron 的浏览器进程开销；选用 CPU 软件渲染器替代 Qt 与 GPU 后端，避免常驻显存和着色器缓存，更适合长时间驻留后台的轻量工具 |
+| 本地存储 | `rusqlite`（内嵌 SQLite，WAL 模式） | 零外部数据库服务，单文件即可承载配置、分组与图标；编译期通过 `.cargo/config.toml` 裁剪 FTS3/FTS5、RTree、JSON1 等未使用模块，减少体积与冗余开销 |
+| Windows 系统集成 | `windows` 0.62 与 `tray-icon` | 直接调用 Win32 Shell、DWM、OLE 拖放、全局热键、全屏通知判定与 WinHTTP，避免重型中间层，能精细控制贴边、置顶和游戏勿扰等桌面行为 |
+| 精简依赖策略 | `image`、`pinyin` 等 | 严格按需开启特性（如 `image` 仅保留 PNG/JPEG/ICO，`pinyin` 仅保留无声调 `plain` 词表），配合工作线程异步处理耗时任务，减少二进制体积与常驻内存 |
 
-### 快速检索与键盘流
+更多架构细节与实测数据见[技术架构](docs/ARCHITECTURE.md)和[性能基准与边界](docs/PERFORMANCE.md)。
 
-- **窗内搜索浮层**：支持「全部 / 当前分组 / 当前分类」三种范围，对名称、别名、备注（不匹配路径）进行多关键词、全拼及逐字/词首/驼峰首字母相关度检索；内置 IME 输入法组合态保护，并可选开启「获焦后直接打字搜索」。
-- **完整键盘操作**：支持 `Ctrl+F` 搜索、`Ctrl+N` 新建、`Ctrl+,` 打开设置、`Ctrl+Tab`/`Ctrl+Shift+Tab` 切换分类、方向键/`Home`/`End` 移动焦点、`Enter` 启动、`Shift+Enter` 管理员打开、`Alt+Enter`/`F2` 编辑或改名、`Delete` 删除以及 `Esc` 分层关闭。
+## 核心功能
 
-### 多途径导入与批量管理
-
-- **外部拖入与软件扫描**：接入原生 OLE 文件与浏览器网址拖入（拖至分类节点直接归入该分类），提供「扫描导入软件」（检索开始菜单快捷方式与已安装应用）和「检查失效项目」（后台巡检并提供重定位/编辑/移除）。
-- **多选整理与路径转换**：支持 `Shift` 连选、`Space` 勾选、`Ctrl+A` 全选批量移动/复制/删除（保留原文件，遇重复目标取消整批）；支持按分组/分类树形多选并将程序路径与工作目录批量转换为相对或绝对路径。
-
-### 贴边收纳与游戏勿扰
-
-- **阻尼贴边收纳**：支持左/右/上三边停靠与临界阻尼动画，露边宽度支持 **1–12 物理像素**（可隐藏露边并用悬停或热键唤出），支持 150 / 250 / 450 ms 收起延迟、贴边过伸隐藏贴边侧系统圆角与「窗口始终置顶」。
-- **多渠道唤出与失焦隐藏**：关闭按钮语义为隐藏窗口，支持自定义全局热键（默认 `Ctrl+Alt+Space`）、系统托盘（左键唤出，右键含本次有效的「暂停自动隐藏」与「暂停游戏勿扰」）、按数据目录隔离的第二实例唤醒及开机启动（`--silent` 静默启动）。
-- **全屏与严格程序保护**：结合全屏窗口几何、`SHQueryUserNotificationState` 与最多 100 项「严格保护程序」拦截游戏期间误呼出；支持按需记录脱敏保护判定日志（`protection-log.csv`）。
-
-### 本地便携与数据边界
-
-- **单目录存储**：默认在 `raptim.exe` 同级目录保存 `raptim.db`（格式版本 2，独立 `icon BLOB` 列与物化 `dup_key` 去重键），支持 JSON 版本 2 导出与事务原子恢复；常开脱敏故障日志 `error-log.txt`。
-- **路径不可达就地重定位**：区分启动失败原因，仅对目标缺失、设备未就绪、网络不可用及无效路径四类有文件路径的目标提供就地重定位（保留参数、工作目录与打开方式）。
+- **两级分组收纳**：支持一级分组与二级分类，可统一管理程序、文件、文件夹、网址、快捷方式和 Microsoft Store / UWP 应用，并支持拖拽排序、跨组整理以及小/中/大图标网格与列表视图切换。
+- **拼音与键盘快搜**：按名称、别名和备注即时筛选，支持中文全拼、首字母与多关键词匹配，也可开启获焦后直接打字搜索；呼出、检索、切换分类、启动或以管理员身份运行都可全程用键盘完成。
+- **快捷收录与批量维护**：支持直接拖入本地文件和浏览器网址，提供开始菜单与已安装应用扫描导入，可多选批量移动、复制、移除项目，并支持检查失效条目、就地重定位以及相对/绝对路径批量转换。
+- **贴边收纳与快捷唤出**：窗口可停靠在屏幕左、右或顶部边缘自动收起，鼠标贴边、全局热键（默认 `Ctrl+Alt+Space`）或点击托盘图标均可随时唤出；支持自定义露边宽度、收起延迟、失焦隐藏、窗口置顶和开机静默启动。
+- **游戏全屏勿扰**：自动识别全屏游戏或演示场景，并支持手动添加严格保护程序，避免游戏过程中误触热键或鼠标贴边弹出窗口；需要时也可在托盘中临时暂停。
+- **离线本地与数据迁移**：所有配置、分组和图标默认存放在程序同级目录的 `raptim.db` 中，支持 JSON 导出与导入恢复，也能通过 `--data-dir` 指定独立数据目录，方便多套配置隔离或整目录迁移。
 
 ## 快速开始
 
@@ -80,41 +74,41 @@ cargo run --release --locked
 # 独立数据目录（适合开发、测试与多库隔离）
 .\target\release\raptim.exe --data-dir C:\Temp\RaptimTrial
 
-# 静默启动（停靠时以无焦点露边收纳，否则隐藏驻留托盘）
+# 静默启动（已贴边时直接收起，否则隐藏到系统托盘）
 .\target\release\raptim.exe --silent
 ```
 
-> **数据提示**：Raptim 只读写格式版本 2 的数据库与 JSON 导出，不提供内置自动备份。正式替换或备份数据库前，请先退出程序并将整个数据目录（含 `raptim.db`、`-wal`、`-shm`）一并复制；详见[使用指南](docs/USAGE.md#数据备份导出恢复与故障排查)。
+> **备份提示**：软件不提供内置自动备份。如需备份或替换数据，请先退出 Raptim，再将整个数据目录（包含 `raptim.db`、`raptim.db-wal` 与 `raptim.db-shm`）一并复制，详见[使用指南](docs/USAGE.md#数据备份导出恢复与故障排查)。
 
 ## 文档
 
 | 文档 | 内容 |
 | --- | --- |
-| [使用指南](docs/USAGE.md) | 启动参数、界面操作、快捷键表、设置项说明、拖入/扫描/重定位与数据恢复 |
-| [技术架构](docs/ARCHITECTURE.md) | 模块职责、事件模型、SQLite v2 表结构与 `dup_key` 语义、显示保护状态机与渲染桥接 |
-| [开发与构建](docs/DEVELOPMENT.md) | 环境准备、`.cargo/config.toml` 说明、无头验证门禁、测试边界与更新日志流程 |
-| [性能基准与边界](docs/PERFORMANCE.md) | 存储 v2 实测对比、图标虚拟化与 24 MiB 缓存策略、DWM 合成器边界与否决项记录 |
-| [更新日志](CHANGELOG.md) | 版本索引与当前未发布改动记录（[Unreleased 草稿](changelog/unreleased/zh-CN.md)） |
-| [许可证 (GPL-3.0-only)](LICENSE) · [第三方组件](THIRD_PARTY_NOTICES.md) | GNU GPLv3 原文与全量直接依赖、Rust 标志及内置资产归属说明 |
+| [使用指南](docs/USAGE.md) | 启动参数、日常操作、快捷键、全部设置项与数据恢复说明 |
+| [技术架构](docs/ARCHITECTURE.md) | 模块划分、事件模型、SQLite v2 表结构、防打扰状态机与窗口边界 |
+| [开发与构建](docs/DEVELOPMENT.md) | 环境要求、编译配置、无头验证脚本、测试边界与更新日志流程 |
+| [性能基准与边界](docs/PERFORMANCE.md) | 存储与启动实测数据、图标缓存策略及 DWM 合成器已知边界 |
+| [更新日志](CHANGELOG.md) | 版本发布索引与当前未发布改动记录（[Unreleased 草稿](changelog/unreleased/zh-CN.md)） |
+| [许可证 (GPL-3.0-only)](LICENSE) · [第三方组件](THIRD_PARTY_NOTICES.md) | GNU GPLv3 协议全文、直接依赖许可核查与内置资产归属 |
 
 ## 开发验证
 
-仓库提供全程无需前台窗口的无头质量门禁脚本：
+仓库提供无需弹出窗口的本地验证脚本，可一键执行格式化检查、Clippy、单元测试与 Release 构建：
 
 ```powershell
-powershell -File scripts/verify.ps1           # fmt 检查 + clippy(-D warnings) + 单元测试 + release 构建
-powershell -File scripts/verify.ps1 -Release  # 同一组门禁，clippy 与单元测试也走 release profile
+powershell -File scripts/verify.ps1           # 运行 fmt、clippy(-D warnings)、单元测试与 release 构建
+powershell -File scripts/verify.ps1 -Release  # 在 release 模式下执行完整验证
 ```
 
-若本机杀毒软件锁定构建脚本文件或需要更多构建参数，详见[开发与构建指南](docs/DEVELOPMENT.md#质量检查与验证门禁)。
+如需自定义构建目录、限制并发数或了解完整参数，见[开发与构建指南](docs/DEVELOPMENT.md#质量检查与验证门禁)。
 
 ## 许可证
 
 Copyright (C) 2026 KHWLGH
 
-本项目自有贡献以 **GNU General Public License v3.0 only（`GPL-3.0-only`）** 开源发布，完整许可正文见 [LICENSE](LICENSE)，软件按原样提供、不作任何担保。
+本软件基于 **GNU General Public License v3.0（`GPL-3.0-only`）** 开源发布，完整协议见 [LICENSE](LICENSE)，按现状提供且不附带任何担保。
 
-Slint 1.18.0 同步采用 `GPL-3.0-only` 许可路径（「设置 → 关于」保留官方 `AboutSlint` 组件作为技术归属展示）；其余全部直接与传递依赖均使用宽松开源许可并与 `GPL-3.0-only` 兼容。内置 `ui/icons/rust.svg` 遵循 CC BY 4.0，全部依赖与资产归属明细见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Slint 1.18.0 同步采用 `GPL-3.0-only` 许可路径（「设置 → 关于」界面保留官方 `AboutSlint` 组件作为归属展示），其余传递与直接依赖均使用与 GPL-3.0-only 兼容的宽松开源许可。内置 `ui/icons/rust.svg` 遵循 CC BY 4.0 协议，完整依赖与资产清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 相关链接
 
