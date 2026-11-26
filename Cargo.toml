@@ -5,6 +5,8 @@ edition = "2024"
 rust-version = "1.92"
 publish = false
 description = "A small, local Windows launcher"
+license = "GPL-3.0-only"
+repository = "https://github.com/KHWLGH/Raptim"
 build = "build.rs"
 
 [dependencies]
