@@ -66,18 +66,37 @@ pub fn error(kind: &str, text: &str) {
     append("error-log.txt", &format!("{at} {kind} {}\n", redact(text)));
 }
 
-pub fn protection_log_enabled() -> bool {
+fn protection_log_enabled() -> bool {
     PROTECTION_LOG.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn csv_cell(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if matches!(c, '\r' | '\n') { ' ' } else { c })
+        .collect();
+    if clean.contains([',', '"']) {
+        format!("\"{}\"", clean.replace('"', "\"\""))
+    } else {
+        clean
+    }
 }
 
 /// Opt-in only: rows carry foreground paths, so nothing is written until the user asks.
 pub fn set_protection_log(enabled: bool) {
     let was = PROTECTION_LOG.swap(enabled, std::sync::atomic::Ordering::Relaxed);
     if enabled && !was {
-        append(
-            "protection-log.csv",
-            "elapsed,kind,source,protection,detail\n",
-        );
+        let Some(dir) = DATA_DIR.get() else {
+            return;
+        };
+        let path = dir.join("protection-log.csv");
+        let Ok(_guard) = WRITES.lock() else { return };
+        let empty = std::fs::metadata(&path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+        if empty && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(b"elapsed,kind,source,protection,detail\n");
+        }
     }
 }
 
@@ -91,7 +110,10 @@ pub fn protection(kind: &str, source: &str, protection: &str, detail: &str) {
         .as_millis();
     append(
         "protection-log.csv",
-        &format!("{at},{kind},{source},{protection},{}\n", redact(detail)),
+        &format!(
+            "{at},{kind},{source},{protection},{}\n",
+            csv_cell(&redact(detail))
+        ),
     );
 }
 
@@ -99,17 +121,46 @@ pub fn error_log_path() -> Option<PathBuf> {
     DATA_DIR.get().map(|dir| dir.join("error-log.txt"))
 }
 
+fn replace_ascii_ci(text: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    let lower = text.to_ascii_lowercase();
+    let needle_low = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(rel) = lower[cursor..].find(&needle_low) {
+        let start = cursor + rel;
+        let end = start + needle_low.len();
+        if text.is_char_boundary(start) && text.is_char_boundary(end) {
+            out.push_str(&text[cursor..start]);
+            out.push_str(replacement);
+            cursor = end;
+        } else {
+            break;
+        }
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
 /// Diagnostic files are the one thing a user is asked to share, so drop the home directory and
 /// the launcher's own data directory from every line before it is written or previewed.
 pub fn redact(text: &str) -> String {
     let mut out = text.to_string();
     if let Some(dir) = DATA_DIR.get() {
-        out = out.replace(&dir.to_string_lossy().to_string(), "<数据目录>");
+        let raw = dir.to_string_lossy();
+        let normal = crate::paths::normal_path(dir);
+        let normal_str = normal.to_string_lossy();
+        out = replace_ascii_ci(&out, &raw, "<数据目录>");
+        if normal_str != raw {
+            out = replace_ascii_ci(&out, &normal_str, "<数据目录>");
+        }
     }
     if let Some(home) = std::env::var_os("USERPROFILE") {
-        let home = home.to_string_lossy().into_owned();
+        let home = home.to_string_lossy();
         if !home.is_empty() {
-            out = out.replace(&home, "<用户>");
+            out = replace_ascii_ci(&out, &home, "<用户>");
         }
     }
     out
@@ -148,22 +199,40 @@ mod tests {
         protection("transition", "Hotkey", "Fullscreen", "geometry matched");
         assert!(!log.exists(), "nothing is recorded until the user opts in");
         set_protection_log(true);
-        protection("blocked", "NativeMenu", "Strict", "menu refused");
+        protection("blocked", "NativeMenu", "Strict", "menu, refused");
+        set_protection_log(false);
+        set_protection_log(true);
         set_protection_log(false);
         let rows = std::fs::read_to_string(&log).unwrap();
         assert!(
             rows.starts_with("elapsed,kind,source,protection,detail\n"),
             "{rows}"
         );
-        assert!(rows.contains("blocked,NativeMenu,Strict"), "{rows}");
-        assert_eq!(rows.lines().count(), 2, "only the opted-in row is kept");
+        assert!(
+            rows.contains("blocked,NativeMenu,Strict,\"menu, refused\""),
+            "{rows}"
+        );
+        assert_eq!(
+            rows.lines().count(),
+            2,
+            "header must not duplicate on re-enable"
+        );
     }
     #[test]
     fn redaction_shortens_the_two_leading_path_shapes() {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
-        let text = format!("{}\\Apps\\tool.exe 与 {} 的相对路径", home, home);
+        let text = format!(
+            "{}\\Apps\\tool.exe 与 {} 的相对路径",
+            home,
+            home.to_ascii_lowercase()
+        );
         let redacted = redact(&text);
-        assert!(!redacted.contains(&home), "{redacted}");
+        assert!(
+            !redacted
+                .to_ascii_lowercase()
+                .contains(&home.to_ascii_lowercase()),
+            "{redacted}"
+        );
         assert!(redacted.contains("tool.exe"), "paths survive as names");
     }
     #[test]

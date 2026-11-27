@@ -162,6 +162,63 @@ pub fn close_popups(window: &slint::Window) {
     i_slint_core::window::WindowInner::from_pub(window).close_all_popups();
 }
 
+/// Returns true only when `(x, y)` (logical coordinates) hits an interactive item inside an
+/// enabled `DragArea` — never scrollbars, text inputs, overlays, popups, or blank areas.
+pub fn hit_test_drag_area(window: &slint::Window, x: f32, y: f32) -> bool {
+    if has_popup(window) {
+        return false;
+    }
+    use i_slint_core::{
+        item_tree::{ItemRc, ItemVisitorResult, TraversalOrder, visit_items},
+        items::{DragArea, ItemRef, TextInput, TouchArea, WindowMoveArea},
+        lengths::LogicalPoint,
+        window::WindowInner,
+    };
+    let Some(component) = WindowInner::from_pub(window).try_component() else {
+        return false;
+    };
+    let mut hit_drag = false;
+    visit_items(
+        &component,
+        TraversalOrder::FrontToBack,
+        |item_tree, item, index, &(pos, in_drag_area)| {
+            let item_rc = ItemRc::new(item_tree.clone(), index);
+            let geom = item_rc.geometry();
+            let contains = geom.contains(pos);
+            if !contains && item.as_ref().clips_children() {
+                return ItemVisitorResult::SkipChildren;
+            }
+            let next_pos = pos - geom.origin.to_vector();
+            if contains {
+                if let Some(touch) = ItemRef::downcast_pin::<TouchArea>(item)
+                    && touch.enabled()
+                {
+                    hit_drag = in_drag_area;
+                    return ItemVisitorResult::Abort;
+                }
+                if let Some(input) = ItemRef::downcast_pin::<TextInput>(item)
+                    && input.enabled()
+                {
+                    hit_drag = false;
+                    return ItemVisitorResult::Abort;
+                }
+                if let Some(move_area) = ItemRef::downcast_pin::<WindowMoveArea>(item)
+                    && move_area.enabled()
+                {
+                    hit_drag = false;
+                    return ItemVisitorResult::Abort;
+                }
+            }
+            let next_drag = in_drag_area
+                || (contains
+                    && ItemRef::downcast_pin::<DragArea>(item).is_some_and(|drag| drag.enabled()));
+            ItemVisitorResult::Continue((next_pos, next_drag))
+        },
+        (LogicalPoint::new(x, y), false),
+    );
+    hit_drag
+}
+
 fn finish_child_show(child: &slint::Window, parent: &slint::Window) {
     crate::platform::skip_taskbar(child);
     crate::platform::decorate(child);
@@ -170,13 +227,6 @@ fn finish_child_show(child: &slint::Window, parent: &slint::Window) {
     crate::platform::center_child(child, parent);
     crate::platform::focus(child);
     invalidate(child);
-}
-
-pub fn show_child(
-    child: &slint::Window,
-    parent: &slint::Window,
-) -> Result<(), slint::PlatformError> {
-    show_child_with(child, parent, || {})
 }
 
 fn schedule_child_finish(

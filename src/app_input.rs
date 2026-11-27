@@ -45,7 +45,7 @@ fn apply_common_winit_event(
             if *full_frame_pending {
                 if platform::surface_paintable(window) {
                     *full_frame_pending = false;
-                    let _ = platform::take_os_dirty(window);
+                    platform::clear_os_dirty(window);
                     windowing::mark_full_frame(window);
                 }
             } else if let Some(dirty) = platform::take_os_dirty(window) {
@@ -135,7 +135,10 @@ pub(super) fn install_keys(
                                 0.
                             }
                         });
-                    if *state == ElementState::Pressed && pointer.1 >= top {
+                    if *state == ElementState::Pressed
+                        && pointer.1 >= top
+                        && windowing::hit_test_drag_area(window, pointer.0 as f32, pointer.1 as f32)
+                    {
                         gesture.press(pointer, Instant::now());
                     } else if *state == ElementState::Released && gesture.release() {
                         window.dispatch_event(slint::platform::WindowEvent::PointerExited);
@@ -209,11 +212,6 @@ pub(super) fn install_settings_keys(ui: &SettingsWindow, events: EventSink) {
             return result;
         }
         match event {
-            WindowEvent::Focused(active) => {
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_window_active(*active);
-                }
-            }
             WindowEvent::Ime(value) => {
                 let active = apply_ime_signal(&mut composition, value);
                 if let Some(ui) = weak.upgrade() {

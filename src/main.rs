@@ -57,6 +57,7 @@ struct App {
     main: MainWindow,
     weak_self: std::rc::Weak<RefCell<App>>,
     interaction_timer: slint::Timer,
+    poll_timer: slint::Timer,
     frame_clock: platform::FrameClock,
     position_restored: bool,
     store: Store,
@@ -296,7 +297,6 @@ impl App {
                 }
             }
             windowing::invalidate(self.main.window());
-            platform::request_redraw_now(self.main.window());
         } else if let Some((old_edge, old_pad)) = prev
             && let Some((actual, work)) = platform::geometry(self.main.window())
         {
@@ -309,7 +309,6 @@ impl App {
                 .clamp(work.y, work.y + (work.height - visible.height).max(0));
             platform::set_bounds(self.main.window(), visible);
             windowing::invalidate(self.main.window());
-            platform::request_redraw_now(self.main.window());
         }
     }
 
@@ -526,16 +525,6 @@ impl App {
             }
             return;
         }
-        self.main
-            .set_window_active(platform::window_active(self.main.window()));
-        if let Some(ui) = self.settings_ui.get() {
-            ui.set_window_active(platform::window_active(ui.window()));
-        }
-        if let Some(editor) = &self.editor {
-            editor
-                .window
-                .set_window_active(platform::window_active(editor.window.window()));
-        }
         if self.main.get_search_open() != self.search_was_open {
             if self.main.get_search_open() {
                 self.main.set_selected_id(0);
@@ -631,11 +620,13 @@ impl App {
                 }
             }
         }
+        let captured = platform::has_mouse_capture(self.main.window());
         let paused = (!self.protected_edge_waiting && self.auto_hide_guard().paused())
-            || (self.edge_progress == 0.
-                && platform::mouse_down()
-                && platform::geometry(self.main.window())
-                    .is_some_and(|(rect, _)| raptim::docking::contains(rect, cursor)));
+            || (platform::mouse_down()
+                && ((captured && !self.protected_edge_waiting && self.edge_progress < 0.5)
+                    || (self.edge_progress == 0.
+                        && platform::geometry(self.main.window())
+                            .is_some_and(|(rect, _)| raptim::docking::contains(rect, cursor)))));
         if paused {
             if self.edge_progress > 0. || self.edge_motion.is_some() {
                 self.animate_edge(false);
@@ -734,12 +725,15 @@ impl App {
             }
         } else {
             self.edge_hold.clear();
-            let opacity = self.focus_hide.opacity(
-                self.settings.hide_on_focus_loss,
-                platform::app_has_focus(),
-                platform::animations_enabled(),
-                now,
-            );
+            let focused = platform::app_has_focus();
+            let animated = if self.settings.hide_on_focus_loss && !focused {
+                platform::animations_enabled()
+            } else {
+                false
+            };
+            let opacity =
+                self.focus_hide
+                    .opacity(self.settings.hide_on_focus_loss, focused, animated, now);
             platform::set_opacity(self.main.window(), opacity);
             if opacity == 0. && self.settings.hide_on_focus_loss {
                 self.hide_all();
@@ -771,7 +765,7 @@ impl App {
         platform::set_opacity(self.main.window(), 1.);
         if self.auto_hide_guard().paused() {
             self.edge_since = now;
-            return true;
+            return false;
         }
         let strip = self.edge_strip_px();
         let cursor = platform::cursor();
@@ -852,7 +846,7 @@ impl App {
             self.entries.iter().map(|e| e.id).collect()
         } else {
             self.collections = self.store.collections()?;
-            let (entries, rehashed) = self.store.entries_reusing_icons(&self.entries)?;
+            let (entries, rehashed) = self.store.entries_reusing_icons(&mut self.entries)?;
             self.entries = entries;
             rehashed
         };
@@ -928,19 +922,6 @@ impl App {
             })
             .collect();
         self.main.set_groups(Rc::new(VecModel::from(groups)).into());
-        self.main.set_destinations(
-            Rc::new(VecModel::from(
-                self.collections
-                    .iter()
-                    .filter(|c| c.parent_id.is_some())
-                    .map(|c| NavItem {
-                        id: c.id as i32,
-                        name: self.collection_name(c.id),
-                    })
-                    .collect::<Vec<_>>(),
-            ))
-            .into(),
-        );
         self.main.set_group_id(self.group as i32);
         let categories: Vec<_> = self
             .collections
@@ -979,7 +960,9 @@ impl App {
             self.visible_icons.clear();
             self.icon_bands.clear();
         }
-        self.render_search();
+        if self.main.get_search_open() {
+            self.render_search();
+        }
         self.update_visible_icons();
         self.main.window().request_redraw();
     }
@@ -1130,6 +1113,7 @@ impl App {
                 self.main.set_status(deferred.into());
             }
         }
+        self.sync_poll_timer();
     }
 
     fn allowed(&mut self, source: ShowSource) -> bool {
@@ -1201,6 +1185,7 @@ impl App {
         }
         self.icon_cache.retain(&self.visible_icons);
         self.main.invoke_close_popups();
+        self.sync_poll_timer();
     }
 
     fn show_main(&mut self, source: ShowSource) {
@@ -1244,6 +1229,7 @@ impl App {
                     self.install_external_drop();
                     windowing::invalidate(self.main.window());
                     self.schedule_interaction();
+                    self.sync_poll_timer();
                 }
             }
             return;
@@ -1289,6 +1275,7 @@ impl App {
             let _ = self.show_child_window(editor.window.window());
         }
         self.apply_theme();
+        self.sync_poll_timer();
     }
 
     fn launch_elevated(&mut self, id: i64) {
@@ -1342,8 +1329,9 @@ impl App {
         self.main.set_status("".into());
         let sink = self.events.clone();
         let settings = self.settings.clone();
+        let bypass = self.policy.bypass();
         std::thread::spawn(move || {
-            let failure = if platform::protection(&settings) == Protection::Normal {
+            let failure = if bypass || platform::protection(&settings) == Protection::Normal {
                 platform::launch(&target).err().map(|error| Failure {
                     entry: id,
                     message: error.message(),
@@ -1448,9 +1436,10 @@ impl App {
                 DialogKind::RelocateTarget if folder => dialog.pick_folder(),
                 DialogKind::RelocateTarget => dialog.pick_file(),
                 DialogKind::EditorWorkingDir => dialog.pick_folder(),
-                DialogKind::RestoreJson | DialogKind::AddFiles => dialog
+                DialogKind::RestoreJson => dialog
                     .add_filter(raptim::i18n::t("Raptim 导出", "Raptim Export"), &["json"])
                     .pick_file(),
+                DialogKind::AddFiles => unreachable!(),
             };
             let value = path
                 .map(|p| p.to_string_lossy().to_string())
@@ -1477,7 +1466,7 @@ impl App {
                     session.icon = icon;
                 }
             }
-            DialogKind::AddFiles => {}
+            DialogKind::AddFiles => unreachable!(),
             DialogKind::EditorTarget => {
                 if let Some(session) = &self.editor {
                     session.window.set_target(value.into());
@@ -1599,6 +1588,7 @@ impl App {
         self.pending_files
             .extend(paths.into_iter().take(capacity).map(|p| (p, collection)));
         self.last_drop = Instant::now();
+        self.sync_poll_timer();
         if overflow {
             return Err(Error::Invalid(
                 raptim::i18n::t(
@@ -1689,6 +1679,38 @@ impl App {
                 .is_some_and(|e| e.window.window().is_visible())
             || self.policy.protection() != Protection::Normal
             || self.protected_edge_waiting
+    }
+
+    fn needs_poll_timer(&self) -> bool {
+        self.should_poll_tick() || !self.pending_files.is_empty() || self.window_candidate.is_some()
+    }
+
+    fn sync_poll_timer(&self) {
+        if self.needs_poll_timer() {
+            if self.poll_timer.running() {
+                return;
+            }
+            let weak = self.weak_self.clone();
+            self.poll_timer.start(
+                slint::TimerMode::Repeated,
+                Duration::from_millis(500),
+                move || {
+                    if let Some(app) = weak.upgrade() {
+                        let mut s = app.borrow_mut();
+                        if s.should_poll_tick() {
+                            s.evaluate();
+                        }
+                        if !s.pending_files.is_empty() {
+                            s.process_files();
+                        }
+                        s.save_window(false);
+                        s.sync_poll_timer();
+                    }
+                },
+            );
+        } else if self.poll_timer.running() {
+            self.poll_timer.stop();
+        }
     }
 
     fn toggle_hotkey_visibility(&mut self) {
@@ -1898,6 +1920,7 @@ fn run_at_with_mode(
         main: main.clone_strong(),
         weak_self: Default::default(),
         interaction_timer: Default::default(),
+        poll_timer: Default::default(),
         frame_clock,
         position_restored: false,
         store,
@@ -2166,19 +2189,6 @@ fn run_at_with_mode(
             }
         }
     });
-    let weak = Rc::downgrade(&app);
-    main.on_change_icon(move |id| {
-        if let Some(app) = weak.upgrade() {
-            open_editor(&app, i64::from(id));
-            let mut s = app.borrow_mut();
-            if s.editor
-                .as_ref()
-                .is_some_and(|e| e.original.id == i64::from(id))
-            {
-                s.dialog(DialogKind::EditorIcon);
-            }
-        }
-    });
     bind!(main, on_settings, |s| {
         s.show_settings();
     });
@@ -2191,15 +2201,23 @@ fn run_at_with_mode(
     });
     let viewport_pending = Rc::new(std::cell::Cell::new(false));
     let viewport_sink = events.clone();
+    let viewport_weak = Rc::downgrade(&app);
     main.on_viewport_changed(move || {
         if viewport_pending.replace(true) {
             return;
         }
         let pending = viewport_pending.clone();
         let sink = viewport_sink.clone();
+        let weak = viewport_weak.clone();
         slint::Timer::single_shot(Duration::ZERO, move || {
             pending.set(false);
-            sink.send(AppEvent::ViewportChanged);
+            if let Some(app) = weak.upgrade()
+                && let Ok(mut s) = app.try_borrow_mut()
+            {
+                s.update_visible_icons();
+            } else {
+                sink.send(AppEvent::ViewportChanged);
+            }
         });
     });
     bind!(main, on_search_scope_changed, |s| {
@@ -2289,10 +2307,13 @@ fn run_at_with_mode(
             s.cancel_inline();
         } else if s.main.get_conversion_open() {
             s.main.set_conversion_open(false);
+            s.main.invoke_focus_browser();
         } else if s.main.get_collection_delete() {
             s.main.set_collection_delete(false);
+            s.main.invoke_focus_browser();
         } else if s.main.get_confirm_delete() {
             s.main.set_confirm_delete(false);
+            s.main.invoke_focus_browser();
         } else if s.main.get_batch_mode() {
             s.clear_batch();
             s.update_selection();
@@ -2328,17 +2349,16 @@ fn run_at_with_mode(
         s.begin_relocate();
     });
     {
-        let app = Rc::clone(&app);
+        let weak = Rc::downgrade(&app);
         main.on_broken_edit(move |id| {
-            app.borrow_mut().main.set_broken_open(false);
-            open_editor(&app, i64::from(id));
+            if let Some(app) = weak.upgrade() {
+                app.borrow_mut().main.set_broken_open(false);
+                open_editor(&app, i64::from(id));
+            }
         });
     }
     bind!(main, on_broken_remove, |s, id| {
         s.remove_broken_entry(i64::from(id));
-    });
-    bind!(main, on_manage_group, |s, id| {
-        s.begin_collection_action(id, if id == 0 { 0 } else { 2 }, 0);
     });
     let weak = Rc::downgrade(&app);
     main.on_add(move || {
@@ -2384,24 +2404,7 @@ fn run_at_with_mode(
         s.fill_icons(wanted);
     }
 
-    let timer = slint::Timer::default();
-    let weak = Rc::downgrade(&app);
-    timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(500),
-        move || {
-            if let Some(app) = weak.upgrade() {
-                let mut s = app.borrow_mut();
-                if s.should_poll_tick() {
-                    s.evaluate();
-                }
-                if !s.pending_files.is_empty() {
-                    s.process_files();
-                }
-                s.save_window(false);
-            }
-        },
-    );
+    app.borrow().sync_poll_timer();
     slint::run_event_loop_until_quit()?;
     Ok(())
 }

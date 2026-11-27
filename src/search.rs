@@ -71,8 +71,10 @@ fn split_aliases(aliases: &str) -> impl Iterator<Item = &str> {
 
 impl SearchIndex {
     pub fn sync(&mut self, entries: &[Entry]) {
-        let ids: std::collections::HashSet<_> = entries.iter().map(|e| e.id).collect();
-        self.documents.retain(|id, _| ids.contains(id));
+        if !self.documents.is_empty() {
+            let ids: std::collections::HashSet<_> = entries.iter().map(|e| e.id).collect();
+            self.documents.retain(|id, _| ids.contains(id));
+        }
         for e in entries {
             // Compare before cloning: `source` exists only to detect a change, and building it
             // up front meant three allocations per entry on every refresh.

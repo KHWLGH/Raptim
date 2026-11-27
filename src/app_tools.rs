@@ -117,7 +117,6 @@ impl App {
                 index: index as i32,
                 name: app.name.clone().into(),
                 detail: app.detail.clone().into(),
-                kind: app.target.kind_index(),
             });
         }
         self.main.set_discover_selected_count(selected_count);
@@ -232,14 +231,18 @@ impl App {
         self.main.set_broken_items(ModelRc::default());
         self.main.set_broken_loading(true);
         self.main.set_broken_open(true);
-        let entries = self.entries.clone();
+        let entries: Vec<(i64, String, Target)> = self
+            .entries
+            .iter()
+            .map(|e| (e.id, e.name.clone(), e.target.clone()))
+            .collect();
         let data_dir = self.data_dir.clone();
         let epoch = self.data_epoch;
         let sink = self.events.clone();
         std::thread::spawn(move || {
             let needs_apps = entries
                 .iter()
-                .any(|e| matches!(e.target, Target::App { .. }));
+                .any(|(_, _, target)| matches!(target, Target::App { .. }));
             let installed: std::collections::HashSet<String> = if needs_apps {
                 platform::installed_apps()
                     .into_iter()
@@ -249,8 +252,8 @@ impl App {
                 Default::default()
             };
             let mut found = Vec::new();
-            for entry in entries {
-                let resolved = raptim::paths::resolve_for_shell(&entry.target, &data_dir);
+            for (entry_id, entry_name, entry_target) in entries {
+                let resolved = raptim::paths::resolve_for_shell(&entry_target, &data_dir);
                 let reason = match &resolved {
                     Target::Url { .. } => None,
                     Target::App { aumid } => {
@@ -298,11 +301,11 @@ impl App {
                 };
                 if let Some(reason) = reason {
                     found.push(BrokenEntry {
-                        id: entry.id,
-                        name: entry.name,
-                        target: entry.target.value().to_string(),
+                        id: entry_id,
+                        name: entry_name,
+                        target: entry_target.value().to_string(),
                         reason: reason.to_string(),
-                        relocatable: entry.target.relocatable(),
+                        relocatable: entry_target.relocatable(),
                     });
                 }
             }

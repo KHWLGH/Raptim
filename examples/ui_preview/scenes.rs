@@ -305,10 +305,8 @@ fn strings(values: &[String]) -> ModelRc<SharedString> {
 
 fn configure_main(ui: &MainWindow, data: &PreviewData, batch_checked: bool, en: bool) {
     ui.global::<I18n>().set_en(en);
-    ui.set_window_active(true);
     ui.set_groups(model(data.groups.clone()));
     ui.set_categories(model(data.categories.clone()));
-    ui.set_destinations(model(data.destinations.clone()));
     ui.set_group_id(data.active_group);
     ui.set_category_id(data.active_category);
     ui.set_icon_size(1);
@@ -329,7 +327,6 @@ fn configure_main(ui: &MainWindow, data: &PreviewData, batch_checked: bool, en: 
 
 fn configure_settings(ui: &SettingsWindow, data: &PreviewData, dark: bool, en: bool) {
     ui.global::<I18n>().set_en(en);
-    ui.set_window_active(true);
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     ui.set_rust_version(env!("RAPTIM_RUST_VERSION").into());
     ui.set_theme_mode(if dark { 2 } else { 1 });
@@ -511,7 +508,6 @@ pub fn render_scene(
         "editor-program" => {
             let ui = EditorWindow::new().map_err(|e| e.to_string())?;
             ui.global::<I18n>().set_en(en);
-            ui.set_window_active(true);
             ui.set_editing(true);
             ui.set_kind(0);
             ui.set_entry_name("VS Code".into());
@@ -551,7 +547,6 @@ pub fn render_scene(
         "editor-url" => {
             let ui = EditorWindow::new().map_err(|e| e.to_string())?;
             ui.global::<I18n>().set_en(en);
-            ui.set_window_active(true);
             ui.set_editing(false);
             ui.set_kind(3);
             ui.set_entry_name("GitHub".into());
@@ -587,7 +582,6 @@ pub fn render_scene(
         "editor-app-picker" => {
             let ui = EditorWindow::new().map_err(|e| e.to_string())?;
             ui.global::<I18n>().set_en(en);
-            ui.set_window_active(true);
             ui.set_editing(false);
             ui.set_kind(5);
             ui.set_collection_id(data.active_category);
@@ -610,7 +604,6 @@ pub fn render_scene(
         "editor-collection-tree" => {
             let ui = EditorWindow::new().map_err(|e| e.to_string())?;
             ui.global::<I18n>().set_en(en);
-            ui.set_window_active(true);
             ui.set_editing(true);
             ui.set_kind(0);
             ui.set_entry_name("VS Code".into());

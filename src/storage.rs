@@ -81,6 +81,31 @@ impl Store {
         // Fail visibly on damaged payload/settings. Never silently replace user data.
         let validated = store.export()?;
         validate_export(&validated)?;
+        if !validated.entries.is_empty() {
+            let mut stmt = store.conn.prepare("SELECT id,dup_key FROM entries")?;
+            let existing: HashMap<i64, String> = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            drop(stmt);
+            let stale: Vec<(i64, String)> = validated
+                .entries
+                .iter()
+                .filter_map(|e| {
+                    let expected = store.dup_key(e);
+                    (existing.get(&e.id) != Some(&expected)).then_some((e.id, expected))
+                })
+                .collect();
+            if !stale.is_empty() {
+                let tx = store.conn.transaction()?;
+                for (id, key) in stale {
+                    tx.execute(
+                        "UPDATE entries SET dup_key=?1 WHERE id=?2",
+                        params![key, id],
+                    )?;
+                }
+                tx.commit()?;
+            }
+        }
         store.initial = Some(validated);
         Ok(store)
     }
@@ -126,9 +151,10 @@ impl Store {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let all = self.entries_without_icons()?;
+        let mut stmt =
+            tx.prepare("SELECT id,collection_id,payload,position FROM entries WHERE id=?1")?;
         let mut seen = HashSet::new();
-        let mut selected = Vec::new();
+        let mut selected = Vec::with_capacity(ids.len());
         for id in ids {
             if !seen.insert(*id) {
                 return Err(Error::Invalid(
@@ -136,16 +162,33 @@ impl Store {
                         .into(),
                 ));
             }
-            selected.push(all.iter().find(|e| e.id == *id).ok_or_else(|| {
-                Error::Invalid(
-                    crate::i18n::t(
-                        "项目已变化，请重新选择",
-                        "Items changed; please select again.",
+            let row = stmt
+                .query_row([*id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                })
+                .optional()?
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        crate::i18n::t(
+                            "项目已变化，请重新选择",
+                            "Items changed; please select again.",
+                        )
+                        .into(),
                     )
-                    .into(),
-                )
-            })?);
+                })?;
+            let mut e: Entry = serde_json::from_str(&row.2)?;
+            e.id = row.0;
+            e.collection_id = row.1;
+            e.position = row.3;
+            e.icon = Vec::new();
+            selected.push(e);
         }
+        drop(stmt);
         if let Some(dest) = destination {
             if !self
                 .collections()?
@@ -176,7 +219,7 @@ impl Store {
                 selected
                     .iter()
                     .zip(&keys)
-                    .map(|(e, key)| (dest, *e, key.as_str())),
+                    .map(|(e, key)| (dest, e, key.as_str())),
             ) {
                 return Err(Error::Invalid(match crate::i18n::locale() {
                     crate::i18n::Locale::ZhCn => {
@@ -198,21 +241,24 @@ impl Store {
         )?;
         for entry in selected {
             if let Some(dest) = destination {
-                let mut updated = entry.clone();
+                let entry_id = entry.id;
+                let mut updated = entry;
                 updated.collection_id = dest;
                 updated.position = position;
+                if copy {
+                    updated.id = 0;
+                }
                 let payload = Self::payload_of(&updated)?;
                 let dup_key = self.dup_key(&updated);
                 if copy {
-                    updated.id = 0;
                     tx.execute(
                         "INSERT INTO entries(collection_id,payload,position,icon,dup_key) SELECT ?1,?2,?3,icon,?4 FROM entries WHERE id=?5",
-                        params![dest, payload, position, dup_key, entry.id],
+                        params![dest, payload, position, dup_key, entry_id],
                     )?;
                 } else {
                     tx.execute(
                         "UPDATE entries SET collection_id=?1,payload=?2,position=?3,dup_key=?4 WHERE id=?5",
-                        params![dest, payload, position, dup_key, entry.id],
+                        params![dest, payload, position, dup_key, entry_id],
                     )?;
                 }
                 position += 1;
@@ -387,7 +433,7 @@ impl Store {
     /// modified fetch their BLOB from SQLite.
     pub fn entries_reusing_icons(
         &mut self,
-        previous: &[Entry],
+        previous: &mut [Entry],
     ) -> Result<(Vec<Entry>, HashSet<i64>)> {
         if self.all_icons_dirty || previous.is_empty() {
             self.all_icons_dirty = false;
@@ -396,27 +442,36 @@ impl Store {
             let rehashed = all.iter().map(|e| e.id).collect();
             return Ok((all, rehashed));
         }
-        let dirty = std::mem::take(&mut self.dirty_icons);
-        let mut known_icons: HashMap<i64, Vec<u8>> = previous
+        let mut prev_index: HashMap<i64, usize> = previous
             .iter()
-            .filter(|e| !dirty.contains(&e.id))
-            .map(|e| (e.id, e.icon.clone()))
+            .enumerate()
+            .filter(|(_, e)| !self.dirty_icons.contains(&e.id))
+            .map(|(idx, e)| (e.id, idx))
             .collect();
         let mut list = self.entries_without_icons()?;
         let mut icon_stmt = self.conn.prepare("SELECT icon FROM entries WHERE id=?1")?;
+        let mut loaded_icons = Vec::new();
         let mut rehashed = HashSet::new();
-        for entry in &mut list {
-            if let Some(icon) = known_icons.remove(&entry.id) {
-                entry.icon = icon;
-            } else {
+        for (pos, entry) in list.iter().enumerate() {
+            if !prev_index.contains_key(&entry.id) {
                 let icon: Option<Vec<u8>> = icon_stmt
                     .query_row([entry.id], |r| r.get(0))
                     .optional()?
                     .flatten();
-                entry.icon = icon.unwrap_or_default();
+                loaded_icons.push((pos, icon.unwrap_or_default()));
                 rehashed.insert(entry.id);
             }
         }
+        drop(icon_stmt);
+        for (pos, icon) in loaded_icons {
+            list[pos].icon = icon;
+        }
+        for entry in &mut list {
+            if let Some(idx) = prev_index.remove(&entry.id) {
+                entry.icon = std::mem::take(&mut previous[idx].icon);
+            }
+        }
+        self.dirty_icons.clear();
         Ok((list, rehashed))
     }
     pub fn settings(&self) -> Result<Settings> {
@@ -489,8 +544,12 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        for (e, old) in updates.iter().zip(originals) {
-            if e.icon != old.icon {
+        let old_icons: HashMap<i64, &[u8]> = originals
+            .iter()
+            .map(|old| (old.id, old.icon.as_slice()))
+            .collect();
+        for e in updates {
+            if old_icons.get(&e.id) != Some(&e.icon.as_slice()) {
                 self.dirty_icons.insert(e.id);
             }
         }
@@ -666,6 +725,11 @@ impl Store {
     /// Only the icon column. The backfill used to go through `save_entry`, which rewrote the
     /// payload and re-ran the whole duplicate check for a change that touches neither.
     pub fn save_icon(&mut self, id: i64, icon: &[u8]) -> Result<()> {
+        if icon.len() > 256 * 1024 {
+            return Err(Error::Invalid(
+                crate::i18n::t("图标数据过大", "Icon data is too large.").into(),
+            ));
+        }
         if self
             .conn
             .execute("UPDATE entries SET icon=?2 WHERE id=?1", params![id, icon])?
@@ -677,6 +741,9 @@ impl Store {
         }
         self.dirty_icons.insert(id);
         Ok(())
+    }
+    pub fn clear_dirty_icon(&mut self, id: i64) {
+        self.dirty_icons.remove(&id);
     }
     pub fn delete_entry(&mut self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM entries WHERE id=?1", [id])?;
@@ -850,15 +917,6 @@ impl Store {
         self.dirty_icons.clear();
         Ok(())
     }
-    pub fn has_entry(&self, id: i64) -> Result<bool> {
-        Ok(self
-            .conn
-            .query_row("SELECT id FROM entries WHERE id=?1", [id], |r| {
-                r.get::<_, i64>(0)
-            })
-            .optional()?
-            .is_some())
-    }
     pub fn reorder_collection_at(&mut self, id: i64, before: i64, after: bool) -> Result<()> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
@@ -984,7 +1042,7 @@ impl Store {
             })?;
         if id == destination
             || dest.parent_id == Some(id)
-            || (source.parent_id.is_none() && dest.parent_id.is_some())
+            || source.parent_id.is_some() != dest.parent_id.is_some()
         {
             return Err(Error::Invalid(
                 crate::i18n::t("迁移目标无效", "Invalid migration target.").into(),
@@ -1064,11 +1122,14 @@ impl Store {
                 dropped.push(c.id);
                 continue;
             }
-            let stem = &c.name;
-            let mut name = stem.clone();
-            let mut suffix = 2;
+            let stem = c.name.trim();
+            let mut name = stem.to_string();
+            let mut suffix = 2usize;
             while taken.contains(&name.trim().to_lowercase()) {
-                name = format!("{stem} {suffix}");
+                let tail = format!(" {suffix}");
+                let max_stem = 200usize.saturating_sub(tail.chars().count());
+                let prefix: String = stem.chars().take(max_stem).collect();
+                name = format!("{}{tail}", prefix.trim_end());
                 suffix += 1;
             }
             taken.insert(name.trim().to_lowercase());
@@ -1107,7 +1168,7 @@ impl Store {
             .filter_map(|row| match row {
                 Ok((id, collection_id, payload)) if selected.contains(&collection_id) => Some(
                     serde_json::from_str::<Entry>(&payload)
-                        .map(|e| (id, e.name))
+                        .map(|e| (id, e.name.to_lowercase()))
                         .map_err(crate::model::Error::from),
                 ),
                 Ok(_) => None,
@@ -1115,9 +1176,7 @@ impl Store {
             })
             .collect::<std::result::Result<Vec<_>, crate::model::Error>>()?;
         drop(stmt);
-        entries.sort_by(|(aid, aname), (bid, bname)| {
-            (aname.to_lowercase(), *aid).cmp(&(bname.to_lowercase(), *bid))
-        });
+        entries.sort_by(|(aid, aname), (bid, bname)| (aname, *aid).cmp(&(bname, *bid)));
         for (position, (id, _)) in entries.into_iter().enumerate() {
             tx.execute(
                 "UPDATE entries SET position=?1 WHERE id=?2",
@@ -1148,7 +1207,7 @@ fn normalize_categories(conn: &Connection) -> Result<()> {
             continue;
         }
         let empty_default: Option<i64> = conn.query_row(
-            "SELECT id FROM collections c WHERE parent_id=?1 AND name IN ('默认分类','Default') AND NOT EXISTS(SELECT 1 FROM entries e WHERE e.collection_id=c.id)",
+            "SELECT id FROM collections c WHERE parent_id=?1 AND trim(name) IN ('默认分类','Default') COLLATE NOCASE AND NOT EXISTS(SELECT 1 FROM entries e WHERE e.collection_id=c.id)",
             [group], |r| r.get(0),
         ).optional()?;
         if let Some(category) = empty_default {
@@ -1158,14 +1217,18 @@ fn normalize_categories(conn: &Connection) -> Result<()> {
             )?;
             continue;
         }
+        let mut stmt = conn.prepare("SELECT name FROM collections WHERE parent_id=?1")?;
+        let taken: HashSet<String> = stmt
+            .query_map([group], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|n| n.trim().to_lowercase())
+            .collect();
+        drop(stmt);
         let base_name = crate::i18n::default_category_name();
         let mut name = base_name.to_string();
         let mut suffix = 2;
-        while conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM collections WHERE parent_id=?1 AND name=?2)",
-            params![group, name],
-            |r| r.get::<_, bool>(0),
-        )? {
+        while taken.contains(&name.trim().to_lowercase()) {
             name = format!("{base_name} {suffix}");
             suffix += 1;
         }
@@ -1375,9 +1438,10 @@ mod tests {
         };
         let second_id = store.save_entry(&second).unwrap();
 
+        assert!(store.save_icon(first, &vec![0u8; 256 * 1024 + 1]).is_err());
         store.save_icon(first, &[7u8; 64]).unwrap();
         store.move_at(second_id, first, false).unwrap();
-        let (entries, rehashed) = store.entries_reusing_icons(&[]).unwrap();
+        let (mut entries, rehashed) = store.entries_reusing_icons(&mut []).unwrap();
         assert_eq!(rehashed.len(), 2);
         assert_eq!(
             entries.iter().map(|e| e.id).collect::<Vec<_>>(),
@@ -1390,8 +1454,8 @@ mod tests {
 
         // Reordering does not dirty any icon, so incremental refresh reuses in-memory bytes.
         store.move_entry(second_id, 1).unwrap();
-        let (entries_after_move, rehashed_after_move) =
-            store.entries_reusing_icons(&entries).unwrap();
+        let (mut entries_after_move, rehashed_after_move) =
+            store.entries_reusing_icons(&mut entries).unwrap();
         assert!(rehashed_after_move.is_empty());
         assert_eq!(
             entries_after_move.iter().map(|e| e.id).collect::<Vec<_>>(),
@@ -1404,8 +1468,9 @@ mod tests {
         store
             .batch_entries(&[second_id], Some(other), false)
             .unwrap();
-        let (after_batch, rehashed_batch) =
-            store.entries_reusing_icons(&entries_after_move).unwrap();
+        let (after_batch, rehashed_batch) = store
+            .entries_reusing_icons(&mut entries_after_move)
+            .unwrap();
         assert_eq!(rehashed_batch, HashSet::from([copied]));
         assert_eq!(
             after_batch.iter().find(|e| e.id == second_id).unwrap().icon,
@@ -1426,10 +1491,16 @@ mod tests {
         e.collection_id = tools;
         store.save_entry(&e).unwrap();
 
+        let long_name = "a".repeat(200);
+        store.save_collection(None, Some(1), &long_name).unwrap();
+        store
+            .save_collection(None, Some(group), &long_name)
+            .unwrap();
         store.migrate_delete(1, group).unwrap();
         let collections = store.collections().unwrap();
         assert!(!collections.iter().any(|c| c.id == 1));
         assert_eq!(store.entries().unwrap()[0].collection_id, tools);
+        assert!(collections.iter().all(|c| c.name.chars().count() <= 200));
 
         store.delete_collection_with_contents(tools).unwrap();
         assert!(store.entries().unwrap().is_empty());

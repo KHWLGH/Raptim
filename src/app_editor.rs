@@ -413,20 +413,6 @@ pub(super) fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
         }
         slint::CloseRequestResponse::KeepWindowShown
     });
-    let weak = Rc::downgrade(app);
-    ui.on_icon_path(move |path| {
-        if let Some(app) = weak.upgrade() {
-            let mut s = app.borrow_mut();
-            if !s.file_dialog_open
-                && !s.saving_editor
-                && let Err(e) = s.file_selected(DialogKind::EditorIcon, path.to_string())
-                && let Some(session) = &s.editor
-            {
-                session.window.set_error(e.to_string().into());
-            }
-        }
-    });
-    let icon_weak = ui.as_weak();
     let drop_sink = state.events.clone();
     let generation = state.editor_generation;
     let weak = ui.as_weak();
@@ -464,11 +450,6 @@ pub(super) fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
             ) {
                 drop_sink.send(AppEvent::EnsureEditorDrop(generation));
             }
-            if let slint::winit_030::winit::event::WindowEvent::Focused(active) = event
-                && let Some(ui) = icon_weak.upgrade()
-            {
-                ui.set_window_active(*active);
-            }
         },
         move |active| {
             if let Some(ui) = compose_weak.upgrade() {
@@ -494,15 +475,14 @@ pub(super) fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
     } else {
         state.apply_theme();
     }
+    state.sync_poll_timer();
     let sink = state.events.clone();
     slint::Timer::single_shot(Duration::ZERO, move || {
         sink.send(AppEvent::EnsureEditorDrop(generation));
     });
-    if state
-        .editor
-        .as_ref()
-        .is_some_and(|e| e.icon.is_empty() && !e.window.get_target().is_empty())
-    {
+    if state.editor.as_ref().is_some_and(|e| {
+        e.window.get_kind() != 3 && e.icon.is_empty() && !e.window.get_target().is_empty()
+    }) {
         state.extract_editor_icon();
     }
 }

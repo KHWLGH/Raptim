@@ -109,15 +109,20 @@ impl App {
                             self.schedule_interaction();
                         }
                     }
-                    NativeSignal::ForegroundChanged | NativeSignal::DisplayChanged => {
-                        self.evaluate_suggested()
+                    NativeSignal::ForegroundChanged => self.evaluate_suggested(),
+                    NativeSignal::DisplayChanged => {
+                        platform::invalidate_monitors();
+                        self.evaluate_suggested();
                     }
                     NativeSignal::TrayTogglePin => {
                         self.main.set_pinned(!self.main.get_pinned());
                         self.apply_pin();
                     }
                     NativeSignal::TrayToggleProtectionBypass => self.toggle_protection_bypass(),
-                    NativeSignal::SystemThemeChanged => self.apply_theme(),
+                    NativeSignal::SystemThemeChanged => {
+                        platform::invalidate_animations_cache();
+                        self.apply_theme();
+                    }
                 }
             }
             AppEvent::WindowInteraction => {

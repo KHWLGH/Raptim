@@ -18,9 +18,8 @@ const SIDE_ATTEMPTS: usize = 4;
 /// Under this the icon is unreadable in the grid; over this it wastes database space.
 const SHORTEST_EDGE: u32 = 16;
 /// The largest edge a server is allowed to hand back before it is refused. Kept well above
-/// `LONGEST_EDGE` because the answer is downscaled, not rejected, between the two.
+/// `STORE_MAX` because the answer is downscaled, not rejected, between the two.
 const MAX_EDGE: u32 = 4096;
-const LONGEST_EDGE: u32 = 128;
 /// The edge a touch icon carries by convention when it declares no `sizes` of its own.
 const TOUCH_ICON_EDGE: u32 = 180;
 /// How long one address may keep a background slot before the lookup is abandoned.
@@ -51,7 +50,8 @@ pub fn fetch(url: &str) -> Vec<u8> {
         return Vec::new();
     }
     let started = std::time::Instant::now();
-    let mut candidates = match get(&page, PAGE_LIMIT) {
+    let mut sessions = HttpSession::default();
+    let mut candidates = match get(&mut sessions, &page, PAGE_LIMIT, true) {
         Some(page_response) if page_response.ok() && page_response.is_html() => {
             icon_links(&String::from_utf8_lossy(&page_response.body), &page)
         }
@@ -67,7 +67,7 @@ pub fn fetch(url: &str) -> Vec<u8> {
         if started.elapsed() > ATTEMPT_BUDGET {
             break;
         }
-        if let Some(answer) = get(&candidate, IMAGE_LIMIT)
+        if let Some(answer) = get(&mut sessions, &candidate, IMAGE_LIMIT, false)
             && answer.ok()
             && let Some(png) = to_png(&answer.body)
         {
@@ -182,32 +182,23 @@ fn declared_edge(lower: &str) -> u32 {
 /// its own size, so checking the dimensions after decoding means the pixels were already allocated
 /// by the time the answer was "too big".
 fn to_png(bytes: &[u8]) -> Option<Vec<u8>> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_EDGE);
-    limits.max_image_height = Some(MAX_EDGE);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-    let decoded = reader.decode().ok()?;
-    let (width, height) = (decoded.width(), decoded.height());
-    if width.min(height) < SHORTEST_EDGE {
+    let image = if let Some(ico) = crate::icons::decode_best_ico(bytes) {
+        ico
+    } else {
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_EDGE);
+        limits.max_image_height = Some(MAX_EDGE);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        reader.decode().ok()?.into_rgba8()
+    };
+    let (width, height) = (image.width(), image.height());
+    if width.min(height) < SHORTEST_EDGE || width.max(height) > MAX_EDGE {
         return None;
     }
-    let image = decoded.into_rgba8();
-    let longest = width.max(height);
-    let image = if longest > LONGEST_EDGE {
-        let scale = LONGEST_EDGE as f64 / longest as f64;
-        image::imageops::resize(
-            &image,
-            ((width as f64 * scale) as u32).max(1),
-            ((height as f64 * scale) as u32).max(1),
-            image::imageops::FilterType::Lanczos3,
-        )
-    } else {
-        image
-    };
     let png = crate::icons::encode(image).ok()?;
     (png.len() <= STORED_LIMIT).then_some(png)
 }
@@ -229,9 +220,56 @@ impl Response {
     }
 }
 
+#[derive(Default)]
+struct HttpSession {
+    proxy: Option<Handle>,
+    direct: Option<Handle>,
+}
+
+impl HttpSession {
+    fn get(&mut self, host: &str) -> Option<*mut c_void> {
+        let loopback = is_loopback(host);
+        let slot = if loopback {
+            &mut self.direct
+        } else {
+            &mut self.proxy
+        };
+        if let Some(handle) = slot {
+            return Some(handle.0);
+        }
+        let agent = super::wide(USER_AGENT);
+        let session = unsafe {
+            WinHttpOpen(
+                PCWSTR(agent.as_ptr()),
+                if loopback {
+                    WINHTTP_ACCESS_TYPE_NO_PROXY
+                } else {
+                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY
+                },
+                PCWSTR::null(),
+                PCWSTR::null(),
+                0,
+            )
+        };
+        if session.is_null() {
+            return None;
+        }
+        unsafe {
+            let _ = WinHttpSetTimeouts(session, 2000, 3000, 3000, 3000);
+        }
+        *slot = Some(Handle(session));
+        Some(session)
+    }
+}
+
 /// One plain GET with hard timeouts. Loopback never goes through a proxy, which is what a browser
 /// does as well and what keeps the local test server reachable.
-fn get(url: &Url, limit: usize) -> Option<Response> {
+fn get(
+    sessions: &mut HttpSession,
+    url: &Url,
+    limit: usize,
+    truncate_at_limit: bool,
+) -> Option<Response> {
     let host = url.host_str()?;
     let secure = url.scheme() == "https";
     let port = url.port_or_known_default()?;
@@ -240,30 +278,12 @@ fn get(url: &Url, limit: usize) -> Option<Response> {
         object.push('?');
         object.push_str(query);
     }
-    let agent = super::wide(USER_AGENT);
-    let session = unsafe {
-        WinHttpOpen(
-            PCWSTR(agent.as_ptr()),
-            if is_loopback(host) {
-                WINHTTP_ACCESS_TYPE_NO_PROXY
-            } else {
-                WINHTTP_ACCESS_TYPE_DEFAULT_PROXY
-            },
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        )
-    };
-    if session.is_null() {
-        return None;
-    }
-    let _session = Handle(session);
+    let session = sessions.get(host)?;
     let server = super::wide(host);
     let verb = super::wide("GET");
     let path = super::wide(&object);
-    let accepts = super::wide("Accept: image/*, */*;q=0.5\r\n");
+    let accepts: Vec<u16> = "Accept: image/*, */*;q=0.5\r\n".encode_utf16().collect();
     unsafe {
-        let _ = WinHttpSetTimeouts(session, 2000, 3000, 3000, 3000);
         let connect = WinHttpConnect(session, PCWSTR(server.as_ptr()), port, 0);
         if connect.is_null() {
             return None;
@@ -298,24 +318,43 @@ fn get(url: &Url, limit: usize) -> Option<Response> {
             .unwrap_or(0);
         let kind = header(request, WINHTTP_QUERY_CONTENT_TYPE);
         let mut body = Vec::new();
+        let mut buffer = vec![0u8; 16 * 1024];
         loop {
             let mut available = 0u32;
             WinHttpQueryDataAvailable(request, &mut available).ok()?;
             if available == 0 {
                 break;
             }
-            let mut buffer = vec![0u8; (available as usize).min(64 * 1024)];
+            let chunk_limit = if truncate_at_limit {
+                limit.saturating_sub(body.len()).min(buffer.len())
+            } else {
+                buffer.len()
+            };
+            if chunk_limit == 0 {
+                break;
+            }
+            let want = (available as usize).min(chunk_limit);
             let mut read = 0u32;
             WinHttpReadData(
                 request,
                 buffer.as_mut_ptr() as *mut c_void,
-                buffer.len() as u32,
+                want as u32,
                 &mut read,
             )
             .ok()?;
+            if read == 0 {
+                break;
+            }
             body.extend_from_slice(&buffer[..read as usize]);
             if body.len() > limit {
+                if truncate_at_limit {
+                    body.truncate(limit);
+                    break;
+                }
                 return None;
+            }
+            if truncate_at_limit && body.len() == limit {
+                break;
             }
         }
         Some(Response {

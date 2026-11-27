@@ -23,7 +23,7 @@ pub fn dock(rect: Rect, work: Rect, threshold: i32) -> Option<(Edge, Rect)> {
     r.x = r.x.clamp(work.x, work.x + (work.width - r.width).max(0));
     Some((edge, r))
 }
-pub const DOCK_OVERHANG_DIP: f32 = 10.0;
+const DOCK_OVERHANG_DIP: f32 = 10.0;
 
 pub fn overhang_px(scale: f32) -> i32 {
     (DOCK_OVERHANG_DIP * scale.max(1.0)).round() as i32
@@ -85,14 +85,6 @@ pub fn hidden_hwnd_position(edge: Edge, visible: Rect, strip: i32, overhang: i32
         Edge::Left => (visible.x - hwnd.width + strip, hwnd.y),
         Edge::Right => (visible.x + visible.width - strip, hwnd.y),
         Edge::Top => (hwnd.x, visible.y - hwnd.height + strip),
-    }
-}
-
-pub fn hidden_position(edge: Edge, rect: Rect, strip: i32) -> (i32, i32) {
-    match edge {
-        Edge::Left => (rect.x - rect.width + strip, rect.y),
-        Edge::Right => (rect.x + rect.width - strip, rect.y),
-        Edge::Top => (rect.x, rect.y - rect.height + strip),
     }
 }
 pub fn contains(r: Rect, p: (i32, i32)) -> bool {
@@ -208,7 +200,7 @@ pub enum EdgeHold {
 
 impl EdgeHold {
     /// Post-settle grace window when OS foreground activation is delayed or blocked (e.g. UIPI).
-    pub const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+    const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
     pub fn arm(&mut self, now: std::time::Instant, focused: bool) {
         *self = if focused {

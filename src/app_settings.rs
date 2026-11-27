@@ -50,6 +50,7 @@ impl App {
         } else {
             self.apply_theme();
         }
+        self.sync_poll_timer();
     }
 
     pub(super) fn close_settings(&mut self) {
@@ -487,9 +488,19 @@ fn create_settings(
             });
         }};
     }
-    let bind_url = |url: &'static str| {
+    let settings_weak = settings_ui.as_weak();
+    let bind_url = move |url: &'static str| {
+        let weak = settings_weak.clone();
         move || {
-            let _ = platform::launch(&Target::Url { url: url.into() });
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = platform::launch(&Target::Url { url: url.into() }) {
+                    let message = e.message();
+                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_status(message.into());
+                    });
+                }
+            });
         }
     };
     settings_ui.on_open_rust(bind_url("https://www.rust-lang.org/"));
@@ -604,19 +615,34 @@ fn create_settings(
         s.save_window(true);
     });
     bind!(settings_ui, on_open_data_dir, |s| {
-        if let Err(e) = platform::launch(&Target::Folder {
-            path: s.data_dir.to_string_lossy().into_owned(),
-        }) {
-            s.settings_ui.set_status(e.message().into());
-        }
+        let data_dir = s.data_dir.clone();
+        let weak = s.settings_ui.get().map(SettingsWindow::as_weak);
+        std::thread::spawn(move || {
+            if let Err(e) = platform::launch(&Target::Folder {
+                path: data_dir.to_string_lossy().into_owned(),
+            }) && let Some(weak) = weak
+            {
+                let message = e.message();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_status(message.into());
+                });
+            }
+        });
     });
     bind!(settings_ui, on_open_error_log, |s| {
+        let weak = s.settings_ui.get().map(SettingsWindow::as_weak);
         if let Some(path) = raptim::diagnostics::error_log_path()
             && path.exists()
         {
-            if let Err(e) = platform::reveal_file(&path) {
-                s.settings_ui.set_status(e.into());
-            }
+            std::thread::spawn(move || {
+                if let Err(e) = platform::reveal_file(&path)
+                    && let Some(weak) = weak
+                {
+                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_status(e.into());
+                    });
+                }
+            });
         } else {
             s.settings_ui.set_has_error_log(false);
         }

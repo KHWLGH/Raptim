@@ -1,5 +1,6 @@
 //! Start Menu shortcut discovery, packaged AppsFolder enumeration and Shell icon extraction.
 use super::*;
+use shell_actions::known_folder_path;
 use windows::core::Interface;
 
 /// AppsFolder gives one display name plus one parsing name per child; only entries that parse to
@@ -49,14 +50,16 @@ pub fn installed_apps() -> Vec<(String, String)> {
             return Vec::new();
         };
         let mut apps = Vec::new();
+        let mut display_buf = Vec::new();
+        let mut parsing_buf = Vec::new();
         let mut buffer = [std::ptr::null_mut::<Common::ITEMIDLIST>(); 1];
         while enumerator.Next(&mut buffer, None) == S_OK {
             let child = buffer[0];
             if child.is_null() {
                 continue;
             }
-            let display = child_name(&folder, child, SHGDN_NORMAL, 512);
-            let parsing = child_name(&folder, child, SHGDN_FORPARSING, 4096);
+            let display = child_name(&folder, child, SHGDN_NORMAL, 512, &mut display_buf);
+            let parsing = child_name(&folder, child, SHGDN_FORPARSING, 4096, &mut parsing_buf);
             CoTaskMemFree(Some(child as *const _));
             if let Some(option) = app_option(&display, &parsing) {
                 apps.push(option);
@@ -72,11 +75,12 @@ fn child_name(
     child: *const Common::ITEMIDLIST,
     flag: SHGDNF,
     width: usize,
+    wide: &mut Vec<u16>,
 ) -> String {
-    let mut wide = vec![0u16; width];
+    wide.resize(width, 0);
     let mut str_ret = Common::STRRET::default();
     if unsafe { folder.GetDisplayNameOf(child, flag, &mut str_ret) }.is_err()
-        || unsafe { StrRetToBufW(&mut str_ret, Some(child), &mut wide) }.is_err()
+        || unsafe { StrRetToBufW(&mut str_ret, Some(child), wide) }.is_err()
     {
         return String::new();
     }
@@ -333,21 +337,23 @@ unsafe fn shell_item_image(
 /// Extract the highest-resolution icon via direct resource inspection, Shell item image factory,
 /// and `SHGetFileInfoW` fallback, then save Lanczos3-downscaled PNG pixels.
 pub fn shell_icon(path: &Path) -> Vec<u8> {
-    let Ok(_com) = ComGuard::new() else {
-        return vec![];
-    };
     let is_lnk = path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"));
-    let direct = if is_lnk {
-        lnk_icon_candidates(path)
+    if !is_lnk
+        && let Some(image) = extract_direct_resource_icon(path, 0)
+        && let Ok(png) = crate::icons::encode(image)
+    {
+        return png;
+    }
+    let Ok(_com) = ComGuard::new() else {
+        return vec![];
+    };
+    if is_lnk
+        && let Some(image) = lnk_icon_candidates(path)
             .into_iter()
             .find_map(|(candidate, index)| extract_direct_resource_icon(&candidate, index))
-    } else {
-        extract_direct_resource_icon(path, 0)
-    };
-    if let Some(image) = direct
         && let Ok(png) = crate::icons::encode(image)
     {
         return png;
@@ -379,7 +385,7 @@ pub fn shell_icon(path: &Path) -> Vec<u8> {
 
 /// Packaged applications have no file system path: request their high-resolution logo through
 /// `IShellItemImageFactory` first, falling back to the AppsFolder Shell image list.
-pub fn app_icon(aumid: &str) -> Vec<u8> {
+fn app_icon(aumid: &str) -> Vec<u8> {
     if !aumid.contains('!') || aumid.contains('\\') {
         return Vec::new();
     }
@@ -398,7 +404,7 @@ pub fn app_icon(aumid: &str) -> Vec<u8> {
         if SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut id, 0, None).is_err() {
             return Vec::new();
         }
-        let _item = TaskMemIdl(id);
+        let _item = super::Pidl(id);
         let mut info = SHFILEINFOW::default();
         if SHGetFileInfoW(
             PCWSTR(id as *const u16),
@@ -516,7 +522,7 @@ unsafe fn icon_by_index(index: i32) -> Vec<u8> {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct DiscoveredApp {
     pub name: String,
     pub detail: String,
@@ -625,6 +631,7 @@ fn collect_shortcuts_in(
 
 /// Discover installed applications from Start Menu shortcuts and packaged AppsFolder entries.
 pub fn discover_installed_entries() -> Vec<DiscoveredApp> {
+    let _com = ComGuard::new().ok();
     let self_exe = std::env::current_exe()
         .map(|p| {
             crate::paths::normal_path(&p)

@@ -6,8 +6,8 @@
 #![allow(clippy::upper_case_acronyms)]
 
 /// A context menu row that shows a contact card is a bug, not a default: every action must name
-/// its own glyph. Kept as a constant so `tests/menu_trees.rs` can forbid it.
-pub const DEFAULT_ICON: char = '\u{e8a5}';
+/// its own glyph. Kept as a constant so tests can forbid it.
+const DEFAULT_ICON: char = '\u{e8a5}';
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuItem {
@@ -31,7 +31,7 @@ impl MenuItem {
             separator: false,
         }
     }
-    pub fn submenu(label: impl Into<String>, children: Vec<Self>) -> Self {
+    fn submenu(label: impl Into<String>, children: Vec<Self>) -> Self {
         Self {
             label: label.into(),
             command: 0,
@@ -83,7 +83,6 @@ pub struct MenuDestination {
 /// 2 folder, 3 url, 4 shortcut, 5 packaged app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuEntry {
-    pub id: i32,
     pub kind: i32,
 }
 
@@ -106,8 +105,8 @@ pub struct MenuContext {
 }
 
 /// Command bases. `region` and `tree` are the only places allowed to spell these out.
-pub const BATCH_BASE: u32 = 30;
-pub const VIEW_BASE: u32 = 40;
+const BATCH_BASE: u32 = 30;
+const VIEW_BASE: u32 = 40;
 pub const MOVE_BASE: u32 = 100;
 pub const COPY_BASE: u32 = 10_000;
 
@@ -139,7 +138,9 @@ pub fn region(kind: i32, command: u32) -> Option<Region> {
         }
         1 => ((1..=4).contains(&command) || (6..=15).contains(&command) || command >= MOVE_BASE)
             .then_some(Region::Item),
-        2 | 3 => ((1..=6).contains(&command) || command >= MOVE_BASE).then_some(Region::Collection),
+        2 | 3 => {
+            (matches!(command, 1 | 3..=6) || command >= MOVE_BASE).then_some(Region::Collection)
+        }
         _ => None,
     }
 }
@@ -150,7 +151,7 @@ pub fn tree(kind: i32, ctx: &MenuContext) -> Vec<MenuItem> {
     tree_for_locale(kind, ctx, crate::i18n::locale())
 }
 
-pub fn tree_for_locale(kind: i32, ctx: &MenuContext, locale: crate::i18n::Locale) -> Vec<MenuItem> {
+fn tree_for_locale(kind: i32, ctx: &MenuContext, locale: crate::i18n::Locale) -> Vec<MenuItem> {
     let s = |zh, en| crate::i18n::t_for(locale, zh, en);
     match kind {
         // At 440 logical pixels wide the grid leaves very little blank edge to hit, so everything
@@ -393,7 +394,7 @@ mod tests {
     #[test]
     fn actionable_commands_are_unique_and_routed() {
         let ctx = MenuContext {
-            target: Some(MenuEntry { id: 7, kind: 0 }),
+            target: Some(MenuEntry { kind: 0 }),
             groups: vec![
                 MenuNode {
                     id: 1,

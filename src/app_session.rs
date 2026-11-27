@@ -53,6 +53,7 @@ impl App {
         self.apply_theme();
         windowing::invalidate(self.main.window());
         self.schedule_interaction();
+        self.sync_poll_timer();
     }
 
     pub(super) fn install_editor_drop(&mut self, generation: u64) {
@@ -219,6 +220,7 @@ impl App {
             return false;
         }
         self.entries[index].icon = icon;
+        self.store.clear_dirty_icon(id);
         // The sweep keys its cache on the blob's fingerprint, so it has to follow the new bytes.
         if let Some(key) = self.icon_index.get_mut(&id) {
             key.fingerprint = raptim::icons::fingerprint(&self.entries[index].icon);
@@ -309,10 +311,10 @@ impl App {
         self.visible_icons = visible;
     }
     pub(super) fn schedule_interaction(&self) {
-        self.interaction_timer.stop();
         let edge_animation = self.main.window().is_visible() && self.edge_motion.is_some();
         self.frame_clock.set_active(edge_animation);
         if edge_animation {
+            self.interaction_timer.stop();
             return;
         }
         let Some(delay) = raptim::session::interaction_interval(
@@ -323,6 +325,7 @@ impl App {
             self.dock.is_some() || self.drag.is_some(),
             self.collapsed_far,
         ) else {
+            self.interaction_timer.stop();
             return;
         };
         // A launcher drag reaches this on every Moved event. A timer already counting down at
@@ -332,6 +335,7 @@ impl App {
         if self.interaction_timer.running() && self.interaction_timer.interval() == delay {
             return;
         }
+        self.interaction_timer.stop();
         let weak = self.weak_self.clone();
         self.interaction_timer
             .start(slint::TimerMode::SingleShot, delay, move || {
@@ -578,7 +582,7 @@ impl App {
             return;
         }
         window.set_collection_id(id as i32);
-        window.set_collection_name(collection.name.clone().into());
+        window.set_collection_name(self.collection_name(id));
         window.set_collection_open(false);
         window.invoke_focus_name();
     }

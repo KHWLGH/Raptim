@@ -6,7 +6,7 @@ use std::{
 
 /// Tiles render at most 48 logical pixels, so 128 covers 200%+ DPI without carrying a
 /// full-size bitmap per entry in memory. Older databases still hold 256px blobs.
-pub const STORE_MAX: u32 = 128;
+const STORE_MAX: u32 = 128;
 
 const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_EDGE: u32 = 4096;
@@ -21,7 +21,7 @@ fn decode_limits() -> image::Limits {
     limits
 }
 
-pub fn downscale_rgba(image: image::RgbaImage, max_edge: u32) -> image::RgbaImage {
+fn downscale_rgba(image: image::RgbaImage, max_edge: u32) -> image::RgbaImage {
     let (width, height) = (image.width(), image.height());
     if width <= max_edge && height <= max_edge {
         return image;
@@ -306,7 +306,7 @@ pub fn extract_pe_icon(path: &Path, icon_index: i32) -> Option<image::RgbaImage>
     extract_pe_icon_from_reader(&mut file, icon_index)
 }
 
-pub fn extract_pe_icon_from_reader<R: Read + Seek>(
+fn extract_pe_icon_from_reader<R: Read + Seek>(
     reader: &mut R,
     icon_index: i32,
 ) -> Option<image::RgbaImage> {
@@ -504,6 +504,7 @@ pub struct Cache {
     sender: Option<std::sync::mpsc::SyncSender<Job>>,
     receiver: std::sync::mpsc::Receiver<Decoded>,
     worker: Option<std::thread::JoinHandle<()>>,
+    notified: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pending: std::collections::HashSet<(i64, u64)>,
     entries: std::collections::HashMap<i64, Cached>,
     clock: u64,
@@ -513,11 +514,13 @@ impl Cache {
     pub fn new(notify: impl Fn() + Send + 'static) -> Self {
         let (sender, jobs) = std::sync::mpsc::sync_channel::<Job>(64);
         let (output, receiver) = std::sync::mpsc::channel();
+        let notified = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_notified = std::sync::Arc::clone(&notified);
         let worker = std::thread::spawn(move || {
             while let Ok((id, key, data)) = jobs.recv() {
                 let image = decode(&data).map(|image| downscale_rgba(image, STORE_MAX));
                 let ghost = image.as_ref().map(|i| {
-                    image::imageops::resize(i, 36, 36, image::imageops::FilterType::Lanczos3)
+                    image::imageops::resize(i, 36, 36, image::imageops::FilterType::Triangle)
                 });
                 if output
                     .send(Decoded {
@@ -530,13 +533,16 @@ impl Cache {
                 {
                     break;
                 }
-                notify();
+                if !worker_notified.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    notify();
+                }
             }
         });
         Self {
             sender: Some(sender),
             receiver,
             worker: Some(worker),
+            notified,
             pending: Default::default(),
             entries: Default::default(),
             clock: 0,
@@ -552,7 +558,7 @@ impl Cache {
             return;
         }
         self.remove(&id);
-        if bytes.is_empty() || self.pending.contains(&(id, key)) {
+        if bytes.is_empty() || self.pending.len() >= 64 || self.pending.contains(&(id, key)) {
             return;
         }
         if self
@@ -583,6 +589,8 @@ impl Cache {
         keys: &std::collections::HashMap<i64, IconKey>,
         visible: &std::collections::HashSet<i64>,
     ) -> Vec<i64> {
+        self.notified
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut changed = Vec::new();
         while let Ok(result) = self.receiver.try_recv() {
             self.pending.remove(&(result.id, result.key));

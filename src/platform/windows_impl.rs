@@ -8,7 +8,11 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     path::Path,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+        mpsc,
+    },
     thread,
 };
 use windows::{
@@ -38,8 +42,8 @@ impl Drop for OwnedHandle {
     }
 }
 /// An item id list the Shell allocated from the task memory allocator.
-struct TaskMemIdl(*mut Common::ITEMIDLIST);
-impl Drop for TaskMemIdl {
+pub(super) struct Pidl(*mut Common::ITEMIDLIST);
+impl Drop for Pidl {
     fn drop(&mut self) {
         unsafe { CoTaskMemFree(Some(self.0 as *const _)) }
     }
@@ -187,7 +191,7 @@ impl Drop for ComGuard {
 
 /// The window state the Shell should start the target in. Lives here so `model.rs`
 /// never has to name a Win32 type.
-pub fn show_cmd(mode: ShowMode) -> SHOW_WINDOW_CMD {
+fn show_cmd(mode: ShowMode) -> SHOW_WINDOW_CMD {
     match mode {
         ShowMode::Normal => SW_SHOWNORMAL,
         ShowMode::Maximized => SW_SHOWMAXIMIZED,
@@ -197,7 +201,7 @@ pub fn show_cmd(mode: ShowMode) -> SHOW_WINDOW_CMD {
 
 /// When a program entry leaves `working_dir` empty, default to its own parent directory (if it
 /// exists) rather than letting `ShellExecuteExW` inherit Raptim's current working directory.
-pub fn effective_working_dir(path: &str, working_dir: &str) -> String {
+fn effective_working_dir(path: &str, working_dir: &str) -> String {
     let trimmed = working_dir.trim();
     if !trimmed.is_empty() {
         return trimmed.to_string();
@@ -426,8 +430,14 @@ pub fn surface_paintable(window: &slint::Window) -> bool {
     };
     let size = surface_size(window);
     let visible =
-        unsafe { IsWindowVisible(hwnd).as_bool() && prop_value(hwnd, "Raptim.Cloaked") == 0 };
+        unsafe { IsWindowVisible(hwnd).as_bool() && prop_value(hwnd, w!("Raptim.Cloaked")) == 0 };
     visible && size.width > 0 && size.height > 0
+}
+
+pub fn clear_os_dirty(window: &slint::Window) {
+    if let Some(hwnd) = native_handle(window) {
+        remove_os_dirty(hwnd);
+    }
 }
 
 pub fn take_os_dirty(window: &slint::Window) -> Option<OsDirty> {
@@ -573,6 +583,9 @@ pub fn cursor() -> (i32, i32) {
 pub fn mouse_down() -> bool {
     unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 }
 }
+pub fn has_mouse_capture(window: &slint::Window) -> bool {
+    native_handle(window).is_some_and(|hwnd| unsafe { GetCapture() == hwnd })
+}
 pub fn key_modifiers() -> u32 {
     unsafe {
         let mut flags = 0;
@@ -608,15 +621,12 @@ pub fn native_ready(window: &slint::Window) -> bool {
 }
 /// Frame bookkeeping, kept in window properties. A property dies with its HWND, so a recreated
 /// window invalidates every "already applied" answer by itself and no global cache can go stale.
-/// `w!` needs a literal, so these take the name at call time.
-unsafe fn prop_value(hwnd: HWND, name: &str) -> usize {
-    let name = wide(name);
-    unsafe { GetPropW(hwnd, PCWSTR(name.as_ptr())).0 as usize }
+unsafe fn prop_value(hwnd: HWND, name: PCWSTR) -> usize {
+    unsafe { GetPropW(hwnd, name).0 as usize }
 }
-unsafe fn set_prop_value(hwnd: HWND, name: &str, value: usize) {
-    let name = wide(name);
+unsafe fn set_prop_value(hwnd: HWND, name: PCWSTR, value: usize) {
     unsafe {
-        let _ = SetPropW(hwnd, PCWSTR(name.as_ptr()), Some(HANDLE(value as _)));
+        let _ = SetPropW(hwnd, name, Some(HANDLE(value as _)));
     }
 }
 /// Take the window shape back from our own region and hand it to the compositor. Only ever
@@ -624,8 +634,8 @@ unsafe fn set_prop_value(hwnd: HWND, name: &str, value: usize) {
 /// on a window that already has none is what makes corners and shadows jump.
 unsafe fn clear_region(hwnd: HWND) {
     unsafe {
-        if prop_value(hwnd, "Raptim.Region") != 0 {
-            set_prop_value(hwnd, "Raptim.Region", 0);
+        if prop_value(hwnd, w!("Raptim.Region")) != 0 {
+            set_prop_value(hwnd, w!("Raptim.Region"), 0);
             let _ = SetWindowRgn(hwnd, None, true);
         }
     }
@@ -787,6 +797,9 @@ unsafe extern "system" fn frame_proc(
                 DefSubclassProc(hwnd, message, wparam, lparam)
             }
             WM_DWMCOMPOSITIONCHANGED | WM_DISPLAYCHANGE | WM_DPICHANGED => {
+                if message == WM_DISPLAYCHANGE {
+                    invalidate_monitors();
+                }
                 record_os_dirty_full(hwnd);
                 DefSubclassProc(hwnd, message, wparam, lparam)
             }
@@ -814,7 +827,7 @@ unsafe extern "system" fn frame_proc(
                     styles.styleNew = style;
                 } else if wparam.0 as i32 == GWL_EXSTYLE.0 {
                     let mut ex = (styles.styleNew & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
-                    let alpha = prop_value(hwnd, "Raptim.Alpha");
+                    let alpha = prop_value(hwnd, w!("Raptim.Alpha"));
                     if (1..=255).contains(&alpha) {
                         ex |= WS_EX_LAYERED.0;
                     }
@@ -825,6 +838,19 @@ unsafe extern "system" fn frame_proc(
             WM_NCDESTROY => {
                 remove_os_dirty(hwnd);
                 clear_launcher_drag(hwnd);
+                for name in [
+                    w!("Raptim.Launcher"),
+                    w!("Raptim.Buttons"),
+                    w!("Raptim.Dark"),
+                    w!("Raptim.Frame"),
+                    w!("Raptim.Region"),
+                    w!("Raptim.EdgeClip"),
+                    w!("Raptim.ShadowMuted"),
+                    w!("Raptim.Cloaked"),
+                    w!("Raptim.Alpha"),
+                ] {
+                    let _ = RemovePropW(hwnd, name);
+                }
                 let _ = RemoveWindowSubclass(hwnd, Some(frame_proc), id);
                 DefSubclassProc(hwnd, message, wparam, lparam)
             }
@@ -844,7 +870,7 @@ pub fn decorate(window: &slint::Window) {
     unsafe {
         // Read before the remove: a work-area clip leaves DONOTROUND and a region behind, and
         // 2 is the only marker that says so.
-        let undoing_clip = prop_value(hwnd, "Raptim.EdgeClip") == 2;
+        let undoing_clip = prop_value(hwnd, w!("Raptim.EdgeClip")) == 2;
         let _ = RemovePropW(hwnd, w!("Raptim.EdgeClip"));
         enable_custom_frame(hwnd);
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -852,8 +878,8 @@ pub fn decorate(window: &slint::Window) {
         if ex != tool {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, tool);
         }
-        if prop_value(hwnd, "Raptim.Buttons") == 0 {
-            set_prop_value(hwnd, "Raptim.Buttons", 1);
+        if prop_value(hwnd, w!("Raptim.Buttons")) == 0 {
+            set_prop_value(hwnd, w!("Raptim.Buttons"), 1);
             let already_close_only = window
                 .with_winit_window(|w| w.enabled_buttons() == WindowButtons::CLOSE)
                 .unwrap_or(false);
@@ -867,9 +893,9 @@ pub fn decorate(window: &slint::Window) {
         }
         // Only seed Raptim.Dark on first decoration so explicit Light/Dark overrides via
         // `apply_window_theme` are never reverted by `winit::Window::theme()`.
-        if prop_value(hwnd, "Raptim.Dark") == 0 {
+        if prop_value(hwnd, w!("Raptim.Dark")) == 0 {
             let dark = system_dark_mode();
-            set_prop_value(hwnd, "Raptim.Dark", dark as usize + 1);
+            set_prop_value(hwnd, w!("Raptim.Dark"), dark as usize + 1);
             let immersive = windows::core::BOOL::from(dark);
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -879,7 +905,7 @@ pub fn decorate(window: &slint::Window) {
             );
         }
         // 1: the compositor rounds this window. 2: it cannot, so our own region does.
-        let frame = prop_value(hwnd, "Raptim.Frame");
+        let frame = prop_value(hwnd, w!("Raptim.Frame"));
         if frame == 0 || undoing_clip || frame == 2 {
             let corner = DWMWCP_ROUND;
             let rounded = DwmSetWindowAttribute(
@@ -892,7 +918,7 @@ pub fn decorate(window: &slint::Window) {
             let policy = DWMNCRP_ENABLED;
             let _ =
                 DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy as *const _ as _, 4);
-            set_prop_value(hwnd, "Raptim.ShadowMuted", 0);
+            set_prop_value(hwnd, w!("Raptim.ShadowMuted"), 0);
             // Disable DWM's show/hide zoom transition so re-summoning maps immediately
             // with DWMWCP_ROUND intact instead of animating a square snapshot and snapping
             // to rounded corners after the transition completes.
@@ -909,23 +935,25 @@ pub fn decorate(window: &slint::Window) {
                 // Let the compositor anti-alias corners. An HRGN here disables DWM
                 // rounding and creates visibly jagged edges, especially at high DPI.
                 clear_region(hwnd);
-                set_prop_value(hwnd, "Raptim.Frame", 1);
+                set_prop_value(hwnd, w!("Raptim.Frame"), 1);
             } else {
                 let size = window.size();
                 let diameter = (16. * window.scale_factor()).round() as i32;
                 let region = CreateRoundRectRgn(
                     0,
                     0,
-                    size.width as i32,
-                    size.height as i32,
+                    size.width as i32 + 1,
+                    size.height as i32 + 1,
                     diameter,
                     diameter,
                 );
-                set_prop_value(hwnd, "Raptim.Region", 1);
                 if SetWindowRgn(hwnd, Some(region), true) == 0 {
+                    set_prop_value(hwnd, w!("Raptim.Region"), 0);
                     let _ = DeleteObject(region.into());
+                } else {
+                    set_prop_value(hwnd, w!("Raptim.Region"), 1);
                 }
-                set_prop_value(hwnd, "Raptim.Frame", 2);
+                set_prop_value(hwnd, w!("Raptim.Frame"), 2);
             }
         }
     }
@@ -974,7 +1002,7 @@ unsafe fn enable_custom_frame(hwnd: HWND) {
         }
     }
 }
-pub fn refresh_border(window: &slint::Window) {
+fn refresh_border(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
             // DWMWA_COLOR_NONE: no accent tint or active/inactive color changes.
@@ -1008,8 +1036,31 @@ pub fn work_area_at(point: (i32, i32)) -> Option<crate::windowing::Rect> {
         })
     }
 }
+thread_local! {
+    static MONITOR_CACHE: RefCell<Option<Vec<crate::windowing::Rect>>> = const { RefCell::new(None) };
+}
+pub fn invalidate_monitors() {
+    MONITOR_CACHE.with(|cache| *cache.borrow_mut() = None);
+}
+unsafe extern "system" fn collect_monitor_rect(
+    _: HMONITOR,
+    _: HDC,
+    rect: *mut RECT,
+    data: LPARAM,
+) -> windows::core::BOOL {
+    if !rect.is_null() {
+        let list = unsafe { &mut *(data.0 as *mut Vec<crate::windowing::Rect>) };
+        let r = unsafe { *rect };
+        list.push(crate::windowing::Rect {
+            x: r.left,
+            y: r.top,
+            width: r.right - r.left,
+            height: r.bottom - r.top,
+        });
+    }
+    true.into()
+}
 pub fn move_clipped(window: &slint::Window, position: (i32, i32), work: crate::windowing::Rect) {
-    use slint::winit_030::WinitWindowAccessor;
     let Some(hwnd) = native_handle(window) else {
         return;
     };
@@ -1023,32 +1074,32 @@ pub fn move_clipped(window: &slint::Window, position: (i32, i32), work: crate::w
     // Once a docked slide needs a work-area region, keep that same outline when
     // fully expanded. Swapping an aliased region for DWM on the last frame makes
     // corners and shadows pop. Undocking explicitly calls decorate().
-    let retained_clip = unsafe { GetPropW(hwnd, w!("Raptim.EdgeClip")).0 as usize == 2 };
+    let edge_clip = unsafe { prop_value(hwnd, w!("Raptim.EdgeClip")) };
+    let retained_clip = edge_clip == 2;
     let clip = retained_clip
-        || window
-            .with_winit_window(|w| {
-                let monitors: Vec<_> = w
-                    .available_monitors()
-                    .map(|monitor| {
-                        let p = monitor.position();
-                        let s = monitor.size();
-                        crate::windowing::Rect {
-                            x: p.x,
-                            y: p.y,
-                            width: s.width as i32,
-                            height: s.height as i32,
-                        }
-                    })
-                    .collect();
-                monitors.is_empty() || crate::docking::needs_work_clip(destination, work, monitors)
-            })
-            .unwrap_or(true);
+        || MONITOR_CACHE.with(|cache| {
+            let mut cached = cache.borrow_mut();
+            let monitors = cached.get_or_insert_with(|| {
+                let mut list = Vec::new();
+                unsafe {
+                    let _ = EnumDisplayMonitors(
+                        None,
+                        None,
+                        Some(collect_monitor_rect),
+                        LPARAM(&mut list as *mut Vec<crate::windowing::Rect> as isize),
+                    );
+                }
+                list
+            });
+            monitors.is_empty()
+                || crate::docking::needs_work_clip(destination, work, monitors.iter().copied())
+        });
     unsafe {
         // 1: off-desktop slide with compositor corners; 2: explicit work-area HRGN.
         let mut old = RECT::default();
         let moved = GetWindowRect(hwnd, &mut old).is_err() || (old.left, old.top) != position;
-        if !clip {
-            let _ = SetPropW(hwnd, w!("Raptim.EdgeClip"), Some(HANDLE(1usize as _)));
+        if !clip && edge_clip != 1 {
+            set_prop_value(hwnd, w!("Raptim.EdgeClip"), 1);
         }
         if moved {
             // Suppress intermediate paints until the destination region has been applied.
@@ -1078,7 +1129,7 @@ pub fn move_clipped(window: &slint::Window, position: (i32, i32), work: crate::w
 pub fn finish_edge_motion(window: &slint::Window) {
     if let Some(hwnd) = native_handle(window) {
         unsafe {
-            if GetPropW(hwnd, w!("Raptim.EdgeClip")).0 as usize == 1 {
+            if prop_value(hwnd, w!("Raptim.EdgeClip")) == 1 {
                 let _ = RemovePropW(hwnd, w!("Raptim.EdgeClip"));
             }
         }
@@ -1097,19 +1148,19 @@ pub fn set_collapsed_appearance(
     unsafe {
         let want_cloaked = appearance == CollapsedAppearance::Cloaked;
         let mut want_muted = appearance == CollapsedAppearance::StripOnly;
-        let is_cloaked = prop_value(hwnd, "Raptim.Cloaked") == 1;
+        let is_cloaked = prop_value(hwnd, w!("Raptim.Cloaked")) == 1;
         if want_cloaked && !is_cloaked {
             let cloak = windows::core::BOOL::from(true);
             if DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak as *const _ as _, 4).is_ok() {
-                set_prop_value(hwnd, "Raptim.Cloaked", 1);
+                set_prop_value(hwnd, w!("Raptim.Cloaked"), 1);
             } else {
                 want_muted = true;
             }
         }
 
-        let is_muted = prop_value(hwnd, "Raptim.ShadowMuted") == 1;
-        let edge_clipped = prop_value(hwnd, "Raptim.EdgeClip") == 2;
-        let region_fallback = prop_value(hwnd, "Raptim.Frame") == 2;
+        let is_muted = prop_value(hwnd, w!("Raptim.ShadowMuted")) == 1;
+        let edge_clipped = prop_value(hwnd, w!("Raptim.EdgeClip")) == 2;
+        let region_fallback = prop_value(hwnd, w!("Raptim.Frame")) == 2;
         if want_muted && !is_muted {
             if !edge_clipped {
                 let corner = DWMWCP_DONOTROUND;
@@ -1126,10 +1177,10 @@ pub fn set_collapsed_appearance(
                     &policy as *const _ as _,
                     4,
                 );
-                set_prop_value(hwnd, "Raptim.ShadowMuted", 1);
+                set_prop_value(hwnd, w!("Raptim.ShadowMuted"), 1);
             }
         } else if !want_muted && is_muted {
-            set_prop_value(hwnd, "Raptim.ShadowMuted", 0);
+            set_prop_value(hwnd, w!("Raptim.ShadowMuted"), 0);
             if !edge_clipped && !region_fallback {
                 let corner = DWMWCP_ROUND;
                 let _ = DwmSetWindowAttribute(
@@ -1152,26 +1203,23 @@ pub fn set_collapsed_appearance(
             }
         }
 
-        if !want_cloaked && prop_value(hwnd, "Raptim.Cloaked") == 1 {
+        if !want_cloaked && prop_value(hwnd, w!("Raptim.Cloaked")) == 1 {
             let cloak = windows::core::BOOL::from(false);
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &cloak as *const _ as _, 4);
-            set_prop_value(hwnd, "Raptim.Cloaked", 0);
+            set_prop_value(hwnd, w!("Raptim.Cloaked"), 0);
             record_os_dirty_full(hwnd);
             crate::windowing::invalidate(window);
         }
     }
 }
 /// Native clip prevents a sliding window leaking onto an adjacent display.
-pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
+fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
     let Some(hwnd) = native_handle(window) else {
         return;
     };
     unsafe {
-        let first = GetPropW(hwnd, w!("Raptim.EdgeClip")).0 as usize != 2;
-        let _ = SetPropW(hwnd, w!("Raptim.EdgeClip"), Some(HANDLE(2usize as _)));
-        // This path installs a region outside `decorate`, and `clear_region` only hands the shape
-        // back to the compositor if it knows one is installed.
-        set_prop_value(hwnd, "Raptim.Region", 1);
+        let first = prop_value(hwnd, w!("Raptim.EdgeClip")) != 2;
+        set_prop_value(hwnd, w!("Raptim.EdgeClip"), 2);
         let mut r = RECT::default();
         if GetWindowRect(hwnd, &mut r).is_err() {
             return;
@@ -1213,6 +1261,10 @@ pub fn clip_to_work_area(window: &slint::Window, work: crate::windowing::Rect) {
         }
         if SetWindowRgn(hwnd, Some(region), true) == 0 {
             let _ = DeleteObject(region.into());
+        } else {
+            // This path installs a region outside `decorate`, and `clear_region` only hands the
+            // shape back to the compositor if it knows one is installed.
+            set_prop_value(hwnd, w!("Raptim.Region"), 1);
         }
     }
 }
@@ -1257,17 +1309,31 @@ pub fn set_opacity(window: &slint::Window, opacity: f32) {
         }
     }
 }
+static ANIMATIONS_CACHE: AtomicU8 = AtomicU8::new(0);
+
+pub fn invalidate_animations_cache() {
+    ANIMATIONS_CACHE.store(0, Ordering::Relaxed);
+}
+
 pub fn animations_enabled() -> bool {
-    let mut enabled = windows::core::BOOL(1);
-    unsafe {
-        let _ = SystemParametersInfoW(
-            SPI_GETCLIENTAREAANIMATION,
-            0,
-            Some(&mut enabled as *mut _ as _),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        );
+    match ANIMATIONS_CACHE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let mut enabled = windows::core::BOOL(1);
+            unsafe {
+                let _ = SystemParametersInfoW(
+                    SPI_GETCLIENTAREAANIMATION,
+                    0,
+                    Some(&mut enabled as *mut _ as _),
+                    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                );
+            }
+            let result = enabled.as_bool();
+            ANIMATIONS_CACHE.store(if result { 2 } else { 1 }, Ordering::Relaxed);
+            result
+        }
     }
-    enabled.as_bool()
 }
 pub fn reveal_file(path: &Path) -> Result<(), String> {
     let _com = ComGuard::new()?;
@@ -1346,7 +1412,7 @@ pub fn launcher_window(window: &slint::Window) {
     decorate(window);
 }
 /// Idempotent: safe on the first native event, and after a recreated HWND.
-pub fn ensure_launcher(window: &slint::Window) {
+fn ensure_launcher(window: &slint::Window) {
     if native_handle(window)
         .is_some_and(|hwnd| unsafe { GetPropW(hwnd, w!("Raptim.Launcher")).is_invalid() })
     {
@@ -1382,7 +1448,7 @@ impl LauncherProbe {
 }
 /// Reads Windows' app light/dark preference directly from the registry so collapsed
 /// or cloaked windows never depend on DWM/winit window-visibility state.
-pub fn system_dark_mode() -> bool {
+fn system_dark_mode() -> bool {
     use windows::Win32::System::Registry::*;
     let mut value = 1u32;
     let mut size = std::mem::size_of::<u32>() as u32;
@@ -1400,7 +1466,7 @@ pub fn system_dark_mode() -> bool {
     status == ERROR_SUCCESS && value == 0
 }
 
-pub fn resolve_dark_mode(theme_mode: u8) -> bool {
+fn resolve_dark_mode(theme_mode: u8) -> bool {
     match theme_mode {
         1 => false,
         2 => true,
@@ -1490,8 +1556,8 @@ pub fn apply_window_theme(window: &slint::Window, theme_mode: u8, force_redraw: 
     let mut hwnd_changed = false;
     if let Some(hwnd) = native_handle(window) {
         unsafe {
-            if prop_value(hwnd, "Raptim.Dark") != dark as usize + 1 {
-                set_prop_value(hwnd, "Raptim.Dark", dark as usize + 1);
+            if prop_value(hwnd, w!("Raptim.Dark")) != dark as usize + 1 {
+                set_prop_value(hwnd, w!("Raptim.Dark"), dark as usize + 1);
                 hwnd_changed = true;
                 let immersive = windows::core::BOOL::from(dark);
                 let _ = DwmSetWindowAttribute(
@@ -1508,7 +1574,6 @@ pub fn apply_window_theme(window: &slint::Window, theme_mode: u8, force_redraw: 
             w.set_theme(Some(if dark { Theme::Dark } else { Theme::Light }));
         });
         crate::windowing::invalidate(window);
-        request_redraw_now(window);
     }
     scheme_changed || hwnd_changed
 }
@@ -1558,10 +1623,6 @@ pub fn window_active(window: &slint::Window) -> bool {
     native_handle(window).is_some_and(|hwnd| unsafe { GetForegroundWindow() == hwnd })
 }
 
-pub fn close_menu_focus(window: &slint::Window) {
-    focus(window);
-}
-
 #[path = "autostart.rs"]
 mod autostart;
 #[path = "discovery.rs"]
@@ -1583,19 +1644,15 @@ mod tray;
 #[path = "web_icon.rs"]
 mod web_icon;
 
-pub use autostart::{autostart_command, autostart_mismatch, set_autostart};
+pub use autostart::{autostart_mismatch, set_autostart};
 pub use discovery::{
-    DiscoveredApp, app_icon, discover_installed_entries, icon_for, installed_apps, shell_icon,
+    DiscoveredApp, discover_installed_entries, icon_for, installed_apps, shell_icon,
 };
 pub use frame_clock::FrameClock;
 pub use hotkey_worker::Hotkey;
-pub use protection::{
-    ForegroundWatch, ProtectionCache, collect_signals, notification_state, protection,
-    protection_cached,
-};
+pub use protection::{ForegroundWatch, ProtectionCache, collect_signals, protection};
 pub use shell_actions::{
-    create_shortcut_in, desktop_shortcut, known_folder_path, resolve_lnk_file, resolve_url_file,
-    shell_context_menu,
+    create_shortcut_in, desktop_shortcut, resolve_lnk_file, resolve_url_file, shell_context_menu,
 };
 pub use tray::Tray;
 

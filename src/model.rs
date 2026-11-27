@@ -79,7 +79,10 @@ pub fn normalize_url(input: &str) -> Option<String> {
     {
         return None;
     }
-    let candidate = if text.contains("://") {
+    let scheme_pos = text.find("://");
+    let delim_pos = text.find(['/', '?', '#']);
+    let has_scheme = scheme_pos.is_some_and(|s| delim_pos.is_none_or(|d| s < d));
+    let candidate = if has_scheme {
         text.to_string()
     } else {
         // A bare address is host[:port] and nothing else: no userinfo, and a colon that does not
@@ -91,7 +94,7 @@ pub fn normalize_url(input: &str) -> Option<String> {
         };
         if authority.contains('@')
             || (!port.is_empty() && !port.bytes().all(|b| b.is_ascii_digit()))
-            || (host != "localhost" && !host.contains('.'))
+            || (!host.eq_ignore_ascii_case("localhost") && !host.contains('.'))
         {
             return None;
         }
@@ -254,7 +257,7 @@ impl Target {
                 "{}|{}|{}|{}|{}",
                 path.replace('/', "\\").to_lowercase(),
                 arguments,
-                working_dir.to_lowercase(),
+                working_dir.replace('/', "\\").to_lowercase(),
                 elevated,
                 show.index()
             ),
@@ -458,6 +461,14 @@ mod tests {
             Some("https://localhost:8080")
         );
         assert_eq!(
+            normalize_url("Localhost:8080").as_deref(),
+            Some("https://Localhost:8080")
+        );
+        assert_eq!(
+            normalize_url("example.com/go?u=https://other.com").as_deref(),
+            Some("https://example.com/go?u=https://other.com")
+        );
+        assert_eq!(
             normalize_url("127.0.0.1:9/p").as_deref(),
             Some("https://127.0.0.1:9/p")
         );
@@ -515,7 +526,23 @@ mod tests {
         );
         assert_eq!(
             program(ShowMode::Maximized).duplicate_key(),
-            program(ShowMode::Maximized).duplicate_key()
+            match program(ShowMode::Maximized) {
+                Target::Program {
+                    path,
+                    arguments,
+                    elevated,
+                    show,
+                    ..
+                } => Target::Program {
+                    path,
+                    arguments,
+                    working_dir: "C:/Apps".into(),
+                    elevated,
+                    show,
+                },
+                _ => unreachable!(),
+            }
+            .duplicate_key()
         );
         assert_ne!(
             Target::Shortcut {

@@ -1,14 +1,14 @@
 export { Palette } from "std-widgets.slint";
 export { Theme, I18n } from "chrome.slint";
-import { Button, LineEdit, TextEdit, CheckBox, Switch, Slider, SpinBox, ListView, ScrollView, Palette, AboutSlint } from "std-widgets.slint";
+import { Button, LineEdit, TextEdit, CheckBox, Switch, Slider, ListView, ScrollView, Palette, AboutSlint } from "std-widgets.slint";
 import { AppWindow, TitleBar, IconButton, Theme, I18n, SettingRow, SettingsSelect, StepperButton, HintSurface, BatchActionButton, ToastBar, ElevationShadow } from "chrome.slint";
 
 export struct NavItem { id: int, name: string }
-export struct ScopeNode { id: int, parent: int, label: string, depth: int, state: int }
+export struct ScopeNode { id: int, label: string, depth: int, state: int }
 export struct Item { checked: bool, id: int, name: string, detail: string, tooltip-path: string, tooltip-notes: string, kind: int, icon: image, drag-icon: image }
 export struct DestinationNode { id: int, parent: int, name: string, expanded: bool }
 export struct AppOption { name: string, aumid: string }
-export struct DiscoverOption { checked: bool, index: int, name: string, detail: string, kind: int }
+export struct DiscoverOption { checked: bool, index: int, name: string, detail: string }
 export struct BrokenOption { id: int, name: string, target: string, reason: string, relocatable: bool }
 export struct NoticeItem { name: string, version: string, license: string, detail: string }
 
@@ -44,7 +44,6 @@ component PixelWidthInput inherits Rectangle {
 
 component Tile inherits Rectangle {
     in property <Item> item;
-    in property <[NavItem]> destinations;
     in property <bool> selected;
     in property <bool> keyboard-focused;
     in property <bool> sortable;
@@ -53,22 +52,16 @@ component Tile inherits Rectangle {
     in property <length> icon-size: 36px;
     in property <bool> search-result;
     in property <bool> batch-mode;
-    callback action(int);
     callback launch;
     callback select;
     callback edit;
     callback open-menu;
-    callback change-icon;
-    callback convert-path(bool);
-    callback remove;
-    callback move(int);
-    callback move-to(int);
     pure callback make-drag() -> data-transfer;
     callback can-drop(data-transfer) -> bool;
     callback drop-before(data-transfer, bool) -> bool;
     property <bool> insert-after;
     property <color> kind-tint: item.kind == 2 ? #b68422 : item.kind == 3 ? #278879 : item.kind == 5 ? #8065b9 : Palette.accent-background;
-    property <image> kind-fallback-icon: item.kind == 2 ? @image-url("icons/folder.svg") : item.kind == 3 ? @image-url("icons/web.svg") : item.kind == 1 ? @image-url("icons/file.svg") : item.kind == 5 ? @image-url("icons/app.svg") : @image-url("icons/program.svg");
+    property <image> kind-fallback-icon: item.kind == 2 ? @image-url("icons/folder.svg") : item.kind == 3 ? @image-url("icons/web.svg") : item.kind == 1 ? @image-url("icons/file.svg") : item.kind == 5 ? @image-url("icons/app.svg") : item.kind == 4 ? @image-url("icons/shortcut.svg") : @image-url("icons/program.svg");
     border-radius: Theme.radius-lg;
     opacity: tile-drag.dragging ? 0.4 : 1;
     background: (root.batch-mode && item.checked) || (root.search-result && selected) ? Theme.selection : touch.has-hover ? Theme.hover : transparent;
@@ -159,7 +152,6 @@ component NavNode inherits Rectangle {
 
     in property <bool> active;
     in property <bool> group;
-    in property <[NavItem]> groups;
     in property <bool> hover-switch;
     in property <int> hover-delay;
     callback select;
@@ -180,7 +172,7 @@ component NavNode inherits Rectangle {
     DropArea {
         can-drop(event) => { root.insert-after = root.group ? event.position.x > self.width / 2 : event.position.y > self.height / 2; return root.can-drop(event.data) ? DragAction.move : DragAction.none; }
         dropped(event) => { return root.drop-data(event.data,root.insert-after) ? DragAction.move : DragAction.none; }
-        Timer { running: parent.has-drag; interval: 350ms; triggered => { root.select(); } }
+        Timer { running: parent.has-drag && !root.active; interval: 350ms; triggered => { root.select(); } }
         if self.has-drag: Rectangle { x: root.group && root.insert-after ? parent.width - 2px : 0px; y: !root.group && root.insert-after ? parent.height - 2px : 0px; width: root.group ? 2px : parent.width; height: root.group ? parent.height : 2px; background: Palette.accent-background; }
         DragArea { enabled: root.node.id > 0; allow-move: true; data: root.drag-data();
             Rectangle {
@@ -204,6 +196,14 @@ component NavTree inherits Rectangle {
     callback pick(int);
     callback key(int);
     public function focus-tree() { tree-focus.focus(); }
+    changed cursor => {
+        if root.cursor >= 0 {
+            if root.cursor * 36px < -tree-scroll.content-y { tree-scroll.content-y = -root.cursor * 36px; }
+            else if (root.cursor + 1) * 36px > -tree-scroll.content-y + tree-scroll.visible-height {
+                tree-scroll.content-y = min(0px, tree-scroll.visible-height - (root.cursor + 1) * 36px);
+            }
+        }
+    }
     tree-focus := FocusScope {
         x: 0px; y: 0px; width: parent.width; height: parent.height;
         key-pressed(event) => {
@@ -214,9 +214,8 @@ component NavTree inherits Rectangle {
             if event.text == Key.Return || event.text == " " { root.key(0); return accept; }
             return reject;
         }
-        ScrollView {
+        tree-scroll := ScrollView {
             content-width: self.visible-width;
-            content-y: -max(0px, min(root.cursor * 36px - self.visible-height + 36px, max(0px, self.content-height - self.visible-height)));
             VerticalLayout { spacing: 0px;
                 for node[index] in root.nodes: Rectangle {
                     height: 36px; border-radius: Theme.radius-md;
@@ -235,7 +234,6 @@ component NavTree inherits Rectangle {
 }
 
 export component MainWindow inherits AppWindow {
-    in-out property <bool> window-active <=> root.frame-active;
     in property <int> dock-edge: -1;
     in property <length> dock-overhang: 0px;
     in property <float> edge-progress: 0.0;
@@ -247,7 +245,6 @@ export component MainWindow inherits AppWindow {
     preferred-width: 440px; preferred-height: 640px;
     min-width: 400px + root.inset-left + root.inset-right; min-height: 450px + root.inset-top;
     in property <[NavItem]> groups;
-    in property <[NavItem]> destinations;
     in property <[NavItem]> categories;
     in property <bool> double-click;
     in property <bool> type-to-search;
@@ -260,7 +257,6 @@ export component MainWindow inherits AppWindow {
     out property <int> grid-columns: content.columns;
     callback pin-changed;
     callback drag-start;
-    callback change-icon(int);
     callback convert-path(int, bool);
     in property <[Item]> items;
     in-out property <length> grid-scroll <=> content.content-y;
@@ -296,6 +292,7 @@ export component MainWindow inherits AppWindow {
     changed grid-first => { root.viewport-changed(); }
     changed grid-visible-count => { root.viewport-changed(); }
     changed search-first => { root.viewport-changed(); }
+    changed search-visible-count => { root.viewport-changed(); }
 
     in property <int> group-id;
     in property <int> category-id;
@@ -323,7 +320,6 @@ export component MainWindow inherits AppWindow {
     callback move(int, int);
     callback move-to(int, int);
     callback remove(int);
-    callback manage-group(int);
     callback collection-action(int, int, int);
     callback item-action(int, int);
     callback global-action(int);
@@ -354,7 +350,6 @@ export component MainWindow inherits AppWindow {
     in-out property <int> inline-id;
     in-out property <string> inline-text;
     in-out property <string> inline-error;
-    in-out property <string> inline-context;
     in-out property <string> delete-name;
     in-out property <bool> delete-has-content;
     in-out property <bool> delete-is-group;
@@ -391,7 +386,9 @@ export component MainWindow inherits AppWindow {
     public function dismiss-search() { root.search-open = false; root.query = ""; root.search(""); root.restore-grid-focus(); }
     public function reveal-result(index: int) {
         if index * 64px < -search-results.content-y { search-results.content-y = -index * 64px; }
-        else if (index + 1) * 64px > -search-results.content-y + search-results.height { search-results.content-y = search-results.height - (index+1)*64px; }
+        else if (index + 1) * 64px > -search-results.content-y + search-results.visible-height {
+            search-results.content-y = min(0px, search-results.visible-height - (index + 1) * 64px);
+        }
     }
     public function reveal-grid-row(row: int) {
         if row * content.row-height < -content.content-y { content.content-y = -row * content.row-height; }
@@ -463,9 +460,9 @@ export component MainWindow inherits AppWindow {
                     content-width: max(self.visible-width, group-row.preferred-width);
                     content-height: 36px;
                     group-row := HorizontalLayout { spacing: 4px; alignment: start;
-                    for group[index] in root.groups: NavNode {
+                    for group in root.groups: NavNode {
                         horizontal-stretch: 0; height: 36px;
-                        node: group; group: true; groups: root.groups; active: root.group-id == group.id;
+                        node: group; group: true; active: root.group-id == group.id;
                         changed active => { if self.active { group-tabs.content-x = min(0px, max(group-tabs.visible-width - group-tabs.content-width, -self.x)); } }
                         hover-switch: root.hover-switch && !root.interacting; hover-delay: root.hover-delay;
                         select => { root.choose-group(group.id); }
@@ -492,7 +489,7 @@ export component MainWindow inherits AppWindow {
                             for category in root.categories: NavNode {
                                 external-x: root.external-x; external-y: root.external-y; external-drag: root.drop-hover && root.external-y >= category-scroll.absolute-position.y && root.external-y < category-scroll.absolute-position.y + category-scroll.height;
                                 external-hit(id) => { if id > 0 { root.external-category = id; } else if root.external-category == -id { root.external-category = 0; } }
-                                node: category; groups: root.groups; active: root.category-id == category.id;
+                                node: category; active: root.category-id == category.id;
                                 hover-switch: root.hover-switch && !root.interacting; hover-delay: root.hover-delay;
                                 select => { root.choose-category(category.id); }
                                 action(kind,target) => { root.collection-action(category.id,kind,target); }
@@ -519,11 +516,10 @@ export component MainWindow inherits AppWindow {
                             property <length> row-height: root.list-view ? 64px : root.icon-size == 0 ? 88px : root.icon-size == 2 ? 118px : 104px;
                             for row in ceil(root.items.length / content.columns) + (root.batch-mode && root.items.length > 0 ? 1 : 0): Rectangle {
                             height: content.row-height;
-                            for col in content.columns: Tile {
+                            for col in max(0, min(content.columns, root.items.length - row * content.columns)): Tile {
                                 property <int> item-index: row * content.columns + col;
                                 property <Item> entry: root.items[self.item-index];
-                                visible: self.item-index < root.items.length;
-                                item: self.entry; batch-mode: root.batch-mode; list-mode: root.list-view; icon-size: root.icon-size == 0 ? 28px : root.icon-size == 2 ? 48px : 36px; double-click: root.double-click; destinations: root.destinations;
+                                item: self.entry; batch-mode: root.batch-mode; list-mode: root.list-view; icon-size: root.icon-size == 0 ? 28px : root.icon-size == 2 ? 48px : 36px; double-click: root.double-click;
                                 selected: root.selected-id == self.entry.id; keyboard-focused: root.keyboard-focus; sortable: !root.busy && !root.batch-mode && root.inline-kind == 0;
                                 x: col * (content.cell-width + content.col-gap);
                                 y: 0px;
@@ -531,10 +527,6 @@ export component MainWindow inherits AppWindow {
                                 launch => { if !root.busy { root.launch(self.entry.id); } }
                                 select => { root.keyboard-focus = false; root.selected-id = self.entry.id; }
                                 edit => { root.edit(self.entry.id); } open-menu => { root.native-menu(1,self.entry.id); }
-                                action(kind) => { root.item-action(self.entry.id,kind); }
-                                change-icon => { root.change-icon(self.entry.id); } convert-path(relative) => { root.convert-path(self.entry.id,relative); }
-                                remove => { root.selected-id = self.entry.id; root.delete-name = self.entry.name; root.inline-error = ""; root.confirm-delete = true; }
-                                move(direction) => { root.move(self.entry.id,direction); } move-to(destination) => { root.move-to(self.entry.id,destination); }
                                 make-drag => { return root.make-drag(self.entry.id); }
                                 can-drop(data) => { return root.can-drop(data); } drop-before(data,after) => { return root.drop-before(data,self.entry.id,after); }
                             }
@@ -567,7 +559,6 @@ export component MainWindow inherits AppWindow {
             animate y { duration: 150ms; easing: ease-out; }
             width: 360px; height: 214px;
             background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 20px; spacing: 12px;
                 Text { text: root.inline-kind == 3 ? (I18n.en ? "New group" : "新建分组") : root.inline-kind == 4 ? (I18n.en ? "New category" : "新建子分类") : (I18n.en ? "Rename" : "修改名称"); font-weight: 600; color: Palette.foreground; }
                 Text { text: I18n.en ? "Name" : "名称"; color: Palette.alternate-foreground; }
@@ -595,20 +586,15 @@ export component MainWindow inherits AppWindow {
             width: parent.width - 24px;
             height: parent.height - 20px;
             background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             TouchArea { enabled: root.search-open; }
             VerticalLayout { padding: 12px; spacing: 10px;
                 if root.results.length == 0: Text { text: root.query == "" ? (I18n.en ? "Search all saved items" : "搜索全部已收录项目") : (I18n.en ? "No matching items" : "没有匹配项目"); color: Palette.alternate-foreground; horizontal-alignment: center; }
                 search-results := ListView {
-                        for item in root.results: Tile { height: 64px; item: item; list-mode: true; search-result: true; batch-mode: root.batch-mode; destinations: root.destinations; double-click: root.double-click;
+                        for item in root.results: Tile { height: 64px; item: item; list-mode: true; search-result: true; batch-mode: root.batch-mode; double-click: root.double-click;
                             selected: root.selected-id == item.id;
                                 launch => { if !root.busy { root.launch(item.id); } }
                                 select => { root.selected-id = item.id; }
                                 edit => { root.edit(item.id); } open-menu => { root.native-menu(1,item.id); }
-                                action(kind) => { root.item-action(item.id,kind); }
-                                change-icon => { root.change-icon(item.id); } convert-path(relative) => { root.convert-path(item.id,relative); }
-                                remove => { root.selected-id = item.id; root.delete-name = item.name; root.inline-error = ""; root.confirm-delete = true; }
-                                move(direction) => { root.move(item.id,direction); } move-to(destination) => { root.move-to(item.id,destination); }
                         }
                 }
 
@@ -668,7 +654,6 @@ export component MainWindow inherits AppWindow {
             x: 16px; y: root.batch-target-open ? 52px : 60px; width: parent.width - 32px; height: parent.height - 76px;
             animate y { duration: 150ms; easing: ease-out; }
             background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 14px; spacing: 10px;
                 Text { text: root.batch-action == 0 ? (I18n.en ? "Move to" : "移动到") : (I18n.en ? "Copy to" : "复制到"); font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 batch-tree := NavTree {
@@ -686,7 +671,7 @@ export component MainWindow inherits AppWindow {
         }
     }
     if root.batch-confirm: Rectangle { background: Theme.scrim; TouchArea { }
-        Rectangle { x: 20px; y: (parent.height - self.height) / 2; width: parent.width - 40px; height: self.preferred-height; background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg; drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
+        Rectangle { x: 20px; y: (parent.height - self.height) / 2; width: parent.width - 40px; height: self.preferred-height; background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg;
             VerticalLayout { padding: 16px; spacing: 12px;
                 Text { text: I18n.en ? "Delete " + root.batch-count + (root.batch-count == 1 ? " selected item?" : " selected items?") : "删除选中的 " + root.batch-count + " 个项目？"; color: Palette.foreground; font-weight: 600; }
                 Text { text: I18n.en ? "Only launcher entries are removed; original files remain." : "只删除启动器记录，原文件保留。"; color: Palette.alternate-foreground; wrap: word-wrap; }
@@ -699,7 +684,7 @@ export component MainWindow inherits AppWindow {
         }
     }
     if root.relocate-open: Rectangle { background: Theme.scrim; TouchArea { }
-        Rectangle { x: 20px; y: (parent.height - self.height) / 2; width: parent.width - 40px; height: self.preferred-height; background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke; drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
+        Rectangle { x: 20px; y: (parent.height - self.height) / 2; width: parent.width - 40px; height: self.preferred-height; background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 16px; spacing: 12px;
                 Text { text: I18n.en ? "Relocate \"" + root.relocate-name + "\"" : "重新定位「" + root.relocate-name + "」"; color: Palette.foreground; wrap: word-wrap; }
                 Text { text: root.relocate-target; color: Palette.alternate-foreground; wrap: word-wrap; font-size: 12px; }
@@ -712,7 +697,7 @@ export component MainWindow inherits AppWindow {
         }
     }
     if root.conversion-open: Rectangle { background: Theme.scrim; TouchArea { }
-        Rectangle { x: 12px; y: 52px; width: parent.width - 24px; height: parent.height - 72px; background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke; drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
+        Rectangle { x: 12px; y: 52px; width: parent.width - 24px; height: parent.height - 72px; background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 16px; spacing: 12px;
                 Text { text: root.conversion-relative ? (I18n.en ? "Convert to relative paths" : "转换为相对路径") : (I18n.en ? "Convert to absolute paths" : "转换为绝对路径"); font-size: 18px; font-weight: 600; color: Palette.foreground; }
                 HorizontalLayout { alignment: start; spacing: 8px; Button { text: I18n.en ? "Select all" : "全选"; clicked => { root.scope-all(true); } } Button { text: I18n.en ? "Clear" : "清空"; clicked => { root.scope-all(false); } } }
@@ -735,20 +720,20 @@ export component MainWindow inherits AppWindow {
                     }
                 }
                 Text { text: root.conversion-summary; wrap: word-wrap; color: Palette.foreground; }
-                if root.conversion-details != "": ScrollView { height: 70px; content-width: self.visible-width; Text { text: root.conversion-details; wrap: word-wrap; color: Palette.alternate-foreground; font-size: 12px; } }
-                HorizontalLayout { alignment: end; Button { text: I18n.en ? "Close" : "关闭"; clicked => { root.conversion-open = false; } } Button { text: I18n.en ? "Convert" : "转换"; primary: true; enabled: root.scope-selected && !root.busy; clicked => { root.apply-conversion(); } } }
+                if root.conversion-details != "": ScrollView { height: 70px; content-width: self.visible-width; VerticalLayout { Text { text: root.conversion-details; wrap: word-wrap; color: Palette.alternate-foreground; font-size: 12px; } } }
+                HorizontalLayout { alignment: end; Button { text: I18n.en ? "Close" : "关闭"; clicked => { root.conversion-open = false; root.focus-browser(); } } Button { text: I18n.en ? "Convert" : "转换"; primary: true; enabled: root.scope-selected && !root.busy; clicked => { root.apply-conversion(); } } }
             }
         }
     }
     if root.collection-delete || root.confirm-delete: Rectangle { background: Theme.scrim; TouchArea { }
-        Rectangle { width: parent.width - 32px; height: delete-form.preferred-height; x: 16px; y: (parent.height - self.height) / 2; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke; background: Theme.elevated; drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
+        Rectangle { width: parent.width - 32px; height: delete-form.preferred-height; x: 16px; y: (parent.height - self.height) / 2; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke; background: Theme.elevated;
             FocusScope {
                 init => { self.focus(); }
                 key-pressed(event) => {
-                    if event.text == Key.Escape { root.confirm-delete = false; root.collection-delete = false; return accept; }
+                    if event.text == Key.Escape { root.confirm-delete = false; root.collection-delete = false; root.focus-browser(); return accept; }
                     if event.text == Key.Return {
                         if root.collection-delete { root.finish-delete(root.delete-target); }
-                        else { root.remove(root.selected-id); root.confirm-delete = false; }
+                        else { root.remove(root.selected-id); root.confirm-delete = false; root.focus-browser(); }
                         return accept;
                     }
                     return reject;
@@ -762,8 +747,8 @@ export component MainWindow inherits AppWindow {
                 if root.collection-delete && root.delete-has-content: CheckBox { text: I18n.en ? "Delete items and subcategories without moving" : "不迁移，直接删除其中的项目和子分类"; checked <=> root.delete-discard; }
                 if root.inline-error != "": Text { text: root.inline-error; wrap: word-wrap; color: Theme.danger; }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.confirm-delete = false; root.collection-delete = false; } }
-                    Button { text: root.collection-delete && root.delete-has-content && !root.delete-discard ? (I18n.en ? "Move & delete" : "迁移并删除") : (I18n.en ? "Delete" : "删除"); primary: true; clicked => { if root.collection-delete { root.finish-delete(root.delete-target); } else { root.remove(root.selected-id); root.confirm-delete = false; } } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.confirm-delete = false; root.collection-delete = false; root.focus-browser(); } }
+                    Button { text: root.collection-delete && root.delete-has-content && !root.delete-discard ? (I18n.en ? "Move & delete" : "迁移并删除") : (I18n.en ? "Delete" : "删除"); primary: true; clicked => { if root.collection-delete { root.finish-delete(root.delete-target); } else { root.remove(root.selected-id); root.confirm-delete = false; root.focus-browser(); } } }
                 }
             }
         }
@@ -779,7 +764,6 @@ export component MainWindow inherits AppWindow {
             x: 16px; y: root.discover-open ? 48px : 56px; width: parent.width - 32px; height: parent.height - 68px;
             animate y { duration: 150ms; easing: ease-out; }
             background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 14px; spacing: 10px;
                 Text { text: I18n.en ? "Scan & import installed apps" : "扫描导入已安装软件"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 Text { text: (I18n.en ? "Destination: " : "导入目标：") + root.discover-target-name; color: Palette.alternate-foreground; font-size: 12px; overflow: elide; }
@@ -796,6 +780,11 @@ export component MainWindow inherits AppWindow {
                             y: 2px; width: parent.width; height: 44px; border-radius: Theme.radius-md;
                             background: option.checked ? Theme.selection : disc-hit.has-hover ? Theme.hover : transparent;
                             animate background { duration: 100ms; easing: ease-out; }
+                            accessible-role: checkbox;
+                            accessible-label: option.name;
+                            accessible-checked: option.checked;
+                            accessible-action-default => { root.discover-toggle(option.index); }
+                            forward-focus: disc-focus;
                             HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 8px;
                                 Rectangle {
                                     width: 16px; height: 16px; y: 14px; border-radius: Theme.radius-sm; border-width: 1px;
@@ -809,7 +798,8 @@ export component MainWindow inherits AppWindow {
                                     Text { text: option.detail; color: Palette.alternate-foreground; font-size: 11px; overflow: elide; }
                                 }
                             }
-                            disc-hit := TouchArea { clicked => { root.discover-toggle(option.index); } }
+                            disc-focus := FocusScope { key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.discover-toggle(option.index); return accept; } return reject; } }
+                            disc-hit := TouchArea { clicked => { disc-focus.focus(); root.discover-toggle(option.index); } }
                             Tooltip { HintSurface { title: option.name; detail: option.detail; } }
                         }
                     }
@@ -825,7 +815,6 @@ export component MainWindow inherits AppWindow {
         Rectangle {
             x: 16px; y: 48px; width: parent.width - 32px; height: parent.height - 68px;
             background: Theme.elevated; border-width: 1px; border-color: Theme.stroke; border-radius: Theme.radius-lg;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 14px; spacing: 10px;
                 Text { text: I18n.en ? "Broken item check" : "失效项目检查"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 Text { text: root.broken-loading ? (I18n.en ? "Checking local paths and installed apps…" : "正在检查本地路径与已安装应用…") : root.broken-items.length == 0 ? (I18n.en ? "All local paths and app targets are valid." : "所有本地路径与应用目标均有效。") : (I18n.en ? "Found " + root.broken-items.length + (root.broken-items.length == 1 ? " broken target (URLs skipped):" : " broken targets (URLs skipped):") : "发现 " + root.broken-items.length + " 个失效目标（未检查网页地址）："); color: Palette.alternate-foreground; font-size: 12px; wrap: word-wrap; }
@@ -888,7 +877,6 @@ export component MainWindow inherits AppWindow {
 }
 
 export component EditorWindow inherits AppWindow {
-    in-out property <bool> window-active <=> root.frame-active;
     in-out property <bool> topmost-window;
     in property <bool> editing;
     always-on-top: root.topmost-window;
@@ -928,7 +916,7 @@ export component EditorWindow inherits AppWindow {
     in property <image> entry-icon;
     in property <bool> saving;
     in property <bool> composing;
-    callback icon-path(string); callback pick-app;
+    callback pick-app;
     callback browse-icon; callback reset-icon; callback convert-path(bool);
     callback save; callback cancel; callback discard; callback keep-editing; callback browse; callback browse-working-dir;
     public function focus-name() { name-input.focus(); name-input.select-all(); }
@@ -949,7 +937,7 @@ export component EditorWindow inherits AppWindow {
                             Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Icon" : "图标"; color: Palette.foreground; vertical-alignment: center; }
                             Image {
                                 width: 40px; height: 40px;
-                                source: root.entry-icon.width > 0 ? root.entry-icon : root.kind == 2 ? @image-url("icons/folder.svg") : root.kind == 3 ? @image-url("icons/web.svg") : root.kind == 1 ? @image-url("icons/file.svg") : root.kind == 5 ? @image-url("icons/app.svg") : @image-url("icons/program.svg");
+                                source: root.entry-icon.width > 0 ? root.entry-icon : root.kind == 2 ? @image-url("icons/folder.svg") : root.kind == 3 ? @image-url("icons/web.svg") : root.kind == 1 ? @image-url("icons/file.svg") : root.kind == 5 ? @image-url("icons/app.svg") : root.kind == 4 ? @image-url("icons/shortcut.svg") : @image-url("icons/program.svg");
                                 colorize: root.entry-icon.width > 0 ? #0000 : (root.kind == 2 ? #b68422 : root.kind == 3 ? #278879 : root.kind == 5 ? #8065b9 : Palette.accent-background);
                             }
                             Button { text: I18n.en ? "Choose icon" : "选择图标"; clicked => { root.browse-icon(); } }
@@ -1003,7 +991,7 @@ export component EditorWindow inherits AppWindow {
                         }
                     }
                 }
-                if root.error != "": Text { text: root.error; color: Palette.foreground; wrap: word-wrap; }
+                if root.error != "": Text { text: root.error; color: Theme.danger; wrap: word-wrap; }
             }
         }
         Rectangle { height: 1px; background: Theme.stroke; }
@@ -1013,7 +1001,7 @@ export component EditorWindow inherits AppWindow {
         }
     }
     if root.discard-confirm: Rectangle { background: Theme.scrim; TouchArea { }
-        Rectangle { x: 24px; width: parent.width - 48px; height: discard-form.preferred-height; y: (parent.height - self.height) / 2; background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke; drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
+        Rectangle { x: 24px; width: parent.width - 48px; height: discard-form.preferred-height; y: (parent.height - self.height) / 2; background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke;
             discard-form := VerticalLayout { padding: 20px; spacing: 16px;
                 Text { text: I18n.en ? "Discard unsaved changes?" : "放弃未保存的更改？"; font-size: 18px; font-weight: 600; color: Palette.foreground; }
                 Text { text: I18n.en ? "Closing now will discard your edits." : "关闭后将丢失本次编辑的内容。"; color: Palette.alternate-foreground; wrap: word-wrap; }
@@ -1035,7 +1023,6 @@ export component EditorWindow inherits AppWindow {
             x: 24px; y: root.collection-open ? 48px : 56px; width: parent.width - 48px; height: parent.height - 96px;
             animate y { duration: 150ms; easing: ease-out; }
             background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 14px; spacing: 10px;
                 Text { text: I18n.en ? "Choose category" : "选择所属分类"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 collection-tree := NavTree {
@@ -1060,7 +1047,6 @@ export component EditorWindow inherits AppWindow {
             x: 24px; y: root.picker-open ? 48px : 56px; width: parent.width - 48px; height: parent.height - 96px;
             animate y { duration: 150ms; easing: ease-out; }
             background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 14px; spacing: 10px;
                 Text { text: I18n.en ? "Choose installed app" : "选择已安装应用"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 picker-filter-input := LineEdit { text <=> root.picker-filter; placeholder-text: I18n.en ? "Filter by name" : "按名称筛选"; accessible-label: I18n.en ? "Filter by name" : "按名称筛选"; changed text => { root.picker-refilter(); } }
@@ -1095,6 +1081,16 @@ export component EditorWindow inherits AppWindow {
 
 }
 
+component StripWidthSlider inherits Slider {
+    in-out property <int> width-value: 1;
+    callback edited;
+    minimum: 1;
+    maximum: 12;
+    value: root.width-value;
+    changed width-value => { if round(self.value) != root.width-value { self.value = root.width-value; } }
+    changed(v) => { if round(v) != root.width-value { root.width-value = round(v); root.edited(); } }
+}
+
 export component SettingsWindow inherits AppWindow {
     in property <string> app-version;
     in property <string> rust-version;
@@ -1103,7 +1099,6 @@ export component SettingsWindow inherits AppWindow {
     in-out property <int> legal-tab;
     in property <[string]> license-lines;
     in property <[NoticeItem]> notice-items;
-    in-out property <bool> window-active <=> root.frame-active;
     in-out property <bool> topmost-window;
     always-on-top: root.topmost-window;
     title: I18n.en ? "Settings · Raptim" : "设置 · Raptim";
@@ -1119,14 +1114,20 @@ export component SettingsWindow inherits AppWindow {
     in-out property <bool> autostart;
     in property <string> autostart-warning;
     in-out property <bool> double-click;
+    property <int> double-click-index: root.double-click ? 1 : 0;
+    changed double-click => { root.double-click-index = root.double-click ? 1 : 0; }
     in-out property <bool> type-to-search;
     in-out property <bool> edge-hide;
     in-out property <bool> edge-strip-visible: true;
     in-out property <int> edge-strip-width: 1;
     in-out property <int> edge-collapse-delay: 250;
+    property <int> edge-collapse-delay-index: root.edge-collapse-delay <= 150 ? 0 : root.edge-collapse-delay >= 450 ? 2 : 1;
+    changed edge-collapse-delay => { root.edge-collapse-delay-index = root.edge-collapse-delay <= 150 ? 0 : root.edge-collapse-delay >= 450 ? 2 : 1; }
     in-out property <bool> hide-on-focus-loss;
     in-out property <bool> hover-switch;
     in-out property <int> hover-delay: 350;
+    property <int> hover-delay-index: root.hover-delay == 200 ? 0 : root.hover-delay == 600 ? 2 : 1;
+    changed hover-delay => { root.hover-delay-index = root.hover-delay == 200 ? 0 : root.hover-delay == 600 ? 2 : 1; }
     in-out property <bool> relative-paths;
     in-out property <bool> hide-after-launch;
     in-out property <bool> fullscreen-protection;
@@ -1214,8 +1215,8 @@ export component SettingsWindow inherits AppWindow {
                                 SettingsSelect {
                                     width: 150px; accessible-name: I18n.en ? "Launch click" : "启动方式";
                                     model: I18n.en ? ["Single click", "Double click"] : ["单击", "双击"];
-                                    current-index: root.double-click ? 1 : 0;
-                                    selected(value) => { root.double-click = self.current-index == 1; root.change(0); }
+                                    current-index <=> root.double-click-index;
+                                    selected(_) => { root.double-click = root.double-click-index == 1; root.change(0); }
                                 }
                             }
                             if root.page == 0: SettingRow { label: I18n.en ? "Type to search when focused" : "获焦后直接打字搜索";
@@ -1228,8 +1229,8 @@ export component SettingsWindow inherits AppWindow {
                                 SettingsSelect {
                                     width: 150px; accessible-name: I18n.en ? "Hover delay" : "悬停延迟";
                                     model: ["200 ms", "350 ms", "600 ms"];
-                                    current-index: root.hover-delay == 200 ? 0 : root.hover-delay == 600 ? 2 : 1;
-                                    selected(value) => { root.hover-delay = self.current-index == 0 ? 200 : self.current-index == 2 ? 600 : 350; root.change(0); }
+                                    current-index <=> root.hover-delay-index;
+                                    selected(_) => { root.hover-delay = root.hover-delay-index == 0 ? 200 : root.hover-delay-index == 2 ? 600 : 350; root.change(0); }
                                 }
                             }
 
@@ -1253,7 +1254,7 @@ export component SettingsWindow inherits AppWindow {
                                 description: I18n.en ? "Physical pixels; hovering the edge still expands when off" : "物理像素；关闭后悬停边缘仍可展开";
                                 control-width: 228px;
                                 enabled: root.edge-hide && root.edge-strip-visible;
-                                Slider { enabled: root.edge-hide && root.edge-strip-visible; width: 108px; height: 32px; minimum: 1; maximum: 12; value: root.edge-strip-width; changed(value) => { root.edge-strip-width = round(value); root.change(0); } }
+                                StripWidthSlider { enabled: root.edge-hide && root.edge-strip-visible; width: 108px; height: 32px; width-value <=> root.edge-strip-width; edited => { root.change(0); } }
                                 HorizontalLayout { width: 112px; height: 32px; spacing: 4px;
                                     StepperButton { text: "−"; label: I18n.en ? "Decrease strip width" : "减小露边宽度"; enabled: root.edge-hide && root.edge-strip-visible && root.edge-strip-width > 1; clicked => { root.edge-strip-width -= 1; root.change(0); } }
                                     PixelWidthInput { value <=> root.edge-strip-width; enabled: root.edge-hide && root.edge-strip-visible; edited => { root.change(0); } }
@@ -1264,8 +1265,8 @@ export component SettingsWindow inherits AppWindow {
                                 SettingsSelect {
                                     width: 150px; enabled: root.edge-hide; accessible-name: I18n.en ? "Edge collapse delay" : "贴边收起延迟";
                                     model: ["150 ms", "250 ms", "450 ms"];
-                                    current-index: root.edge-collapse-delay <= 150 ? 0 : root.edge-collapse-delay >= 450 ? 2 : 1;
-                                    selected(value) => { root.edge-collapse-delay = self.current-index == 0 ? 150 : self.current-index == 2 ? 450 : 250; root.change(0); }
+                                    current-index <=> root.edge-collapse-delay-index;
+                                    selected(_) => { root.edge-collapse-delay = root.edge-collapse-delay-index == 0 ? 150 : root.edge-collapse-delay-index == 2 ? 450 : 250; root.change(0); }
                                 }
                             }
                             if root.page == 1: SettingRow { label: I18n.en ? "Always on top" : "窗口始终置顶";
@@ -1285,7 +1286,7 @@ export component SettingsWindow inherits AppWindow {
                                 label: I18n.en ? "Pause Game DND" : "暂停游戏勿扰";
                                 description: I18n.en ? "Applies to this session only: hotkeys, tray, and edge summon remain active until exit" : "仅本次运行有效：暂停期间热键、托盘与贴边呼出恢复可用，退出后自动恢复判定";
                                 control-width: 56px;
-                                Switch { height: 32px; checked: root.protection-bypass; toggled => { root.protection-bypass-changed(!root.protection-bypass); } }
+                                Switch { height: 32px; checked <=> root.protection-bypass; toggled => { root.protection-bypass-changed(root.protection-bypass); } }
                             }
                             if root.page == 2: SettingRow {
                                 label: I18n.en ? "Log protection decisions" : "记录保护判定";
@@ -1491,7 +1492,6 @@ export component SettingsWindow inherits AppWindow {
         Rectangle {
             x: 24px; y: 24px; width: parent.width - 48px; height: parent.height - 48px;
             background: Theme.elevated; border-radius: Theme.radius-lg; border-width: 1px; border-color: Theme.stroke;
-            drop-shadow-blur: 24px; drop-shadow-offset-y: 8px; drop-shadow-color: Theme.shadow;
             VerticalLayout { padding: 16px; spacing: 10px;
                 HorizontalLayout { spacing: 8px;
                     Button { height: 30px; primary: root.legal-tab == 0; text: I18n.en ? "GPL-3.0 License" : "GPL-3.0 许可证"; clicked => { root.legal-tab = 0; } }

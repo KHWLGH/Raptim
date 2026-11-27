@@ -38,19 +38,22 @@ fn registered(name: &str) -> u16 {
     let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
     unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) as u16 }
 }
-fn formats() -> [u16; 5] {
-    [
-        15,
-        registered("text/x-moz-url"),
-        registered("UniformResourceLocatorW"),
-        13,
-        registered("UniformResourceLocator"),
-    ]
+fn formats() -> &'static [u16; 5] {
+    static FORMATS: std::sync::OnceLock<[u16; 5]> = std::sync::OnceLock::new();
+    FORMATS.get_or_init(|| {
+        [
+            15,
+            registered("text/x-moz-url"),
+            registered("UniformResourceLocatorW"),
+            13,
+            registered("UniformResourceLocator"),
+        ]
+    })
 }
 fn accepts(data: &IDataObject) -> bool {
     formats()
-        .into_iter()
-        .any(|id| id != 0 && unsafe { data.QueryGetData(&format(id)).is_ok() })
+        .iter()
+        .any(|&id| id != 0 && unsafe { data.QueryGetData(&format(id)).is_ok() })
 }
 struct Medium(STGMEDIUM);
 impl Drop for Medium {
@@ -61,7 +64,7 @@ impl Drop for Medium {
     }
 }
 fn read(data: &IDataObject) -> Option<ExternalDrop> {
-    for (index, id) in formats().into_iter().enumerate() {
+    for (index, &id) in formats().iter().enumerate() {
         if id == 0 {
             continue;
         }
@@ -76,22 +79,30 @@ fn read(data: &IDataObject) -> Option<ExternalDrop> {
         if index == 0 {
             let drop = HDROP(handle.0);
             let count = unsafe { DragQueryFileW(drop, u32::MAX, None) };
+            if count == 0 {
+                return None;
+            }
             if count > 500 {
                 return Some(ExternalDrop::Files(vec![]));
             }
-            let mut paths = Vec::new();
+            let mut paths = Vec::with_capacity(count as usize);
+            let mut buffer = Vec::new();
             for i in 0..count {
                 let length = unsafe { DragQueryFileW(drop, i, None) };
-                let mut buffer = vec![0u16; length as usize + 1];
-                unsafe {
-                    DragQueryFileW(drop, i, Some(&mut buffer));
+                if length == 0 {
+                    continue;
+                }
+                buffer.resize(length as usize + 1, 0);
+                let written = unsafe { DragQueryFileW(drop, i, Some(&mut buffer)) } as usize;
+                if written == 0 {
+                    continue;
                 }
                 use std::os::windows::ffi::OsStringExt;
                 paths.push(PathBuf::from(std::ffi::OsString::from_wide(
-                    &buffer[..length as usize],
+                    &buffer[..written.min(buffer.len())],
                 )));
             }
-            return Some(ExternalDrop::Files(paths));
+            return (!paths.is_empty()).then_some(ExternalDrop::Files(paths));
         }
         let size = unsafe { GlobalSize(handle) };
         if size == 0 || size > 1024 * 1024 {

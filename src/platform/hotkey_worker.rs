@@ -35,13 +35,15 @@ impl Hotkey {
             while GetMessageW(&mut message, None, 0, 0).0 > 0 {
                 if message.message == HOTKEY_CONTROL {
                     while let Ok(request) = receiver.try_recv() {
-                        let same = registered
-                            .as_ref()
-                            .is_some_and(|(_, old)| *old == request.spec);
-                        let result = if same {
-                            if !request.enabled {
-                                let _ = UnregisterHotKey(None, registered.take().unwrap().0);
+                        let result = if !request.enabled {
+                            if let Some((old, _)) = registered.take() {
+                                let _ = UnregisterHotKey(None, old);
                             }
+                            Ok(())
+                        } else if registered
+                            .as_ref()
+                            .is_some_and(|(_, old)| *old == request.spec)
+                        {
                             Ok(())
                         } else {
                             let id = if registered.as_ref().is_some_and(|(id, _)| *id == 1) {
@@ -60,11 +62,7 @@ impl Hotkey {
                                     if let Some((old, _)) = registered.take() {
                                         let _ = UnregisterHotKey(None, old);
                                     }
-                                    if request.enabled {
-                                        registered = Some((id, request.spec));
-                                    } else {
-                                        let _ = UnregisterHotKey(None, id);
-                                    }
+                                    registered = Some((id, request.spec));
                                     Ok(())
                                 }
                                 Err(_) => Err(crate::i18n::t(

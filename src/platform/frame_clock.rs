@@ -84,7 +84,7 @@ impl FrameClock {
             .map_err(|e| e.to_string())?,
         );
         let changed = OwnedHandle(
-            unsafe { CreateEventW(None, false, false, None) }.map_err(|e| e.to_string())?,
+            unsafe { CreateEventW(None, true, true, None) }.map_err(|e| e.to_string())?,
         );
         let timer_handle = timer.0.0 as usize;
         let changed_handle = changed.0.0 as usize;
@@ -114,6 +114,9 @@ impl FrameClock {
                         let result =
                             unsafe { WaitForMultipleObjects(&[changed, timer], false, INFINITE) };
                         if result.0 == WAIT_OBJECT_0.0 {
+                            unsafe {
+                                let _ = CancelWaitableTimer(timer);
+                            }
                             continue;
                         }
                         signaled = result.0 == WAIT_OBJECT_0.0 + 1;
@@ -158,7 +161,11 @@ impl FrameClock {
         state.set_active(active);
         if changed {
             unsafe {
-                let _ = SetEvent(self.changed.0);
+                if active && !state.stopped {
+                    let _ = ResetEvent(self.changed.0);
+                } else {
+                    let _ = SetEvent(self.changed.0);
+                }
             }
             wake.notify_all();
         }

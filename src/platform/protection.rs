@@ -7,7 +7,7 @@ use super::*;
 pub struct ProtectionCache {
     hwnd: usize,
     pid: u32,
-    path: String,
+    path: Option<String>,
 }
 
 pub fn protection(settings: &Settings) -> Protection {
@@ -33,7 +33,7 @@ pub fn collect_signals(settings: &Settings, cache: &mut ProtectionCache) -> Sign
     }
 }
 
-pub fn notification_state() -> Notification {
+fn notification_state() -> Notification {
     match unsafe { SHQueryUserNotificationState() } {
         Ok(QUNS_RUNNING_D3D_FULL_SCREEN) => Notification::RunningD3dFullScreen,
         Ok(QUNS_PRESENTATION_MODE) => Notification::PresentationMode,
@@ -43,7 +43,31 @@ pub fn notification_state() -> Notification {
     }
 }
 
-pub fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protection {
+fn eq_wide_ascii(slice: &[u16], ascii: &str) -> bool {
+    slice.len() == ascii.len()
+        && slice
+            .iter()
+            .zip(ascii.bytes())
+            .all(|(&w, b)| w == u16::from(b))
+}
+
+fn rule_matches_path(rule: &str, path: &str) -> bool {
+    if rule.is_ascii() && path.is_ascii() {
+        rule.len() == path.len()
+            && rule.bytes().zip(path.bytes()).all(|(r, p)| {
+                let r = if r == b'/' {
+                    b'\\'
+                } else {
+                    r.to_ascii_lowercase()
+                };
+                r == p
+            })
+    } else {
+        rule.replace('/', "\\").to_lowercase() == path
+    }
+}
+
+fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protection {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null()
@@ -55,17 +79,20 @@ pub fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Pr
             return Protection::Normal;
         }
         let mut class = [0u16; 64];
-        let len = GetClassNameW(hwnd, &mut class);
-        if matches!(
-            String::from_utf16_lossy(&class[..len.max(0) as usize]).as_str(),
-            "WorkerW"
-                | "Progman"
-                | "Shell_TrayWnd"
-                | "Shell_SecondaryTrayWnd"
-                | "XamlExplorerHostIslandWindow"
-                | "MultitaskingViewFrame"
-                | "TaskSwitcherWnd"
-        ) {
+        let len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        let class_slice = &class[..len];
+        if [
+            "WorkerW",
+            "Progman",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "XamlExplorerHostIslandWindow",
+            "MultitaskingViewFrame",
+            "TaskSwitcherWnd",
+        ]
+        .iter()
+        .any(|name| eq_wide_ascii(class_slice, name))
+        {
             return Protection::Normal;
         }
         let mut pid = 0;
@@ -77,23 +104,21 @@ pub fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Pr
             // Both keys must match: a recycled pid under a different window must re-query.
             let cached = cache.hwnd == hwnd.0 as usize && cache.pid == pid;
             let path = if cached {
-                Some(cache.path.clone())
+                cache.path.as_deref()
             } else {
                 let queried = query_image_path(pid);
-                if let Some(path) = &queried {
-                    *cache = ProtectionCache {
-                        hwnd: hwnd.0 as usize,
-                        pid,
-                        path: path.clone(),
-                    };
-                }
-                queried
+                *cache = ProtectionCache {
+                    hwnd: hwnd.0 as usize,
+                    pid,
+                    path: queried,
+                };
+                cache.path.as_deref()
             };
             if path.is_some_and(|path| {
                 settings
                     .protected_apps
                     .iter()
-                    .any(|rule| rule.replace('/', "\\").to_lowercase() == path)
+                    .any(|rule| rule_matches_path(rule, path))
             }) {
                 return Protection::Strict;
             }
@@ -170,20 +195,37 @@ fn query_image_path(pid: u32) -> Option<String> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let handle = OwnedHandle(handle);
-        let mut buffer = vec![0u16; 32768];
-        let mut length = buffer.len() as u32;
-        QueryFullProcessImageNameW(
+        let mut stack = [0u16; 512];
+        let mut length = stack.len() as u32;
+        match QueryFullProcessImageNameW(
             handle.0,
             PROCESS_NAME_WIN32,
-            PWSTR(buffer.as_mut_ptr()),
+            PWSTR(stack.as_mut_ptr()),
             &mut length,
-        )
-        .ok()?;
-        Some(
-            String::from_utf16_lossy(&buffer[..length as usize])
-                .replace('/', "\\")
-                .to_lowercase(),
-        )
+        ) {
+            Ok(()) => Some(
+                String::from_utf16_lossy(&stack[..length as usize])
+                    .replace('/', "\\")
+                    .to_lowercase(),
+            ),
+            Err(err) if err.code() == ERROR_INSUFFICIENT_BUFFER.to_hresult() => {
+                let mut buffer = vec![0u16; 32768];
+                let mut length = buffer.len() as u32;
+                QueryFullProcessImageNameW(
+                    handle.0,
+                    PROCESS_NAME_WIN32,
+                    PWSTR(buffer.as_mut_ptr()),
+                    &mut length,
+                )
+                .ok()?;
+                Some(
+                    String::from_utf16_lossy(&buffer[..length as usize])
+                        .replace('/', "\\")
+                        .to_lowercase(),
+                )
+            }
+            Err(_) => None,
+        }
     }
 }
 
@@ -304,7 +346,9 @@ impl ForegroundWatch {
                 HWND::default()
             };
             let _ = tx.send(GetCurrentThreadId());
-            while GetMessageW(&mut message, None, 0, 0).0 > 0 {}
+            while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                let _ = DispatchMessageW(&message);
+            }
             if !watch.0.is_null() {
                 let _ = DestroyWindow(watch);
             }

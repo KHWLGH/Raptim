@@ -104,7 +104,6 @@ impl App {
                     );
                     (
                         Some(MenuEntry {
-                            id,
                             kind: entry.target.kind_index(),
                         }),
                         up,
@@ -179,8 +178,6 @@ impl App {
                         .map_or(self.group, |c| c.parent_id.unwrap_or(c.id))
                         as i32,
                 );
-                self.main
-                    .set_inline_context(self.collection_name(i64::from(self.main.get_inline_id())));
                 self.main.set_inline_text("".into());
             }
             2 => {
@@ -284,7 +281,6 @@ impl App {
                 .count();
             nodes.push(ScopeNode {
                 id: -(group.id as i32),
-                parent: 0,
                 label: group.name.clone().into(),
                 depth: 0,
                 state: if selected == 0 {
@@ -297,7 +293,6 @@ impl App {
             });
             nodes.extend(children.iter().map(|c| ScopeNode {
                 id: c.id as i32,
-                parent: group.id as i32,
                 label: c.name.clone().into(),
                 depth: 1,
                 state: if self.scope_selection.contains(&c.id) {
@@ -427,7 +422,6 @@ fn dispatch_item(
 fn dispatch_collection(ui: &MainWindow, ctx: &MenuContext, id: i32, kind: i32, command: u32) {
     match command {
         1 => ui.invoke_collection_action(id, if kind == 2 { 0 } else { 1 }, 0),
-        2 => ui.invoke_collection_action(id, 1, 0),
         3 => ui.invoke_collection_action(id, 2, 0),
         4 | 5 => ui.invoke_collection_action(id, 5, if command == 4 { -1 } else { 1 }),
         6 => ui.invoke_collection_action(id, 3, 0),
@@ -647,11 +641,18 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                 });
             }
             5 => {
-                if let Err(e) = platform::launch(&Target::Folder {
-                    path: s.data_dir.to_string_lossy().into_owned(),
-                }) {
-                    s.status(e.message());
-                }
+                let data_dir = s.data_dir.clone();
+                let sink = s.events.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = platform::launch(&Target::Folder {
+                        path: data_dir.to_string_lossy().into_owned(),
+                    }) {
+                        sink.send(AppEvent::Native(
+                            platform::NativeSignal::StatusMessage(e.message()),
+                            0,
+                        ));
+                    }
+                });
             }
             6 => {
                 s.show_main(ShowSource::Restore);
@@ -689,9 +690,15 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
             match action {
                 0 => {
                     let path = raptim::paths::absolute(e.target.value(), &s.data_dir);
-                    if let Err(error) = platform::reveal_file(&path) {
-                        s.status(error);
-                    }
+                    let sink = s.events.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = platform::reveal_file(&path) {
+                            sink.send(AppEvent::Native(
+                                platform::NativeSignal::StatusMessage(error),
+                                0,
+                            ));
+                        }
+                    });
                 }
                 1 => {
                     if let Err(error) =

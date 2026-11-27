@@ -7,7 +7,6 @@ use std::path::Path;
 pub struct PreviewData {
     pub groups: Vec<NavItem>,
     pub categories: Vec<NavItem>,
-    pub destinations: Vec<NavItem>,
     pub active_group: i32,
     pub active_category: i32,
     pub grid_items: Vec<Item>,
@@ -430,12 +429,11 @@ fn default_discover_items(en: bool) -> Vec<DiscoverOption> {
         ),
     ]
     .into_iter()
-    .map(|(checked, index, name, detail, kind)| DiscoverOption {
+    .map(|(checked, index, name, detail, _kind)| DiscoverOption {
         checked,
         index,
         name: name.into(),
         detail: detail.into(),
-        kind,
     })
     .collect()
 }
@@ -757,56 +755,48 @@ pub fn demo_data(en: bool) -> PreviewData {
     let conversion_scopes = vec![
         ScopeNode {
             id: 1,
-            parent: 0,
             label: t("常用", "Common").into(),
             depth: 0,
             state: 2,
         },
         ScopeNode {
             id: 11,
-            parent: 1,
             label: t("日常应用", "Daily Apps").into(),
             depth: 1,
             state: 2,
         },
         ScopeNode {
             id: 12,
-            parent: 1,
             label: t("开发工具", "Dev Tools").into(),
             depth: 1,
             state: 2,
         },
         ScopeNode {
             id: 13,
-            parent: 1,
             label: t("常用目录", "Folders").into(),
             depth: 1,
             state: 2,
         },
         ScopeNode {
             id: 2,
-            parent: 0,
             label: t("开发", "Dev").into(),
             depth: 0,
             state: 1,
         },
         ScopeNode {
             id: 21,
-            parent: 2,
             label: t("编辑器与 IDE", "Editors & IDEs").into(),
             depth: 1,
             state: 2,
         },
         ScopeNode {
             id: 22,
-            parent: 2,
             label: t("命令行与调试", "CLI & Debug").into(),
             depth: 1,
             state: 0,
         },
         ScopeNode {
             id: 3,
-            parent: 0,
             label: t("效率", "Productivity").into(),
             depth: 0,
             state: 0,
@@ -827,12 +817,6 @@ pub fn demo_data(en: bool) -> PreviewData {
             nav(12, t("开发工具", "Dev Tools")),
             nav(13, t("常用目录", "Folders")),
             nav(14, t("在线文档", "Web Docs")),
-        ],
-        destinations: vec![
-            nav(11, t("常用 / 日常应用", "Common / Daily Apps")),
-            nav(12, t("常用 / 开发工具", "Common / Dev Tools")),
-            nav(13, t("常用 / 常用目录", "Common / Folders")),
-            nav(21, t("开发 / 编辑器与 IDE", "Dev / Editors & IDEs")),
         ],
         active_group: 1,
         active_category: 11,
@@ -891,12 +875,6 @@ fn preview_from_export(export: Export, base_dir: &Path, en: bool) -> PreviewData
             None => cat.name.clone(),
         }
     };
-
-    let destinations: Vec<NavItem> = collections
-        .iter()
-        .filter(|c| c.parent_id.is_some())
-        .map(|c| nav(c.id as i32, &full_name(c.id)))
-        .collect();
 
     let mut grid_items = Vec::new();
     for (idx, e) in entries
@@ -958,7 +936,6 @@ fn preview_from_export(export: Export, base_dir: &Path, en: bool) -> PreviewData
         });
         conversion_scopes.push(ScopeNode {
             id: grp.id as i32,
-            parent: 0,
             label: grp.name.clone().into(),
             depth: 0,
             state: if g_idx == 0 { 2 } else { 0 },
@@ -974,7 +951,6 @@ fn preview_from_export(export: Export, base_dir: &Path, en: bool) -> PreviewData
             }
             conversion_scopes.push(ScopeNode {
                 id: child.id as i32,
-                parent: grp.id as i32,
                 label: child.name.clone().into(),
                 depth: 1,
                 state: if g_idx == 0 { 2 } else { 0 },
@@ -997,7 +973,6 @@ fn preview_from_export(export: Export, base_dir: &Path, en: bool) -> PreviewData
 
     data.groups = groups;
     data.categories = categories;
-    data.destinations = destinations;
     data.active_group = active_group;
     data.active_category = active_category;
     data.list_items = grid_items.clone();

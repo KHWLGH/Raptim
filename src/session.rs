@@ -246,7 +246,7 @@ impl NoticeQueue {
         self.take_for(crate::i18n::locale())
     }
 
-    pub fn take_for(&mut self, locale: crate::i18n::Locale) -> String {
+    fn take_for(&mut self, locale: crate::i18n::Locale) -> String {
         let Some(text) = self.items.pop_back() else {
             self.dropped = 0;
             return String::new();

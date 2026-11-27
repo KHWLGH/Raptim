@@ -17,7 +17,6 @@ export global Theme {
     out property <color> selection: Palette.background.mix(Palette.accent-background, 0.87);
     out property <color> muted: Palette.background.mix(Palette.foreground, 0.38);
     out property <color> scrim: Palette.color-scheme == ColorScheme.dark ? #00000080 : #00000038;
-    out property <color> shadow: Palette.color-scheme == ColorScheme.dark ? #00000066 : #00000022;
     out property <color> shadow-ambient: Palette.color-scheme == ColorScheme.dark ? #00000038 : #0000000c;
     out property <color> shadow-mid: Palette.color-scheme == ColorScheme.dark ? #00000050 : #00000014;
     out property <color> shadow-key: Palette.color-scheme == ColorScheme.dark ? #00000066 : #0000001c;
@@ -37,9 +36,6 @@ export component HintSurface inherits Rectangle {
     border-width: 1px;
     border-color: Theme.stroke;
     border-radius: Theme.radius-md;
-    drop-shadow-blur: 10px;
-    drop-shadow-offset-y: 3px;
-    drop-shadow-color: Theme.shadow;
     VerticalLayout {
         padding: 10px; spacing: 4px; alignment: start;
         Text { text: root.title; vertical-stretch: 0; max-width: 340px; color: Palette.foreground; font-size: root.detail == "" && root.notes == "" ? 12px : 13px; font-weight: root.detail == "" && root.notes == "" ? 400 : 600; wrap: char-wrap; }
@@ -80,32 +76,25 @@ export component IconButton inherits Rectangle {
 export component TitleBar inherits Rectangle {
     in property <string> title;
     callback close;
-    in property <bool> manual-drag;
-    in property <bool> separator: true;
-    callback drag-start;
     min-height: 44px; max-height: 44px;
     VerticalLayout {
         padding: 0px; spacing: 0px;
         HorizontalLayout {
             padding-top: 6px; padding-bottom: 5px;
             padding-left: 14px; padding-right: 6px; spacing: 2px;
-            if root.title == "Raptim": Rectangle { width: 24px; height: 32px; Image { y: 7px; width: 18px; height: 18px; source: @image-url("icons/raptim.svg"); } }
             WindowMoveArea {
-                enabled: !root.manual-drag;
                 min-width: 64px; horizontal-stretch: 1;
                 height: 32px;
                 Text { x: 0px; width: parent.width; height: parent.height; text: root.title; font-weight: 600; font-size: 14px; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
-                TouchArea { pointer-event(event) => { if root.manual-drag && event.kind == PointerEventKind.down && event.button == PointerEventButton.left { root.drag-start(); } } }
             }
             @children
             IconButton { icon: @image-url("icons/close.svg"); label: I18n.en ? "Close" : "关闭"; danger: true; clicked => { root.close(); } }
         }
-        if root.separator: Rectangle { height: 1px; background: Theme.stroke; }
+        Rectangle { height: 1px; background: Theme.stroke; }
     }
 }
 
 export component AppWindow inherits Window {
-    in-out property <bool> frame-active: true;
     in property <length> inset-left: 0px;
     in property <length> inset-right: 0px;
     in property <length> inset-top: 0px;

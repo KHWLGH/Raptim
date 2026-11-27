@@ -43,7 +43,7 @@ pub fn file_entries(paths: Vec<(PathBuf, i64)>) -> Result<Vec<Entry>> {
                 Target::Folder { path: value }
             } else {
                 match extension.as_str() {
-                    "exe" => Target::Program {
+                    "exe" | "bat" | "cmd" | "msi" | "com" => Target::Program {
                         path: value,
                         arguments: String::new(),
                         working_dir: String::new(),
@@ -140,7 +140,7 @@ mod tests {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub enum ExternalDrop {
     Files(Vec<PathBuf>),
     Text(String),
@@ -166,8 +166,15 @@ pub fn url_entries(text: &str, collection_id: i64) -> Result<Vec<Entry>> {
         let target = Target::Url { url };
         target.validate()?;
         let title = lines.get(i + 1).filter(|s| normalize_url(s).is_none());
-        let name: String = title.copied().unwrap_or(line).chars().take(200).collect();
-        entries.push(Entry {
+        let cleaned_title: String = title
+            .map(|t| t.chars().filter(|c| !c.is_control()).take(200).collect())
+            .unwrap_or_default();
+        let name: String = if cleaned_title.trim().is_empty() {
+            line.chars().take(200).collect()
+        } else {
+            cleaned_title
+        };
+        let entry = Entry {
             id: 0,
             collection_id,
             target,
@@ -176,7 +183,9 @@ pub fn url_entries(text: &str, collection_id: i64) -> Result<Vec<Entry>> {
             notes: String::new(),
             icon: vec![],
             position: 0,
-        });
+        };
+        entry.validate()?;
+        entries.push(entry);
     }
     if entries.is_empty() {
         return Err(Error::Invalid(

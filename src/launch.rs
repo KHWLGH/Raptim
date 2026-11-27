@@ -1,5 +1,4 @@
 //! What a launch attempt reported, and whether the user can act on it.
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchError {
@@ -39,7 +38,7 @@ impl LaunchError {
         self.message_for(crate::i18n::locale())
     }
 
-    pub fn message_for(&self, locale: crate::i18n::Locale) -> String {
+    fn message_for(&self, locale: crate::i18n::Locale) -> String {
         let s = |zh, en| crate::i18n::t_for(locale, zh, en);
         match self {
             Self::Cancelled => {
@@ -91,7 +90,7 @@ impl LaunchError {
 
 /// The hand-off from a worker thread back to the view. The entry's target kind is looked up
 /// from the model again, so only what the user reads and decides travels here.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Failure {
     pub entry: i64,
     pub message: String,

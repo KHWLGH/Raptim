@@ -2,8 +2,8 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const LANGUAGE_SYSTEM: u8 = 0;
-pub const LANGUAGE_ZH_CN: u8 = 1;
-pub const LANGUAGE_EN_US: u8 = 2;
+const LANGUAGE_ZH_CN: u8 = 1;
+const LANGUAGE_EN_US: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -23,7 +23,7 @@ pub fn parse_locale_tag(tag: &str) -> Locale {
     }
 }
 
-pub fn resolve_locale(mode: u8, system: Locale) -> Locale {
+fn resolve_locale(mode: u8, system: Locale) -> Locale {
     match mode {
         LANGUAGE_ZH_CN => Locale::ZhCn,
         LANGUAGE_EN_US => Locale::EnUs,

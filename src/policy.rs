@@ -89,13 +89,11 @@ pub enum ShowSource {
     Restore,
     /// Appended so the integer the metrics log records stays comparable across releases.
     NativeMenu,
-    Relocate,
-    Drop,
 }
 
 pub struct DisplayPolicy {
     protection: Protection,
-    release_after: Option<Instant>,
+    release_since: Option<Instant>,
     generation: u64,
     bypass: bool,
 }
@@ -103,7 +101,7 @@ impl Default for DisplayPolicy {
     fn default() -> Self {
         Self {
             protection: Protection::Normal,
-            release_after: None,
+            release_since: None,
             generation: 0,
             bypass: false,
         }
@@ -114,17 +112,18 @@ impl DisplayPolicy {
         let previous = self.protection;
         let strengthening = signal == Protection::Strict
             || (signal == Protection::Fullscreen && self.protection == Protection::Normal);
-        if signal == self.protection || strengthening {
-            self.release_after = None;
+        if signal == self.protection
+            || strengthening
+            || (self.bypass && signal == Protection::Normal)
+        {
+            self.release_since = None;
             self.protection = signal;
         } else {
             let wait = if hold { 3000 } else { 900 };
-            let deadline = self
-                .release_after
-                .get_or_insert(now + Duration::from_millis(wait));
-            if now >= *deadline {
+            let since = *self.release_since.get_or_insert(now);
+            if now.saturating_duration_since(since) >= Duration::from_millis(wait) {
                 self.protection = signal;
-                self.release_after = None;
+                self.release_since = None;
             }
         }
         if previous != self.protection {
@@ -151,7 +150,7 @@ impl DisplayPolicy {
             return false;
         }
         self.bypass = bypass;
-        self.release_after = None;
+        self.release_since = None;
         self.generation += 1;
         true
     }
@@ -216,5 +215,10 @@ mod tests {
         assert_eq!(p.protection(), Protection::Normal);
         assert!(!p.allows(ShowSource::Hotkey, old));
         assert!(p.allows(ShowSource::Hotkey, p.ticket()));
+
+        p.update(Protection::Strict, now + Duration::from_secs(3), false);
+        assert!(p.set_bypass(true));
+        assert!(p.update(Protection::Normal, now + Duration::from_secs(3), true));
+        assert_eq!(p.protection(), Protection::Normal);
     }
 }

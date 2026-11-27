@@ -1,16 +1,9 @@
-use super::*;
+use super::{Pidl, *};
 use windows::core::{Interface, PCSTR};
 
-struct Pidl(*mut Common::ITEMIDLIST);
-impl Drop for Pidl {
-    fn drop(&mut self) {
-        unsafe {
-            CoTaskMemFree(Some(self.0.cast()));
-        }
-    }
-}
-
-pub fn known_folder_path(folder: &windows::core::GUID) -> Result<std::path::PathBuf, String> {
+pub(super) fn known_folder_path(
+    folder: &windows::core::GUID,
+) -> Result<std::path::PathBuf, String> {
     let _com = ComGuard::new()?;
     unsafe {
         let p = SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT, None).map_err(|e| e.to_string())?;

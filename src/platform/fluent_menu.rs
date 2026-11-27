@@ -29,6 +29,11 @@ unsafe extern "system" fn arrow_proc(
         let result = DefSubclassProc(hwnd, msg, wp, lp);
         if msg == WM_NCDESTROY {
             let _ = RemoveWindowSubclass(hwnd, Some(arrow_proc), id);
+            let _ = RemovePropW(hwnd, w!("Raptim.MenuSize"));
+            let _ = RemovePropW(hwnd, w!("Raptim.MenuComposed"));
+            POPUPS.with(|windows| {
+                windows.borrow_mut().retain(|&w| w != hwnd);
+            });
         } else if msg == WM_PAINT || msg == WM_PRINTCLIENT || msg == WM_APP + 44 {
             let paint = &*(data as *const Paint);
             let menu = HMENU(SendMessageW(hwnd, 0x01e1, None, None).0 as *mut _);
@@ -38,68 +43,70 @@ unsafe extern "system" fn arrow_proc(
                 } else {
                     GetDC(Some(hwnd))
                 };
-                let saved = SaveDC(dc);
-                for i in 0..GetMenuItemCount(Some(menu)).max(0) as u32 {
-                    let mut item = MENUITEMINFOW {
-                        cbSize: size_of::<MENUITEMINFOW>() as u32,
-                        fMask: MIIM_SUBMENU | MIIM_STATE,
-                        ..Default::default()
-                    };
-                    if GetMenuItemInfoW(menu, i, true, &mut item).is_err()
-                        || item.hSubMenu.is_invalid()
-                    {
-                        continue;
+                if !dc.is_invalid() {
+                    let saved = SaveDC(dc);
+                    for i in 0..GetMenuItemCount(Some(menu)).max(0) as u32 {
+                        let mut item = MENUITEMINFOW {
+                            cbSize: size_of::<MENUITEMINFOW>() as u32,
+                            fMask: MIIM_SUBMENU | MIIM_STATE,
+                            ..Default::default()
+                        };
+                        if GetMenuItemInfoW(menu, i, true, &mut item).is_err()
+                            || item.hSubMenu.is_invalid()
+                        {
+                            continue;
+                        }
+                        let mut r = RECT::default();
+                        if GetMenuItemRect(Some(hwnd), menu, i, &mut r).is_err() {
+                            continue;
+                        }
+                        let mut origin = POINT {
+                            x: r.left,
+                            y: r.top,
+                        };
+                        let _ = ScreenToClient(hwnd, &mut origin);
+                        r = RECT {
+                            left: origin.x,
+                            top: origin.y,
+                            right: origin.x + r.right - r.left,
+                            bottom: origin.y + r.bottom - r.top,
+                        };
+                        r.left = r.right - paint.px(20);
+                        r.right -= paint.px(4);
+                        r.top += paint.px(3);
+                        r.bottom -= paint.px(3);
+                        let selected = item.fState.0 & MFS_HILITE.0 != 0;
+                        FillRect(
+                            dc,
+                            &r,
+                            if selected {
+                                paint.hover
+                            } else {
+                                paint.background
+                            },
+                        );
+                        SetBkMode(dc, TRANSPARENT);
+                        SetTextColor(
+                            dc,
+                            if item.fState.0 & MFS_DISABLED.0 != 0 {
+                                paint.muted
+                            } else {
+                                paint.foreground
+                            },
+                        );
+                        SelectObject(dc, paint.icons.into());
+                        let mut arrow: Vec<_> = "\u{e76c}".encode_utf16().collect();
+                        DrawTextW(
+                            dc,
+                            &mut arrow,
+                            &mut r,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
                     }
-                    let mut r = RECT::default();
-                    if GetMenuItemRect(Some(hwnd), menu, i, &mut r).is_err() {
-                        continue;
+                    let _ = RestoreDC(dc, saved);
+                    if msg != WM_PRINTCLIENT {
+                        ReleaseDC(Some(hwnd), dc);
                     }
-                    let mut origin = POINT {
-                        x: r.left,
-                        y: r.top,
-                    };
-                    let _ = ScreenToClient(hwnd, &mut origin);
-                    r = RECT {
-                        left: origin.x,
-                        top: origin.y,
-                        right: origin.x + r.right - r.left,
-                        bottom: origin.y + r.bottom - r.top,
-                    };
-                    r.left = r.right - paint.px(20);
-                    r.right -= paint.px(4);
-                    r.top += paint.px(3);
-                    r.bottom -= paint.px(3);
-                    let selected = item.fState.0 & MFS_HILITE.0 != 0;
-                    FillRect(
-                        dc,
-                        &r,
-                        if selected {
-                            paint.hover
-                        } else {
-                            paint.background
-                        },
-                    );
-                    SetBkMode(dc, TRANSPARENT);
-                    SetTextColor(
-                        dc,
-                        if item.fState.0 & MFS_DISABLED.0 != 0 {
-                            paint.muted
-                        } else {
-                            paint.foreground
-                        },
-                    );
-                    SelectObject(dc, paint.icons.into());
-                    let mut arrow: Vec<_> = "\u{e76c}".encode_utf16().collect();
-                    DrawTextW(
-                        dc,
-                        &mut arrow,
-                        &mut r,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    );
-                }
-                let _ = RestoreDC(dc, saved);
-                if msg != WM_PRINTCLIENT {
-                    ReleaseDC(Some(hwnd), dc);
                 }
             }
         }
@@ -167,24 +174,26 @@ unsafe extern "system" fn menu_created(code: i32, wp: WPARAM, lp: LPARAM) -> LRE
             let event = &*(lp.0 as *const CWPSTRUCT);
             if event.message == WM_WINDOWPOSCHANGED {
                 let mut class = [0u16; 16];
-                let len = GetClassNameW(event.hwnd, &mut class);
-                if String::from_utf16_lossy(&class[..len as usize]) == "#32768" {
-                    ACTIVE_PAINT.with(|p| {
-                        if !p.get().is_null() {
-                            let _ = SetWindowSubclass(
-                                event.hwnd,
-                                Some(arrow_proc),
-                                0xD144,
-                                p.get() as usize,
-                            );
-                            POPUPS.with(|windows| {
-                                let mut windows = windows.borrow_mut();
-                                if !windows.contains(&event.hwnd) {
-                                    windows.push(event.hwnd);
-                                }
-                            });
+                let len = GetClassNameW(event.hwnd, &mut class).max(0) as usize;
+                let is_menu = class[..len].iter().copied().eq("#32768".encode_utf16());
+                if is_menu {
+                    let Some(stroke_color) = ACTIVE_PAINT.with(|p| {
+                        let ptr = p.get();
+                        if ptr.is_null() {
+                            return None;
                         }
-                    });
+                        let _ =
+                            SetWindowSubclass(event.hwnd, Some(arrow_proc), 0xD144, ptr as usize);
+                        POPUPS.with(|windows| {
+                            let mut windows = windows.borrow_mut();
+                            if !windows.contains(&event.hwnd) {
+                                windows.push(event.hwnd);
+                            }
+                        });
+                        Some((*ptr).stroke)
+                    }) else {
+                        return CallNextHookEx(None, code, wp, lp);
+                    };
                     let mut r = RECT::default();
                     if GetWindowRect(event.hwnd, &mut r).is_ok() {
                         let stamp =
@@ -205,11 +214,10 @@ unsafe extern "system" fn menu_created(code: i32, wp: WPARAM, lp: LPARAM) -> LRE
                             size_of_val(&corner) as u32,
                         )
                         .is_ok();
-                        let color = ACTIVE_PAINT.with(|p| (*p.get()).stroke);
                         let _ = DwmSetWindowAttribute(
                             event.hwnd,
                             DWMWA_BORDER_COLOR,
-                            &color as *const _ as _,
+                            &stroke_color as *const _ as _,
                             4,
                         );
                         if composed {
@@ -401,6 +409,9 @@ unsafe fn draw_item(dc: HDC, paint: &Paint, r: &RECT, item: &MenuItem, selected:
 unsafe fn label_width(paint: &Paint, item: &MenuItem) -> i32 {
     unsafe {
         let dc = GetDC(None);
+        if dc.is_invalid() {
+            return 0;
+        }
         let old = SelectObject(dc, paint.font.into());
         let text: Vec<_> = item.label.encode_utf16().collect();
         let mut size = SIZE::default();
@@ -511,6 +522,9 @@ unsafe fn build(items: &[MenuItem], paint: &Paint) -> windows::core::Result<HMEN
     }
 }
 pub fn show(window: &slint::Window, items: &[MenuItem], background: slint::Color) -> Option<u32> {
+    if ACTIVE_PAINT.with(|p| !p.get().is_null()) {
+        return None;
+    }
     let hwnd = native_handle(window)?;
     let dark =
         u32::from(background.red()) + u32::from(background.green()) + u32::from(background.blue())
