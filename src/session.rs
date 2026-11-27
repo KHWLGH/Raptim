@@ -243,6 +243,10 @@ impl NoticeQueue {
     }
     /// Returns the most recent notice with a count of what it stands in for, and clears the queue.
     pub fn take(&mut self) -> String {
+        self.take_for(crate::i18n::locale())
+    }
+
+    pub fn take_for(&mut self, locale: crate::i18n::Locale) -> String {
         let Some(text) = self.items.pop_back() else {
             self.dropped = 0;
             return String::new();
@@ -250,10 +254,16 @@ impl NoticeQueue {
         let mut text = text;
         let more = std::mem::take(&mut self.items).len();
         if more > 0 {
-            text.push_str(&format!("（另有 {more} 条提示）"));
+            text.push_str(&match locale {
+                crate::i18n::Locale::ZhCn => format!("（另有 {more} 条提示）"),
+                crate::i18n::Locale::EnUs => format!(" (+{more} more)"),
+            });
         }
         if self.dropped > 0 {
-            text.push_str(&format!("，已省略 {} 条", self.dropped));
+            text.push_str(&match locale {
+                crate::i18n::Locale::ZhCn => format!("，已省略 {} 条", self.dropped),
+                crate::i18n::Locale::EnUs => format!(", {} omitted", self.dropped),
+            });
             self.dropped = 0;
         }
         text

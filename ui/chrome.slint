@@ -1,5 +1,9 @@
 import { Palette } from "std-widgets.slint";
 
+export global I18n {
+    in-out property <bool> en: false;
+}
+
 export global Theme {
     out property <color> canvas: Palette.background;
     out property <color> navigation: Palette.background.mix(Palette.foreground, 0.965);
@@ -78,7 +82,7 @@ export component TitleBar inherits Rectangle {
                 TouchArea { pointer-event(event) => { if root.manual-drag && event.kind == PointerEventKind.down && event.button == PointerEventButton.left { root.drag-start(); } } }
             }
             @children
-            IconButton { icon: @image-url("icons/close.svg"); label: "关闭"; danger: true; clicked => { root.close(); } }
+            IconButton { icon: @image-url("icons/close.svg"); label: I18n.en ? "Close" : "关闭"; danger: true; clicked => { root.close(); } }
         }
         if root.separator: Rectangle { height: 1px; background: Theme.stroke; }
     }
@@ -92,7 +96,7 @@ export component AppWindow inherits Window {
     no-frame: true;
     resize-border-width: 5px;
     background: Palette.background;
-    default-font-family: "Microsoft YaHei UI";
+    default-font-family: I18n.en ? "Segoe UI" : "Microsoft YaHei UI";
     default-font-size: 14px;
     Rectangle {
         x: root.inset-left;

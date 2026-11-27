@@ -1,4 +1,4 @@
-← 返回 [README](../README.md)
+← 返回 [README](../README.md) · **简体中文** | [English](en/PERFORMANCE.md)
 
 # 性能基准与边界
 

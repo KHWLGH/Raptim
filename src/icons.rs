@@ -18,7 +18,9 @@ pub fn encode(image: image::RgbaImage) -> Result<Vec<u8>> {
 }
 pub fn from_file(path: &Path) -> Result<Vec<u8>> {
     if std::fs::metadata(path)?.len() > 16 * 1024 * 1024 {
-        return Err(Error::Invalid("图标文件不能超过 16 MB".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t("图标文件不能超过 16 MB", "Icon file must not exceed 16 MB.").into(),
+        ));
     }
     let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let mut limits = image::Limits::default();
@@ -26,9 +28,12 @@ pub fn from_file(path: &Path) -> Result<Vec<u8>> {
     limits.max_image_height = Some(4096);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader
-        .decode()
-        .map_err(|e| Error::Invalid(format!("无法读取图标：{e}")))?;
+    let image = reader.decode().map_err(|e| {
+        Error::Invalid(format!(
+            "{}{e}",
+            crate::i18n::t("无法读取图标：", "Failed to read icon: ")
+        ))
+    })?;
     encode(image.to_rgba8())
 }
 fn decode(bytes: &[u8]) -> Option<image::RgbaImage> {

@@ -147,43 +147,51 @@ pub fn region(kind: i32, command: u32) -> Option<Region> {
 /// The popup tree for `kind`: 0 title-bar 更多, 1 project, 2 group, 3 category, 4 empty project
 /// area. Any other kind opens nothing.
 pub fn tree(kind: i32, ctx: &MenuContext) -> Vec<MenuItem> {
+    tree_for_locale(kind, ctx, crate::i18n::locale())
+}
+
+pub fn tree_for_locale(kind: i32, ctx: &MenuContext, locale: crate::i18n::Locale) -> Vec<MenuItem> {
+    let s = |zh, en| crate::i18n::t_for(locale, zh, en);
     match kind {
         // At 440 logical pixels wide the grid leaves very little blank edge to hit, so everything
         // the empty-space menu offers is repeated here.
         0 => {
-            let mut items = manage_menu(ctx);
+            let mut items = manage_menu(ctx, locale);
             items.extend([
                 MenuItem::separator(),
                 MenuItem::submenu(
-                    "数据",
+                    s("数据", "Data"),
                     vec![
-                        MenuItem::action("导出…", 1).icon('\u{e74e}'),
-                        MenuItem::action("恢复…", 2).icon('\u{e8e5}'),
+                        MenuItem::action(s("导出…", "Export…"), 1).icon('\u{e74e}'),
+                        MenuItem::action(s("恢复…", "Restore…"), 2).icon('\u{e8e5}'),
                         MenuItem::separator(),
-                        MenuItem::action("检查失效项目…", 3).icon('\u{e9ce}'),
-                        MenuItem::action("打开数据目录", 4).icon('\u{e8b7}'),
+                        MenuItem::action(s("检查失效项目…", "Check Broken Items…"), 3)
+                            .icon('\u{e9ce}'),
+                        MenuItem::action(s("打开数据目录", "Open Data Folder"), 4).icon('\u{e8b7}'),
                     ],
                 )
                 .icon('\u{e81e}'),
                 MenuItem::submenu(
-                    "路径转换",
+                    s("路径转换", "Convert Paths"),
                     vec![
-                        MenuItem::action("转换为相对路径…", 6).icon('\u{e8ab}'),
-                        MenuItem::action("转换为绝对路径…", 7).icon('\u{e8ab}'),
+                        MenuItem::action(s("转换为相对路径…", "Convert to Relative Paths…"), 6)
+                            .icon('\u{e8ab}'),
+                        MenuItem::action(s("转换为绝对路径…", "Convert to Absolute Paths…"), 7)
+                            .icon('\u{e8ab}'),
                     ],
                 )
                 .icon('\u{e8ab}'),
                 MenuItem::separator(),
-                MenuItem::action("恢复窗口位置", 5).icon('\u{e8a7}'),
-                MenuItem::action("设置…", 8).icon('\u{e713}'),
+                MenuItem::action(s("恢复窗口位置", "Restore Window Position"), 5).icon('\u{e8a7}'),
+                MenuItem::action(s("设置…", "Settings…"), 8).icon('\u{e713}'),
                 MenuItem::separator(),
-                MenuItem::action("退出", 9).icon('\u{f3b1}'),
+                MenuItem::action(s("退出", "Quit"), 9).icon('\u{f3b1}'),
             ]);
             items
         }
-        1 => item_menu(ctx),
-        2 | 3 => collection_menu(ctx, kind),
-        4 => manage_menu(ctx),
+        1 => item_menu(ctx, locale),
+        2 | 3 => collection_menu(ctx, kind, locale),
+        4 => manage_menu(ctx, locale),
         _ => vec![],
     }
 }
@@ -191,36 +199,38 @@ pub fn tree(kind: i32, ctx: &MenuContext) -> Vec<MenuItem> {
 /// Commands 30 and 40..=46: the list-management block. Both the empty-space menu and the title-bar
 /// 更多 menu open with these items — at 440 logical pixels the grid rarely leaves a blank edge to
 /// right-click — so one builder and one router keep the two menus from drifting apart.
-fn manage_menu(ctx: &MenuContext) -> Vec<MenuItem> {
+fn manage_menu(ctx: &MenuContext, locale: crate::i18n::Locale) -> Vec<MenuItem> {
+    let s = |zh, en| crate::i18n::t_for(locale, zh, en);
     let check = |active: bool| if active { '\u{e73e}' } else { '\u{e80a}' };
     let grid = !ctx.list_view;
     vec![
-        MenuItem::action("多选整理", BATCH_BASE)
+        MenuItem::action(s("多选整理", "Select Multiple"), BATCH_BASE)
             .icon('\u{e73a}')
             .disabled(ctx.batch_blocked),
         MenuItem::separator(),
-        MenuItem::action("添加项目…", VIEW_BASE).icon('\u{e710}'),
-        MenuItem::action("添加文件…", VIEW_BASE + 1).icon('\u{e8b7}'),
-        MenuItem::action("扫描导入软件…", VIEW_BASE + 7).icon('\u{e773}'),
+        MenuItem::action(s("添加项目…", "Add Item…"), VIEW_BASE).icon('\u{e710}'),
+        MenuItem::action(s("添加文件…", "Add Files…"), VIEW_BASE + 1).icon('\u{e8b7}'),
+        MenuItem::action(s("扫描导入软件…", "Scan Installed Apps…"), VIEW_BASE + 7)
+            .icon('\u{e773}'),
         MenuItem::separator(),
         MenuItem::submenu(
-            "图标大小",
+            s("图标大小", "Icon Size"),
             vec![
-                MenuItem::action("小图标 · 五列", VIEW_BASE + 2)
+                MenuItem::action(s("小图标 · 五列", "Small · 5 Columns"), VIEW_BASE + 2)
                     .icon(check(grid && ctx.icon_size == 0)),
-                MenuItem::action("中图标 · 四列", VIEW_BASE + 3)
+                MenuItem::action(s("中图标 · 四列", "Medium · 4 Columns"), VIEW_BASE + 3)
                     .icon(check(grid && ctx.icon_size == 1)),
-                MenuItem::action("大图标 · 三列", VIEW_BASE + 4)
+                MenuItem::action(s("大图标 · 三列", "Large · 3 Columns"), VIEW_BASE + 4)
                     .icon(check(grid && ctx.icon_size == 2)),
             ],
         )
         .icon('\u{e80a}'),
-        MenuItem::action("列表查看", VIEW_BASE + 5).icon(if ctx.list_view {
+        MenuItem::action(s("列表查看", "List View"), VIEW_BASE + 5).icon(if ctx.list_view {
             '\u{e73e}'
         } else {
             '\u{e8fd}'
         }),
-        MenuItem::action("按名称排序", VIEW_BASE + 6).icon('\u{e8cb}'),
+        MenuItem::action(s("按名称排序", "Sort by Name"), VIEW_BASE + 6).icon('\u{e8cb}'),
     ]
 }
 
@@ -258,7 +268,8 @@ fn cascade(
     MenuItem::submenu(label, groups).icon(icon)
 }
 
-fn item_menu(ctx: &MenuContext) -> Vec<MenuItem> {
+fn item_menu(ctx: &MenuContext, locale: crate::i18n::Locale) -> Vec<MenuItem> {
+    let s = |zh, en| crate::i18n::t_for(locale, zh, en);
     let file = ctx
         .target
         .as_ref()
@@ -268,76 +279,81 @@ fn item_menu(ctx: &MenuContext) -> Vec<MenuItem> {
         .as_ref()
         .is_some_and(|entry| entry.kind == 0 || entry.kind == 4);
     vec![
-        MenuItem::action("打开", 1).icon('\u{e768}'),
-        MenuItem::action("打开所在位置", 2)
+        MenuItem::action(s("打开", "Open"), 1).icon('\u{e768}'),
+        MenuItem::action(s("打开所在位置", "Open File Location"), 2)
             .icon('\u{e8b7}')
             .disabled(!file),
-        MenuItem::action("复制路径 / 网址", 3).icon('\u{e8c8}'),
+        MenuItem::action(s("复制路径 / 网址", "Copy Path / URL"), 3).icon('\u{e8c8}'),
         MenuItem::separator(),
-        MenuItem::action("编辑…", 4).icon('\u{e70f}'),
-        MenuItem::action("重新定位…", 11)
+        MenuItem::action(s("编辑…", "Edit…"), 4).icon('\u{e70f}'),
+        MenuItem::action(s("重新定位…", "Relocate…"), 11)
             .icon('\u{e8b7}')
             .disabled(!file),
         MenuItem::separator(),
-        MenuItem::action("使用管理员打开", 12)
+        MenuItem::action(s("使用管理员打开", "Run as Administrator"), 12)
             .icon('\u{e7ef}')
             .disabled(!run_as_admin),
-        MenuItem::action("Windows 原生菜单", 13)
+        MenuItem::action(s("Windows 原生菜单", "Windows Context Menu"), 13)
             .icon('\u{e700}')
             .disabled(!file),
-        MenuItem::action("创建桌面快捷方式", 14).icon('\u{e8a7}'),
-        MenuItem::action("刷新图标缓存", 15).icon('\u{e72c}'),
+        MenuItem::action(s("创建桌面快捷方式", "Create Desktop Shortcut"), 14).icon('\u{e8a7}'),
+        MenuItem::action(s("刷新图标缓存", "Refresh Icon"), 15).icon('\u{e72c}'),
         MenuItem::separator(),
-        cascade(ctx, "移动到", '\u{e8de}', MOVE_BASE, |d| d.holds_entry),
-        cascade(ctx, "复制到", '\u{e8c8}', COPY_BASE, |d| d.holds_entry),
+        cascade(ctx, s("移动到", "Move to"), '\u{e8de}', MOVE_BASE, |d| {
+            d.holds_entry
+        }),
+        cascade(ctx, s("复制到", "Copy to"), '\u{e8c8}', COPY_BASE, |d| {
+            d.holds_entry
+        }),
         MenuItem::separator(),
         MenuItem::submenu(
-            "排序",
+            s("排序", "Reorder"),
             vec![
-                MenuItem::action("前移", 8)
+                MenuItem::action(s("前移", "Move Earlier"), 8)
                     .icon('\u{e70e}')
                     .disabled(!ctx.can_move_up),
-                MenuItem::action("后移", 9)
+                MenuItem::action(s("后移", "Move Later"), 9)
                     .icon('\u{e70d}')
                     .disabled(!ctx.can_move_down),
             ],
         ),
         MenuItem::submenu(
-            "路径转换",
+            s("路径转换", "Convert Path"),
             vec![
-                MenuItem::action("转为相对路径", 6)
+                MenuItem::action(s("转为相对路径", "Make Relative"), 6)
                     .icon('\u{e8ab}')
                     .disabled(!file),
-                MenuItem::action("转为绝对路径", 7)
+                MenuItem::action(s("转为绝对路径", "Make Absolute"), 7)
                     .icon('\u{e8ab}')
                     .disabled(!file),
             ],
         ),
         MenuItem::separator(),
-        MenuItem::action("删除…", 10).icon('\u{e74d}'),
+        MenuItem::action(s("删除…", "Delete…"), 10).icon('\u{e74d}'),
     ]
 }
 
-fn collection_menu(ctx: &MenuContext, kind: i32) -> Vec<MenuItem> {
+fn collection_menu(ctx: &MenuContext, kind: i32, locale: crate::i18n::Locale) -> Vec<MenuItem> {
+    let s = |zh, en| crate::i18n::t_for(locale, zh, en);
     let mut items = vec![
         MenuItem::action(
             if kind == 2 {
-                "新建分组"
+                s("新建分组", "New Group")
             } else {
-                "新建子分类"
+                s("新建子分类", "New Category")
             },
             1,
         )
         .icon('\u{e710}'),
-        MenuItem::action("编辑…", 3).icon('\u{e70f}'),
+        MenuItem::action(s("编辑…", "Rename…"), 3).icon('\u{e70f}'),
         MenuItem::separator(),
         MenuItem::submenu(
-            "排序",
+            s("排序", "Reorder"),
             vec![
-                MenuItem::action("前移", 4)
+                MenuItem::action(s("前移", "Move Earlier"), 4)
                     .icon('\u{e70e}')
                     .disabled(!ctx.can_move_up),
-                MenuItem::action("后移", 5)
+                MenuItem::action(s("后移", "Move Later"), 5)
                     .icon('\u{e70d}')
                     .disabled(!ctx.can_move_down),
             ],
@@ -352,11 +368,11 @@ fn collection_menu(ctx: &MenuContext, kind: i32) -> Vec<MenuItem> {
                 MenuItem::action(group.name.clone(), MOVE_BASE + index as u32).icon(' ')
             })
             .collect();
-        items.push(MenuItem::submenu("移动到分组", groups).icon('\u{e8de}'));
+        items.push(MenuItem::submenu(s("移动到分组", "Move to Group"), groups).icon('\u{e8de}'));
     }
     items.extend([
         MenuItem::separator(),
-        MenuItem::action("删除…", 6)
+        MenuItem::action(s("删除…", "Delete…"), 6)
             .icon('\u{e74d}')
             .disabled(kind == 2 && ctx.groups.len() == 1),
     ]);
@@ -404,20 +420,36 @@ mod tests {
             ],
             ..Default::default()
         };
-        for kind in 0..=4 {
-            let items = tree(kind, &ctx);
-            let mut seen = Vec::new();
-            walk(&items, &mut |item| {
-                if !item.separator && item.children.is_empty() {
-                    assert_ne!(item.command, 0);
-                    assert!(region(kind, item.command).is_some());
-                    seen.push(item.command);
-                }
-            });
-            let total = seen.len();
-            seen.sort_unstable();
-            seen.dedup();
-            assert_eq!(seen.len(), total);
+        for locale in [crate::i18n::Locale::ZhCn, crate::i18n::Locale::EnUs] {
+            for kind in 0..=4 {
+                let items = tree_for_locale(kind, &ctx, locale);
+                let mut seen = Vec::new();
+                walk(&items, &mut |item| {
+                    if !item.separator && item.children.is_empty() {
+                        assert_ne!(item.command, 0);
+                        assert!(region(kind, item.command).is_some());
+                        seen.push(item.command);
+                    }
+                    if locale == crate::i18n::Locale::EnUs
+                        && item.command < MOVE_BASE
+                        && !item.separator
+                        && !matches!(item.label.as_str(), "常用" | "工作" | "默认分类" | "工具")
+                    {
+                        assert!(
+                            !item
+                                .label
+                                .chars()
+                                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+                            "unexpected CJK in English menu: {}",
+                            item.label
+                        );
+                    }
+                });
+                let total = seen.len();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), total);
+            }
         }
     }
 }

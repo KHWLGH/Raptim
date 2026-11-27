@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 pub enum Error {
     #[error("{0}")]
     Invalid(String),
-    #[error("数据库操作失败：{0}")]
+    #[error("{}{}", crate::i18n::t("数据库操作失败：", "Database error: "), .0)]
     Database(#[from] rusqlite::Error),
-    #[error("文件操作失败：{0}")]
+    #[error("{}{}", crate::i18n::t("文件操作失败：", "File operation failed: "), .0)]
     Io(#[from] std::io::Error),
-    #[error("数据格式无效：{0}")]
+    #[error("{}{}", crate::i18n::t("数据格式无效：", "Invalid data format: "), .0)]
     Json(#[from] serde_json::Error),
 }
 pub type Result<T> = std::result::Result<T, Error>;
@@ -128,16 +128,32 @@ impl Target {
         let value = self.value();
         if value.trim().is_empty() || value.contains('\0') || value.len() > 32760 {
             return Err(Error::Invalid(
-                "请输入有效目标（不能包含空字符或超过长度限制）".into(),
+                crate::i18n::t(
+                    "请输入有效目标（不能包含空字符或超过长度限制）",
+                    "Enter a valid target (no null bytes or oversized values).",
+                )
+                .into(),
             ));
         }
         match self {
             Self::Url { url } => {
                 let parsed = url::Url::parse(url).map_err(|_| {
-                    Error::Invalid("网址格式无效，可省略协议直接写 example.com".into())
+                    Error::Invalid(
+                        crate::i18n::t(
+                            "网址格式无效，可省略协议直接写 example.com",
+                            "Invalid URL (you can omit the scheme, e.g. example.com).",
+                        )
+                        .into(),
+                    )
                 })?;
                 if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-                    return Err(Error::Invalid("网址只接受 http:// 或 https://".into()));
+                    return Err(Error::Invalid(
+                        crate::i18n::t(
+                            "网址只接受 http:// 或 https://",
+                            "URLs only support http:// or https://.",
+                        )
+                        .into(),
+                    ));
                 }
             }
             Self::Program {
@@ -149,7 +165,13 @@ impl Target {
                 || arguments.len() > 32760
                 || working_dir.len() > 32760) =>
             {
-                return Err(Error::Invalid("参数或工作目录无效".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t(
+                        "参数或工作目录无效",
+                        "Invalid arguments or working directory.",
+                    )
+                    .into(),
+                ));
             }
             _ => {}
         }
@@ -171,7 +193,11 @@ impl Target {
                 && !value.starts_with("../")
             {
                 return Err(Error::Invalid(
-                    "请选择绝对路径，例如 C:\\Apps\\app.exe".into(),
+                    crate::i18n::t(
+                        "请选择绝对路径，例如 C:\\Apps\\app.exe",
+                        "Choose a valid path, e.g. C:\\Apps\\app.exe.",
+                    )
+                    .into(),
                 ));
             }
         }
@@ -200,7 +226,11 @@ impl Target {
             Self::Shortcut { show, .. } => Self::Shortcut { path, show: *show },
             Self::Url { .. } | Self::App { .. } => {
                 return Err(Error::Invalid(
-                    "网址和应用标识没有可重新定位的文件路径".into(),
+                    crate::i18n::t(
+                        "网址和应用标识没有可重新定位的文件路径",
+                        "URLs and app AUMIDs have no file path to relocate.",
+                    )
+                    .into(),
                 ));
             }
         })
@@ -289,18 +319,28 @@ mod base64_bytes {
 impl Entry {
     pub fn validate(&self) -> Result<()> {
         if self.icon.len() > 256 * 1024 {
-            return Err(Error::Invalid("图标数据过大".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("图标数据过大", "Icon data is too large.").into(),
+            ));
         }
         validate_name(&self.name)?;
         if self.aliases.len() > 8192 || self.notes.len() > 32760 {
-            return Err(Error::Invalid("别名或备注过长".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("别名或备注过长", "Aliases or notes are too long.").into(),
+            ));
         }
         self.target.validate()
     }
 }
 pub fn validate_name(name: &str) -> Result<()> {
     if name.trim().is_empty() || name.chars().count() > 200 || name.contains('\0') {
-        Err(Error::Invalid("名称不能为空，且最多 200 个字符".into()))
+        Err(Error::Invalid(
+            crate::i18n::t(
+                "名称不能为空，且最多 200 个字符",
+                "Name cannot be empty and must be at most 200 characters.",
+            )
+            .into(),
+        ))
     } else {
         Ok(())
     }
@@ -312,6 +352,7 @@ pub struct Settings {
     pub hotkey: String,
     pub autostart: bool,
     pub theme_mode: u8,
+    pub language: u8,
     pub double_click: bool,
     pub type_to_search: bool,
     pub icon_size: u8,
@@ -336,6 +377,7 @@ impl Default for Settings {
             hotkey: crate::hotkey::DEFAULT.into(),
             autostart: false,
             theme_mode: 0,
+            language: 0,
             double_click: false,
             type_to_search: false,
             icon_size: 1,

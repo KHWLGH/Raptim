@@ -28,19 +28,53 @@ impl LaunchError {
             // 21: drive present but not ready, typically a removable disk that is pulled.
             21 => Self::NotReady,
             1155 => Self::NoAssociation,
-            _ => Self::Other(format!("启动失败（系统错误 {code}）")),
+            _ => Self::Other(format!(
+                "{}{code})",
+                crate::i18n::t("启动失败（系统错误 ", "Launch failed (OS error ")
+            )),
         }
     }
 
     pub fn message(&self) -> String {
+        self.message_for(crate::i18n::locale())
+    }
+
+    pub fn message_for(&self, locale: crate::i18n::Locale) -> String {
+        let s = |zh, en| crate::i18n::t_for(locale, zh, en);
         match self {
-            Self::Cancelled => "已取消管理员授权".into(),
-            Self::Denied => "访问被拒绝，请检查目标权限".into(),
-            Self::Missing => "找不到目标，可能已被删除或移动，可重新定位".into(),
-            Self::NotReady => "可移动设备未就绪，请插入后重试".into(),
-            Self::Offline => "网络位置暂不可用，请检查连接后重试".into(),
-            Self::NoAssociation => "没有可以打开此文件的关联应用".into(),
-            Self::AppNotInstalled => "应用未安装或已被移除，请在编辑中核对应用标识".into(),
+            Self::Cancelled => {
+                s("已取消管理员授权", "Administrator elevation was cancelled.").into()
+            }
+            Self::Denied => s(
+                "访问被拒绝，请检查目标权限",
+                "Access denied. Check target permissions.",
+            )
+            .into(),
+            Self::Missing => s(
+                "找不到目标，可能已被删除或移动，可重新定位",
+                "Target not found. It may have been moved or deleted — you can relocate it.",
+            )
+            .into(),
+            Self::NotReady => s(
+                "可移动设备未就绪，请插入后重试",
+                "Removable drive is not ready. Reconnect and try again.",
+            )
+            .into(),
+            Self::Offline => s(
+                "网络位置暂不可用，请检查连接后重试",
+                "Network location is unavailable. Check connection and try again.",
+            )
+            .into(),
+            Self::NoAssociation => s(
+                "没有可以打开此文件的关联应用",
+                "No associated application can open this file.",
+            )
+            .into(),
+            Self::AppNotInstalled => s(
+                "应用未安装或已被移除，请在编辑中核对应用标识",
+                "App is not installed or was removed. Check its AUMID in Edit.",
+            )
+            .into(),
             Self::Invalid(text) | Self::Other(text) => text.clone(),
         }
     }
@@ -106,6 +140,11 @@ mod tests {
             assert!(!error.relocatable(), "{error:?}");
         }
         assert!(LaunchError::Missing.message().contains("重新定位"));
+        assert!(
+            LaunchError::Missing
+                .message_for(crate::i18n::Locale::EnUs)
+                .contains("relocate")
+        );
         assert_ne!(
             LaunchError::Missing.message(),
             LaunchError::Offline.message(),

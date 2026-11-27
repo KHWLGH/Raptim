@@ -1,36 +1,10 @@
+**简体中文** | [English](en-US.md)
+
 # Unreleased
 
-## 新增
+### 新增
 
-- 建立基于 Rust + Slint 1.18.0（Fluent 样式、winit 后端与软件渲染器）的 Windows 本地快速启动器主干实现，默认在程序同级目录保存单库 `raptim.db`（WAL 模式），无账号、云同步或 WebView 依赖；支持 `--portable`、`--data-dir <目录>` 与 `--silent` 启动参数（[使用指南](../../docs/USAGE.md)）。
-- 新增分组与子分类双层组织：标题栏下方横向分组栏与左侧纵向分类栏均配备就近「＋」新建按钮（栏空白处不弹菜单），支持 `F2` 就地改名、同级拖拽排序、分类跨分组迁移以及「迁移后删除 / 不迁移直接移除」约束保护（至少保留一个分组，原文件保留）。
-- 新增项目视图与交互能力：支持小（最多 5 列）/ 中（最多 4 列）/ 大（最多 3 列）图标网格及列表视图（窄窗自动减少列数）；支持悬停自动切换分类（200 / 350 / 600 ms）、按住 ≥ 180 ms 且移动 ≥ 12 DIP 的拖拽排序与左右半区插入指示、6 秒自动收起并合并重复提示的状态条，以及显示完整路径与最多 6 行备注的悬停浮层。
-- 新增主窗内搜索浮层与完整键盘流：支持「全部 / 当前分组 / 当前分类」范围筛选，名称、别名、备注、多关键词、全拼与多种首字母（逐字/词首/驼峰）相关度匹配，以及 IME 输入法组合态防误触保护；新增「获焦后直接打字搜索」开关，以及 `Ctrl+F`、`Ctrl+N`、`Ctrl+,`、`Ctrl+Tab`/`Ctrl+Shift+Tab`、方向键/`Home`/`End`、`Enter`/`Shift+Enter`/`Alt+Enter`、`F2`、`Delete`、`Space`（批量选择）、`Ctrl+A` 与分层 `Esc` 等快捷键。
-- 新增多途径收录与巡检工具：支持程序、文件、文件夹、网址（自动补全 `https://`）、快捷方式、打包应用（`shell:AppsFolder` 列表筛选）六类目标；接入原生 OLE 文件与浏览器网址拖入及编辑窗单图拖入；新增「扫描导入软件」（检索开始菜单快捷方式与本机已安装应用）与「检查失效项目」（后台核查本地路径与已安装应用，支持就地重定位/编辑/移除）；新增批量多选整理与分组/分类树形路径转换预览。
-- 新增贴边收纳与窗口控制：支持左/右/上三边吸附、贴边过伸隐藏贴边侧系统圆角（`DOCK_OVERHANG_DIP`）、临界阻尼动画、1–12 物理像素露边调节、150/250/450 ms 收起延迟、失焦隐藏（100 ms 等待后 100 ms 淡出）与「窗口始终置顶」；支持系统托盘（含仅本次运行有效的「暂停自动隐藏」「暂停游戏勿扰」）、全局热键录制（默认 `Ctrl+Alt+Space`）与 Windows 当前用户开机启动（写入 `--data-dir` 与 `--silent` 并校验注册表及任务管理器批准状态）。
-- 新增游戏勿扰保护与故障诊断记录：结合严格保护程序列表（最多 100 项，优先级高于辅助窗与固定状态）及全屏几何 / `SHQueryUserNotificationState` 判定拦截误呼出，保护解除后仅恢复贴边收纳入口；新增常开且自动脱敏的 `error-log.txt`（超过 512 KiB 截断旧半段）与设置中按需开启的 `protection-log.csv`。
-
-## 变更
-
-- 完善「设置 → 关于」界面：自动读取 `CARGO_PKG_VERSION` 作为应用版本，新增 GitHub 仓库、问题反馈、更新日志与「复制环境信息」快捷操作，补充 `GPL-3.0-only` 版权许可卡片以及支持 `Esc` 关闭和全文复制的窗内离线阅读器（使用 `ListView` 逐行虚拟化展示 [LICENSE](../../LICENSE) 原文与第三方组件清单），并保留 Rust 与 `AboutSlint` 归属卡片。
-- 确立项目自有代码与整体分发采用 `GPL-3.0-only` 开源许可（Slint 1.18.0 同步选用 GPLv3 路径），补充根目录 [LICENSE](../../LICENSE) 原文与 `Cargo.toml` 许可元数据，并在 [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) 补全全部直接依赖核查清单与资产归属声明。
-- 优化本地存储与 JSON 导出格式：将图标从 `entries.payload` 迁出至独立 `icon BLOB` 列（JSON 导出改用 Base64 编码），写入时物化 `dup_key` 去重键，并将窗口几何与「始终置顶」拆入 `local_state` 本机状态表（不随导出迁移）；遇到无法识别的表结构或导出字段时直接报错并保留原文件不改写（[技术架构](../../docs/ARCHITECTURE.md#数据存储与兼容边界)）。
-- 数据管理精简为「导出 / 恢复」两个动作，移除应用内备份按钮、命令号、恢复前 `before-restore-*.db` 快照及 `rusqlite` `backup` 特性；恢复操作继续在事务内原子执行并在导入前按 `dup_key` 规范化口径拦截同分类重复目标，正式库备份由用户在退出后整目录复制（含 `-wal`/`-shm`）。
-- 全部上下文菜单按语义插入自绘分隔线分段并收敛至纯数据模块 `raptim::menus`（与 `ui_commands` 双向核验归属区域），项目区空白右键管理段整体复用到标题栏「更多」菜单；托盘菜单同步划分为窗口、开关、应用、退出四段。
-- 名称编辑与已安装应用选择改为窗内覆盖层，设置窗口改为按需延迟创建，关闭前台辅助窗时主动将焦点交回主窗口（后台关闭不抢焦点）。
-- 第二实例唤醒改用按数据目录哈希隔离的系统事件，完全隐藏态零轮询；贴边收纳态按指针与揭示带距离自适应切换 16 / 32 ms 探测频率，动画推进改由 `FrameClock` 按显示刷新时钟驱动。
-
-## 修复
-
-- 统一 `update_targets_checked`（重新定位与路径转换落库点）与所有目标修改路径的 `dup_key` 查重逻辑，防止写入同分类撞车记录导致下次启动拒绝打开数据库，同时保持 `entries_collection` 为普通索引以便已有撞车库照常打开并支持批处理中间态。
-- 修复启动失败 `Failure.relocatable` 未读取导致取消 UAC 等无路径可改场景误弹重定位面板的问题，明确仅对「找不到目标 / 设备未就绪 / 网络不可用 / 无效路径」四类且目标具有文件路径的条目提供重定位。
-- 修复网址与应用标识无法创建桌面快捷方式、单实例唤醒线程遇 `WAIT_FAILED` 永久退出、热键 `configure` 超时后本地缓存与系统状态分叉、网页图标抓取未校验 HTTP 2xx 状态码及大写 `<LINK HREF>` 属性解析遗漏的问题。
-- 消除贴边滑动与召唤期间无条件重写 `GWL_EXSTYLE`、误调 winit `set_window_level` 抹除 `WS_EX_TOOLWINDOW` 以及错误调用 `SetWindowRgn` 引发的任务栏闪现和重复改框写入；实测验证应用侧改框已收敛（默认层级收起/展开各 1 笔、始终置顶 0 笔），确认残余圆角错帧归属于 DWM 合成器边界（[性能基准与边界](../../docs/PERFORMANCE.md#贴边改框写入与合成器边界)）。
-- 修复上下文菜单多个动作沿用默认人像字形与排序菜单上下边界恒为真的问题；确保不对 `SHBindToParent` 返回的内部子 PIDL 调用 `CoTaskMemFree`。
-
-## 性能与维护
-
-- 通过独立 `icon BLOB` 列、物化 `dup_key` 与就地单条图标回填，在 300 条 / 7.34 MB 合成图标夹具上将 `Store::open` 全表读从 187.8 ms 降至 27.8 ms、铺库从 33.9 s 降至 0.35 s、启动到首帧从 294.6 ms 降至 161.4 ms（300 条 / 2.98 MB 真实图标库为 138.8 ms）、空闲 Private 内存从 23,970 KB 降至 19,466 KB（真实库 17.2 MB）（[性能基准与边界](../../docs/PERFORMANCE.md#存储与启动实测)）。
-- 实现主网格按行虚拟化与可见带图标后台解码，新图标统一缩至 `STORE_MAX = 128` px 保存（解码时对超尺寸图标自动降采样），解码缓存上限 24 MiB 并在完全隐藏时收缩至仅剩可见范围。
-- 将入口与平台实现拆分为职责独立的子模块（`app_editor`、`app_events`、`app_input`、`app_session`、`app_settings`、`app_tools`、`ui_commands` 与 `platform/{autostart,discovery,drop_target,fluent_menu,frame_clock,hotkey_worker,protection,shell_actions,tray,web_icon}`），并将 `slint::include_modules!()` 统一置于 `src/lib.rs`。
-- 精简移除绑定实窗/离屏像素与文案的易碎回归测试，保留核心纯逻辑单元测试并由 `scripts/verify.ps1` 统一执行格式化、`clippy -D warnings`、单元测试与 release 构建门禁。
+- 新增英文界面与系统语言自适应支持（`src/i18n.rs` 与 Slint 全局 `I18n`）：首次启动自动检测 Windows UI 语言（读取注册表 `PreferredUILanguages` / `UserProfile\Languages` / `LocaleName`），新库按语言初始化默认分组/分类（「常用 / 默认分类」或 `Common / Default`），并可在「设置 → 常规 → 界面语言」中在「跟随系统 / 简体中文 / English」间实时切换（跨全部窗口、右键自绘菜单与托盘菜单即时生效，并同步切换 `Segoe UI` 与 `Microsoft YaHei UI` 字体）。
+- 新增完整英文文档与 README 双语切换：[README.en.md](../../README.en.md)、[docs/en/{USAGE,ARCHITECTURE,DEVELOPMENT,PERFORMANCE}.md](../../docs/en/USAGE.md) 以及 [changelog/{0.1.0,unreleased}/en-US.md](../0.1.0/en-US.md)。
+- 为无头界面预览工具 `examples/ui_preview/` 与 `scripts/preview.ps1` 新增 `--lang zh|en`（`-Lang`）参数，并生成英文文档预览图 `docs/previews/en/`。
+- 新增完全无头、不弹出也不抢占前台窗口的界面预览生成工具（`examples/ui_preview/` 与 `scripts/preview.ps1`），基于 Slint 软件渲染器直接离屏生成主窗口、编辑窗口与设置各分页的浅/深色高清预览图、总览拼图与本地交互式 `index.html` 展示图库（支持精选/全部预设、Window/Card/Raw 边框样式，以及从现有数据目录或导出 JSON 读取真实条目渲染）。

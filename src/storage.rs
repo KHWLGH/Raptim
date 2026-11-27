@@ -19,7 +19,6 @@ const SCHEMA_DDL: &str = "CREATE TABLE collections (id INTEGER PRIMARY KEY, pare
                 CREATE INDEX entries_collection ON entries(collection_id, dup_key);
                 CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
                 CREATE TABLE local_state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
-                INSERT INTO collections VALUES (1, NULL, '常用', 0), (2, 1, '默认分类', 0);
                 PRAGMA user_version=2;";
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -35,13 +34,31 @@ impl Store {
                 // future build from a pre-reset one; the table set is what separates the wording.
                 let ours: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('collections','entries','settings','local_state')", [], |row| row.get(0))?;
                 return Err(Error::Invalid(if ours == 4 {
-                    format!("该数据库不是当前版本支持的格式（user_version={version}）；未修改数据")
+                    match crate::i18n::locale() {
+                        crate::i18n::Locale::ZhCn => format!(
+                            "该数据库不是当前版本支持的格式（user_version={version}）；未修改数据"
+                        ),
+                        crate::i18n::Locale::EnUs => format!(
+                            "Unsupported database format (user_version={version}); data left untouched."
+                        ),
+                    }
                 } else {
-                    "无法识别该数据库；未修改数据".into()
+                    crate::i18n::t(
+                        "无法识别该数据库；未修改数据",
+                        "Unrecognized database file; data left untouched.",
+                    )
+                    .into()
                 }));
             }
             let tx = conn.transaction()?;
             tx.execute_batch(SCHEMA_DDL)?;
+            tx.execute(
+                "INSERT INTO collections VALUES (1, NULL, ?1, 0), (2, 1, ?2, 0)",
+                params![
+                    crate::i18n::default_group_name(),
+                    crate::i18n::default_category_name()
+                ],
+            )?;
             tx.execute(
                 "INSERT INTO settings VALUES(1, ?1)",
                 [serde_json::to_string(&Settings::default())?],
@@ -86,7 +103,9 @@ impl Store {
     }
     pub fn save_window_state(&mut self, state: &crate::session::WindowState) -> Result<()> {
         if !state.valid_geometry() {
-            return Err(Error::Invalid("窗口几何无效".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("窗口几何无效", "Invalid window geometry.").into(),
+            ));
         }
         self.conn.execute("INSERT INTO local_state VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [serde_json::to_string(state)?])?;
         Ok(())
@@ -99,7 +118,9 @@ impl Store {
         copy: bool,
     ) -> Result<()> {
         if ids.is_empty() {
-            return Err(Error::Invalid("请先选择项目".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("请先选择项目", "Select at least one item first.").into(),
+            ));
         }
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
@@ -110,13 +131,20 @@ impl Store {
         let mut selected = Vec::new();
         for id in ids {
             if !seen.insert(*id) {
-                return Err(Error::Invalid("选择包含重复项目".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t("选择包含重复项目", "Selection contains duplicate items.")
+                        .into(),
+                ));
             }
-            selected.push(
-                all.iter()
-                    .find(|e| e.id == *id)
-                    .ok_or_else(|| Error::Invalid("项目已变化，请重新选择".into()))?,
-            );
+            selected.push(all.iter().find(|e| e.id == *id).ok_or_else(|| {
+                Error::Invalid(
+                    crate::i18n::t(
+                        "项目已变化，请重新选择",
+                        "Items changed; please select again.",
+                    )
+                    .into(),
+                )
+            })?);
         }
         if let Some(dest) = destination {
             if !self
@@ -124,13 +152,22 @@ impl Store {
                 .iter()
                 .any(|c| c.id == dest && c.parent_id.is_some())
             {
-                return Err(Error::Invalid("目标分类已不存在".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t("目标分类已不存在", "Destination category no longer exists.")
+                        .into(),
+                ));
             }
             // Choosing the category the batch already sits in is not an operation. Refuse it by name:
             // until now the duplicate scan below happened to reject it too, but it reported a clash
             // with a project that was not a clash, which sent the reader looking for one.
             if selected.iter().any(|e| e.collection_id == dest) {
-                return Err(Error::Invalid("项目已经在所选分类里；整批未修改".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t(
+                        "项目已经在所选分类里；整批未修改",
+                        "Items are already in the selected category; nothing changed.",
+                    )
+                    .into(),
+                ));
             }
             let mut taken = self.slots_of(&[])?;
             let keys: Vec<String> = selected.iter().map(|e| self.dup_key(e)).collect();
@@ -141,9 +178,16 @@ impl Store {
                     .zip(&keys)
                     .map(|(e, key)| (dest, *e, key.as_str())),
             ) {
-                return Err(Error::Invalid(format!(
-                    "目标分类存在重复项目：{name}；整批未修改"
-                )));
+                return Err(Error::Invalid(match crate::i18n::locale() {
+                    crate::i18n::Locale::ZhCn => {
+                        format!("目标分类存在重复项目：{name}；整批未修改")
+                    }
+                    crate::i18n::Locale::EnUs => {
+                        format!(
+                            "Duplicate target in destination category: {name}; nothing changed."
+                        )
+                    }
+                }));
             }
         }
 
@@ -404,9 +448,14 @@ impl Store {
                 .zip(&keys)
                 .map(|(e, key)| (e.collection_id, e, key.as_str())),
         ) {
-            return Err(Error::Invalid(format!(
-                "目标分类已有重复项目：{name}；未修改任何项目"
-            )));
+            return Err(Error::Invalid(match crate::i18n::locale() {
+                crate::i18n::Locale::ZhCn => {
+                    format!("目标分类已有重复项目：{name}；未修改任何项目")
+                }
+                crate::i18n::Locale::EnUs => {
+                    format!("Destination category already has target: {name}; nothing changed.")
+                }
+            }));
         }
         let tx = self
             .conn
@@ -423,7 +472,13 @@ impl Store {
             entry.position = row.2;
             entry.icon = row.3.unwrap_or_default();
             if &entry != old {
-                return Err(Error::Invalid("项目已变化，请重新预览".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t(
+                        "项目已变化，请重新预览",
+                        "Items changed; please preview again.",
+                    )
+                    .into(),
+                ));
             }
         }
         for (e, dup_key) in updates.iter().zip(keys) {
@@ -451,10 +506,22 @@ impl Store {
         let all = self.collections()?;
         if let Some(parent) = parent_id {
             if !all.iter().any(|c| c.id == parent && c.parent_id.is_none()) || id == Some(parent) {
-                return Err(Error::Invalid("分类只能放在一级分组下".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t(
+                        "分类只能放在一级分组下",
+                        "Categories must belong to a top-level group.",
+                    )
+                    .into(),
+                ));
             }
             if id.is_some_and(|id| all.iter().any(|c| c.parent_id == Some(id))) {
-                return Err(Error::Invalid("请先移动该分组下的分类".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t(
+                        "请先移动该分组下的分类",
+                        "Move child categories out of this group first.",
+                    )
+                    .into(),
+                ));
             }
         }
         if all.iter().any(|c| {
@@ -462,7 +529,13 @@ impl Store {
                 && c.parent_id == parent_id
                 && c.name.to_lowercase() == name.trim().to_lowercase()
         }) {
-            return Err(Error::Invalid("同一位置已有同名分组或分类".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "同一位置已有同名分组或分类",
+                    "A group or category with the same name already exists here.",
+                )
+                .into(),
+            ));
         }
         if let Some(id) = id {
             let tx = self.conn.transaction()?;
@@ -471,7 +544,9 @@ impl Store {
                 params![parent_id, name.trim(), id],
             )? == 0
             {
-                return Err(Error::Invalid("分组已不存在".into()));
+                return Err(Error::Invalid(
+                    crate::i18n::t("分组已不存在", "Group no longer exists.").into(),
+                ));
             }
             normalize_categories(&tx)?;
             tx.commit()?;
@@ -482,8 +557,8 @@ impl Store {
             let id = tx.last_insert_rowid();
             if parent_id.is_none() {
                 tx.execute(
-                    "INSERT INTO collections(parent_id,name,position) VALUES(?1,'默认分类',0)",
-                    [id],
+                    "INSERT INTO collections(parent_id,name,position) VALUES(?1,?2,0)",
+                    params![id, crate::i18n::default_category_name()],
                 )?;
             }
             tx.commit()?;
@@ -498,12 +573,20 @@ impl Store {
             |r| r.get(0),
         )?;
         if groups.iter().any(|c| c.parent_id == Some(id)) || has_entries {
-            return Err(Error::Invalid("请先移走项目和子分类，再删除空分组".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "请先移走项目和子分类，再删除空分组",
+                    "Move items and subcategories out before deleting.",
+                )
+                .into(),
+            ));
         }
         if groups.iter().filter(|c| c.parent_id.is_none()).count() == 1
             && groups.iter().any(|c| c.id == id && c.parent_id.is_none())
         {
-            return Err(Error::Invalid("至少保留一个分组".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("至少保留一个分组", "At least one group must remain.").into(),
+            ));
         }
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM collections WHERE id=?1", [id])?;
@@ -520,7 +603,9 @@ impl Store {
                 .iter()
                 .any(|c| c.id == id && c.parent_id.is_none())
         {
-            return Err(Error::Invalid("至少保留一个分组".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("至少保留一个分组", "At least one group must remain.").into(),
+            ));
         }
         let ids: Vec<i64> = collections
             .iter()
@@ -547,7 +632,13 @@ impl Store {
             |r| r.get(0),
         )?;
         if clash {
-            return Err(Error::Invalid("当前分类已收录同一目标".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "当前分类已收录同一目标",
+                    "This category already contains the same target.",
+                )
+                .into(),
+            ));
         }
         let id = if entry.id == 0 {
             self.conn.execute("INSERT INTO entries(collection_id,payload,position,icon,dup_key) VALUES(?1,?2,(SELECT coalesce(max(position),-1)+1 FROM entries),?3,?4)", params![entry.collection_id, payload, entry.icon.as_slice(), dup_key])?;
@@ -563,7 +654,9 @@ impl Store {
             ],
         )? == 0
         {
-            return Err(Error::Invalid("项目已不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("项目已不存在", "Item no longer exists.").into(),
+            ));
         } else {
             self.dirty_icons.insert(entry.id);
             entry.id
@@ -578,7 +671,9 @@ impl Store {
             .execute("UPDATE entries SET icon=?2 WHERE id=?1", params![id, icon])?
             == 0
         {
-            return Err(Error::Invalid("项目已不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("项目已不存在", "Item no longer exists.").into(),
+            ));
         }
         self.dirty_icons.insert(id);
         Ok(())
@@ -593,7 +688,9 @@ impl Store {
             .iter()
             .any(|c| c.id == destination && c.parent_id.is_some())
         {
-            return Err(Error::Invalid("目标分类已不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("目标分类已不存在", "Destination category no longer exists.").into(),
+            ));
         }
         let row = self
             .conn
@@ -602,7 +699,9 @@ impl Store {
             })
             .optional()?;
         let Some((payload, icon)) = row else {
-            return Err(Error::Invalid("项目已不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("项目已不存在", "Item no longer exists.").into(),
+            ));
         };
         let mut entry: Entry = serde_json::from_str(&payload)?;
         entry.icon = icon.unwrap_or_default();
@@ -633,15 +732,20 @@ impl Store {
     }
     pub fn move_at(&mut self, id: i64, before: i64, after: bool) -> Result<()> {
         let all = self.entry_positions()?;
-        let &(_, source_collection) = all
-            .iter()
-            .find(|(eid, _)| *eid == id)
-            .ok_or_else(|| Error::Invalid("项目已不存在".into()))?;
+        let &(_, source_collection) = all.iter().find(|(eid, _)| *eid == id).ok_or_else(|| {
+            Error::Invalid(crate::i18n::t("项目已不存在", "Item no longer exists.").into())
+        })?;
         if !all
             .iter()
             .any(|(eid, cid)| *eid == before && *cid == source_collection)
         {
-            return Err(Error::Invalid("只能在当前分类内排序".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "只能在当前分类内排序",
+                    "Items can only be reordered within the same category.",
+                )
+                .into(),
+            ));
         }
         if id == before {
             return Ok(());
@@ -666,7 +770,9 @@ impl Store {
     pub fn move_entry(&mut self, id: i64, direction: i32) -> Result<()> {
         let all = self.entry_positions()?;
         let Some(&(_, collection_id)) = all.iter().find(|(eid, _)| *eid == id) else {
-            return Err(Error::Invalid("项目已不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("项目已不存在", "Item no longer exists.").into(),
+            ));
         };
         let mut siblings: Vec<_> = all
             .into_iter()
@@ -759,16 +865,21 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let collections = self.collections()?;
-        let source = collections
-            .iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| Error::Invalid("分组不存在".into()))?;
+        let source = collections.iter().find(|c| c.id == id).ok_or_else(|| {
+            Error::Invalid(crate::i18n::t("分组不存在", "Group does not exist.").into())
+        })?;
         let parent = source.parent_id;
         if !collections
             .iter()
             .any(|c| c.id == before && c.parent_id == parent)
         {
-            return Err(Error::Invalid("只能在同一级排序".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "只能在同一级排序",
+                    "Can only reorder items at the same level.",
+                )
+                .into(),
+            ));
         }
         if id == before {
             return Ok(());
@@ -808,7 +919,9 @@ impl Store {
             )
             .optional()?
         else {
-            return Err(Error::Invalid("项目不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("项目不存在", "Item does not exist.").into(),
+            ));
         };
         if current_collection == destination {
             return Ok(());
@@ -818,7 +931,9 @@ impl Store {
             .iter()
             .any(|c| c.id == destination && c.parent_id.is_some())
         {
-            return Err(Error::Invalid("目标分类已不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("目标分类已不存在", "Destination category no longer exists.").into(),
+            ));
         }
         let mut entry: Entry = serde_json::from_str(&payload)?;
         let clash: bool = tx.query_row(
@@ -827,10 +942,12 @@ impl Store {
             |r| r.get(0),
         )?;
         if clash {
-            return Err(Error::Invalid(format!(
-                "目标分类已有重复项目：{}",
-                entry.name
-            )));
+            return Err(Error::Invalid(match crate::i18n::locale() {
+                crate::i18n::Locale::ZhCn => format!("目标分类已有重复项目：{}", entry.name),
+                crate::i18n::Locale::EnUs => {
+                    format!("Duplicate target in destination category: {}", entry.name)
+                }
+            }));
         }
         let end: i64 = tx.query_row(
             "SELECT coalesce(max(position),-1)+1 FROM entries WHERE collection_id=?1",
@@ -854,19 +971,24 @@ impl Store {
             rusqlite::TransactionBehavior::Immediate,
         )?;
         let collections = self.collections()?;
-        let source = collections
-            .iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| Error::Invalid("分组不存在".into()))?;
+        let source = collections.iter().find(|c| c.id == id).ok_or_else(|| {
+            Error::Invalid(crate::i18n::t("分组不存在", "Group does not exist.").into())
+        })?;
         let dest = collections
             .iter()
             .find(|c| c.id == destination)
-            .ok_or_else(|| Error::Invalid("请选择迁移目标".into()))?;
+            .ok_or_else(|| {
+                Error::Invalid(
+                    crate::i18n::t("请选择迁移目标", "Select a migration target.").into(),
+                )
+            })?;
         if id == destination
             || dest.parent_id == Some(id)
             || (source.parent_id.is_none() && dest.parent_id.is_some())
         {
-            return Err(Error::Invalid("迁移目标无效".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t("迁移目标无效", "Invalid migration target.").into(),
+            ));
         }
         let mut stmt = tx.prepare(
             "SELECT id,payload,dup_key FROM entries WHERE collection_id=?1 ORDER BY position,id",
@@ -890,10 +1012,14 @@ impl Store {
             for (offset, (entry_id, payload, dup_key)) in moving_entries.iter().enumerate() {
                 let mut entry: Entry = serde_json::from_str(payload)?;
                 if !taken.insert(dup_key.clone()) {
-                    return Err(Error::Invalid(format!(
-                        "目标分类已有重复项目：{}",
-                        entry.name
-                    )));
+                    return Err(Error::Invalid(match crate::i18n::locale() {
+                        crate::i18n::Locale::ZhCn => {
+                            format!("目标分类已有重复项目：{}", entry.name)
+                        }
+                        crate::i18n::Locale::EnUs => {
+                            format!("Duplicate target in destination category: {}", entry.name)
+                        }
+                    }));
                 }
                 let position = end + offset as i64;
                 entry.id = *entry_id;
@@ -928,10 +1054,13 @@ impl Store {
                 [c.id],
                 |r| r.get(0),
             )?;
-            // 默认分类 is a placeholder this app creates by itself, so an empty one is not
-            // something to relocate and keep: renaming it would strand a `默认分类 2` row that
+            // Default category is a placeholder this app creates by itself, so an empty one is not
+            // something to relocate and keep: renaming it would strand a `Default 2` row that
             // normalize_categories never reuses.
-            if c.name == "默认分类" && taken.contains("默认分类") && !has_entries {
+            if crate::i18n::is_default_category_name(&c.name)
+                && taken.contains(&c.name.trim().to_lowercase())
+                && !has_entries
+            {
                 dropped.push(c.id);
                 continue;
             }
@@ -1019,7 +1148,7 @@ fn normalize_categories(conn: &Connection) -> Result<()> {
             continue;
         }
         let empty_default: Option<i64> = conn.query_row(
-            "SELECT id FROM collections c WHERE parent_id=?1 AND name='默认分类' AND NOT EXISTS(SELECT 1 FROM entries e WHERE e.collection_id=c.id)",
+            "SELECT id FROM collections c WHERE parent_id=?1 AND name IN ('默认分类','Default') AND NOT EXISTS(SELECT 1 FROM entries e WHERE e.collection_id=c.id)",
             [group], |r| r.get(0),
         ).optional()?;
         if let Some(category) = empty_default {
@@ -1029,14 +1158,15 @@ fn normalize_categories(conn: &Connection) -> Result<()> {
             )?;
             continue;
         }
-        let mut name = "默认分类".to_string();
+        let base_name = crate::i18n::default_category_name();
+        let mut name = base_name.to_string();
         let mut suffix = 2;
         while conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM collections WHERE parent_id=?1 AND name=?2)",
             params![group, name],
             |r| r.get::<_, bool>(0),
         )? {
-            name = format!("默认分类 {suffix}");
+            name = format!("{base_name} {suffix}");
             suffix += 1;
         }
         conn.execute("INSERT INTO collections(parent_id,name,position) VALUES(?1,?2,(SELECT coalesce(max(position),-1)+1 FROM collections))", params![group,name])?;
@@ -1050,23 +1180,68 @@ fn normalize_categories(conn: &Connection) -> Result<()> {
 }
 pub fn validate_settings(settings: &Settings) -> Result<()> {
     if settings.theme_mode > 2 {
-        return Err(Error::Invalid("外观主题必须为跟随系统、浅色或深色".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "外观主题必须为跟随系统、浅色或深色",
+                "Theme must be Follow system, Light, or Dark.",
+            )
+            .into(),
+        ));
+    }
+    if settings.language > 2 {
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "界面语言必须为跟随系统、简体中文或 English",
+                "Language must be Follow system, Simplified Chinese, or English.",
+            )
+            .into(),
+        ));
     }
     if settings.icon_size > 2 {
-        return Err(Error::Invalid("图标大小必须为小、中或大".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "图标大小必须为小、中或大",
+                "Icon size must be Small, Medium, or Large.",
+            )
+            .into(),
+        ));
     }
     crate::hotkey::parse(&settings.hotkey).map_err(Error::Invalid)?;
     if !(1..=12).contains(&settings.edge_strip_width_px) {
-        return Err(Error::Invalid("露边宽度应为 1–12 个物理像素".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "露边宽度应为 1–12 个物理像素",
+                "Edge strip width must be 1–12 physical pixels.",
+            )
+            .into(),
+        ));
     }
     if !(100..=2000).contains(&settings.edge_collapse_delay_ms) {
-        return Err(Error::Invalid("贴边收起延迟应在 100–2000 ms 之间".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "贴边收起延迟应在 100–2000 ms 之间",
+                "Edge collapse delay must be between 100 and 2000 ms.",
+            )
+            .into(),
+        ));
     }
     if !(100..=2000).contains(&settings.hover_delay_ms) {
-        return Err(Error::Invalid("悬停延迟应在 100–2000 ms 之间".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "悬停延迟应在 100–2000 ms 之间",
+                "Hover switch delay must be between 100 and 2000 ms.",
+            )
+            .into(),
+        ));
     }
     if settings.protected_apps.len() > 100 {
-        return Err(Error::Invalid("应用规则最多 100 项".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "应用规则最多 100 项",
+                "At most 100 protected apps are allowed.",
+            )
+            .into(),
+        ));
     }
     for path in &settings.protected_apps {
         Target::File { path: path.clone() }.validate()?;
@@ -1075,16 +1250,34 @@ pub fn validate_settings(settings: &Settings) -> Result<()> {
 }
 pub fn validate_export(data: &Export) -> Result<()> {
     if data.format_version != SCHEMA_VERSION {
-        return Err(Error::Invalid(format!(
-            "此导出文件为版本 {}，Raptim 只能恢复版本 {SCHEMA_VERSION} 的导出",
-            data.format_version
-        )));
+        return Err(Error::Invalid(match crate::i18n::locale() {
+            crate::i18n::Locale::ZhCn => format!(
+                "此导出文件为版本 {}，Raptim 只能恢复版本 {SCHEMA_VERSION} 的导出",
+                data.format_version
+            ),
+            crate::i18n::Locale::EnUs => format!(
+                "Export format version is {}; Raptim only supports version {SCHEMA_VERSION}.",
+                data.format_version
+            ),
+        }));
     }
     if data.collections.len() > 10000 || data.entries.len() > 100000 {
-        return Err(Error::Invalid("数据量超出当前版本限制".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "数据量超出当前版本限制",
+                "Data exceeds current version limits.",
+            )
+            .into(),
+        ));
     }
     if !data.collections.iter().any(|c| c.parent_id.is_none()) {
-        return Err(Error::Invalid("至少需要一个一级分组".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "至少需要一个一级分组",
+                "At least one top-level group is required.",
+            )
+            .into(),
+        ));
     }
     let mut ids = HashSet::new();
     let mut names = HashSet::new();
@@ -1095,7 +1288,13 @@ pub fn validate_export(data: &Export) -> Result<()> {
             || !ids.insert(c.id)
             || !names.insert((c.parent_id, c.name.trim().to_lowercase()))
         {
-            return Err(Error::Invalid("分组编号或名称重复/无效".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "分组编号或名称重复/无效",
+                    "Duplicate or invalid group/category ID or name.",
+                )
+                .into(),
+            ));
         }
         if let Some(parent) = c.parent_id
             && (parent == c.id
@@ -1104,7 +1303,13 @@ pub fn validate_export(data: &Export) -> Result<()> {
                     .iter()
                     .any(|p| p.id == parent && p.parent_id.is_none()))
         {
-            return Err(Error::Invalid("分组关系无效或超过两级".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "分组关系无效或超过两级",
+                    "Invalid group hierarchy or exceeds two levels.",
+                )
+                .into(),
+            ));
         }
     }
     let mut entries = HashSet::new();
@@ -1116,10 +1321,22 @@ pub fn validate_export(data: &Export) -> Result<()> {
             || !entries.insert(e.id)
             || !ids.contains(&e.collection_id)
         {
-            return Err(Error::Invalid("项目编号重复或分类不存在".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "项目编号重复或分类不存在",
+                    "Duplicate item ID or missing category.",
+                )
+                .into(),
+            ));
         }
         if !targets.insert((e.collection_id, e.target.duplicate_key())) {
-            return Err(Error::Invalid("同一分类存在重复目标".into()));
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "同一分类存在重复目标",
+                    "Duplicate target within the same category.",
+                )
+                .into(),
+            ));
         }
     }
     validate_settings(&data.settings)

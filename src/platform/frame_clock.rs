@@ -138,7 +138,12 @@ impl FrameClock {
                     notify(NativeSignal::FrameClockTick(generation));
                 }
             })
-            .map_err(|e| format!("无法创建动画时钟：{e}"))?;
+            .map_err(|e| {
+                format!(
+                    "{}{e}",
+                    crate::i18n::t("无法创建动画时钟：", "Failed to create frame clock: ")
+                )
+            })?;
         Ok(Self {
             state,
             worker: Some(worker),

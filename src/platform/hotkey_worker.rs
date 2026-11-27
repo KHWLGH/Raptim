@@ -67,7 +67,11 @@ impl Hotkey {
                                     }
                                     Ok(())
                                 }
-                                Err(_) => Err("此呼出热键已被占用或不可用，已保留原热键".into()),
+                                Err(_) => Err(crate::i18n::t(
+                                    "此呼出热键已被占用或不可用，已保留原热键",
+                                    "Hotkey already in use or unavailable; kept previous shortcut.",
+                                )
+                                .into()),
                             }
                         };
                         let _ = request.reply.send(result);
@@ -92,7 +96,8 @@ impl Hotkey {
         };
         if let Err(error) = hotkey.configure(shortcut, enabled) {
             notify(NativeSignal::StatusMessage(format!(
-                "{error}；可用托盘找回窗口"
+                "{error}{}",
+                crate::i18n::t("；可用托盘找回窗口", " (use tray icon to open window)")
             )));
         }
         Ok(hotkey)

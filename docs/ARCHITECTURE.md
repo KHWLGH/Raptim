@@ -1,4 +1,4 @@
-← 返回 [README](../README.md)
+← 返回 [README](../README.md) · **简体中文** | [English](en/ARCHITECTURE.md)
 
 # 技术架构
 
@@ -20,14 +20,14 @@ Raptim 为单 crate 工程，核心纯逻辑与平台/存储基础设施集中�
 
 ```mermaid
 flowchart TB
-  UI["ui/app.slint · ui/chrome.slint<br/>Slint 1.18.0 Fluent 界面"]
+  UI["ui/app.slint · ui/chrome.slint<br/>Slint 1.18.0 Fluent 界面 · 全局 I18n"]
   subgraph BIN["应用层 · src/main.rs 与应用子模块"]
     APP["main.rs<br/>主循环 / 窗口停靠与生命周期"]
     MODS["app_editor · app_events · app_input<br/>app_session · app_settings · app_tools · ui_commands"]
     APP <--> MODS
   end
   subgraph LIB["核心库 · src/lib.rs"]
-    CORE["model · storage · paths · search · icons<br/>menus · policy · docking · gestures<br/>hotkey · importing · launch · session · commands<br/>diagnostics · windowing"]
+    CORE["model · storage · paths · search · icons<br/>i18n · menus · policy · docking · gestures<br/>hotkey · importing · launch · session · commands<br/>diagnostics · windowing"]
     PLAT["platform/windows_impl.rs<br/>autostart · discovery · drop_target · fluent_menu<br/>frame_clock · hotkey_worker · protection<br/>shell_actions · tray · web_icon"]
     CORE --> PLAT
   end
@@ -40,21 +40,22 @@ flowchart TB
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/lib.rs` | 导出 17 个核心/平台模块并集中展开 `slint::include_modules!()` |
-| `src/main.rs` | 启动参数解析、单实例接入、`App` 状态机、主窗口事件循环与 500 ms 常规巡检 |
+| `src/lib.rs` | 导出 18 个核心/平台模块并集中展开 `slint::include_modules!()` |
+| `src/main.rs` | 启动参数解析、单实例接入、`App` 状态机、语言热切换（`apply_language`）与 500 ms 常规巡检 |
 | `src/app_editor.rs` | 添加/编辑窗口会话生命周期、图标提取防过期与未保存保护 |
 | `src/app_events.rs` | 后台工作线程、原生钩子与 UI 线程之间的强类型事件分发（`AppEvent`） |
 | `src/app_input.rs` | winit 事件钩子、OS 脏区消费、IME 组合态保护、拖拽防误触与键盘导航 |
 | `src/app_session.rs` | 贴边保护恢复、外部拖放注册、可见带图标刷新、树形目标选择与批量整理 |
-| `src/app_settings.rs` | 设置窗口按需创建、配置同步、合法性校验与注册表开机启动联动 |
+| `src/app_settings.rs` | 设置窗口按需创建、双语 `notice_items`、配置同步校验与注册表开机启动联动 |
 | `src/app_tools.rs` | 已安装软件扫描导入、失效项目巡检与就地重定位 |
 | `src/ui_commands.rs` | 右键/「更多」菜单上下文快照、命令路由及路径转换预览 |
+| `src/i18n.rs` | `Locale::{ZhCn, EnUs}`、无锁 `ACTIVE_LOCALE`、BCP-47 标签解析与运行时 `t()` 双语文案查找 |
 | `src/model.rs` | 六类 `Target`、网址归一化（`normalize_url`）、`Entry`（base64 图标字段）、`Settings` 与 `Export` |
 | `src/storage.rs` | SQLite 读写、WAL 事务管理、统一 `dup_key` 查重与 JSON 导出恢复校验 |
 | `src/paths.rs` | 长路径前缀剥离、相对/绝对路径解析、展示路径格式化与同盘相对转换 |
 | `src/search.rs` | 基于 `pinyin`（无声调）的增量搜索索引，支持多词、全拼、首字母与驼峰匹配 |
 | `src/icons.rs` | 128 px PNG 编码限幅、文件读取解码限制与后台解码缓存（上限 24 MiB） |
-| `src/menus.rs` | 纯数据菜单树（`tree`）与区域归属校验（`region`） |
+| `src/menus.rs` | 纯数据双语菜单树（`tree` / `tree_for_locale`）与区域归属校验（`region`） |
 | `src/policy.rs` | 全屏/严格应用保护决策、`DisplayPolicy` 延迟释放状态机与单调 `ticket` |
 | `src/docking.rs` | 贴边吸附几何、贴边过伸（`DOCK_OVERHANG_DIP`）、临界阻尼动画与收起外观状态 |
 | `src/gestures.rs` | `DragGuard`（180 ms / 12 DIP）与 `CompositionGuard`（IME preedit 游标区判定） |
@@ -66,7 +67,7 @@ flowchart TB
 | `src/diagnostics.rs` | 常开 `error-log.txt` 与按需 `protection-log.csv` 写入、路径脱敏与半段截断 |
 | `src/windowing.rs` | Slint 1.18.0 软件渲染脏区刷新桥接、Tooltip 外框剥离与子窗口焦点的交还管理 |
 | `src/platform/windows_impl.rs` | Win32 HWND 子类化、DWM 属性、单实例命名事件、窗口几何与子模块统一重导出 |
-| `ui/app.slint` · `ui/chrome.slint` | Fluent 风格主窗、编辑窗、设置窗与公共组件定义 |
+| `ui/app.slint` · `ui/chrome.slint` | Fluent 风格主窗、编辑窗、设置窗、公共组件及全局 `I18n`（动态切换 `Segoe UI` / `Microsoft YaHei UI`） |
 | `build.rs` · `.cargo/config.toml` | 编译期注入清单/图标资源、`RAPTIM_RUST_VERSION` 及裁剪 SQLite 非必需扩展 |
 
 ## 线程与事件模型
@@ -156,7 +157,7 @@ sequenceDiagram
 
 - `raptim::menus::tree(kind, &MenuContext)` 根据菜单类型（`0` 标题栏「更多」、`1` 项目、`2` 分组、`3` 分类、`4` 空白区）构建菜单项树与图标字形（禁用 `DEFAULT_ICON = '\u{e8a5}'` 漏配）。
 - `raptim::menus::region(kind, command)` 与 `src/ui_commands.rs` 双向核验命令号归属（`Region::{Manage, App, Item, Collection}`）；`MANAGE` 段（批量入口 `BATCH_BASE = 30` 与新增/视图/排序 `VIEW_BASE = 40..=47`）在空白右键与「更多」间共享一份构建与分发逻辑。
-- `platform::fluent_menu` 使用 Win32 Owner-Draw 弹出菜单按屏幕物理坐标呈现自绘图标、浅深色主题与悬停圆角，分隔线为 9 逻辑像素高禁用项以保证键盘和鼠标自动跳过；系统负责菜单模态跟踪与多级子菜单翻转；「Windows 原生菜单」单独经 Shell `IContextMenu` / `IContextMenu2` / `IContextMenu3` 弹出。
+- `platform::fluent_menu` 使用 Win32 Owner-Draw 弹出菜单按屏幕物理坐标呈现自绘图标、浅深色主题、`Segoe UI`/`Microsoft YaHei UI` 自适应字体与悬停圆角，分隔线为 9 逻辑像素高禁用项以保证键盘和鼠标自动跳过；系统负责菜单模态跟踪与多级子菜单翻转；「Windows 原生菜单」单独经 Shell `IContextMenu` / `IContextMenu2` / `IContextMenu3` 弹出。
 
 ## 显示策略与保护状态机
 

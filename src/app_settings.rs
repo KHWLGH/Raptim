@@ -90,6 +90,8 @@ impl App {
         self.settings_ui.set_protected_error("".into());
         self.settings_ui
             .set_theme_mode(i32::from(self.settings.theme_mode));
+        self.settings_ui
+            .set_language_mode(i32::from(self.settings.language));
         self.settings_ui.set_autostart(self.settings.autostart);
         self.settings_ui.set_autostart_warning(
             platform::autostart_mismatch(&self.data_dir, self.settings.autostart)
@@ -134,6 +136,7 @@ impl App {
         let mut draft = self.settings.clone();
         draft.hotkey = self.settings_ui.get_hotkey_text().to_string();
         draft.theme_mode = self.settings_ui.get_theme_mode().clamp(0, 2) as u8;
+        draft.language = self.settings_ui.get_language_mode().clamp(0, 2) as u8;
         draft.autostart = self.settings_ui.get_autostart();
         draft.double_click = self.settings_ui.get_double_click();
         draft.type_to_search = self.settings_ui.get_type_to_search();
@@ -226,7 +229,11 @@ impl App {
                     self.dock = None;
                     self.edge_hold.clear();
                 }
+                let lang_changed = draft.language != self.settings.language;
                 self.settings = draft;
+                if lang_changed {
+                    self.apply_language();
+                }
                 self.sync_dock_overhang();
                 if !self.settings.edge_hide {
                     platform::decorate(self.main.window());
@@ -275,13 +282,23 @@ impl App {
             .iter()
             .any(|existing| normalize(existing) == normalize(&path))
         {
-            self.settings_ui
-                .set_protected_error("该程序已在保护列表中".into());
+            self.settings_ui.set_protected_error(
+                raptim::i18n::t(
+                    "该程序已在保护列表中",
+                    "This program is already in the list",
+                )
+                .into(),
+            );
             return;
         }
         if self.settings.protected_apps.len() >= 100 {
-            self.settings_ui
-                .set_protected_error("严格保护程序最多 100 项".into());
+            self.settings_ui.set_protected_error(
+                raptim::i18n::t(
+                    "严格保护程序最多 100 项",
+                    "At most 100 strict protected apps allowed",
+                )
+                .into(),
+            );
             return;
         }
         let mut list = self.settings.protected_apps.clone();
@@ -306,65 +323,115 @@ impl App {
 
 const LICENSE_TEXT: &str = include_str!("../LICENSE");
 
-fn notice_items() -> ModelRc<NoticeItem> {
+pub(super) fn notice_items() -> ModelRc<NoticeItem> {
     let items = [
         (
             "slint / i-slint-core / slint-build",
             "1.18.0",
             "GPL-3.0-only",
-            "界面框架与 Fluent 软件渲染后端",
+            raptim::i18n::t(
+                "界面框架与 Fluent 软件渲染后端",
+                "UI framework and Fluent software renderer",
+            ),
         ),
         (
             "rusqlite",
             "0.37.0",
             "MIT",
-            "SQLite 存储封装，内置 SQLite 源码编译",
+            raptim::i18n::t(
+                "SQLite 存储封装，内置 SQLite 源码编译",
+                "SQLite wrapper with bundled SQLite source",
+            ),
         ),
         (
             "windows / windows-core",
             "0.62.2",
             "MIT OR Apache-2.0",
-            "Win32 窗口、Shell、拖放、热键与网络接口",
+            raptim::i18n::t(
+                "Win32 窗口、Shell、拖放、热键与网络接口",
+                "Win32 windowing, Shell, drag-and-drop, hotkeys, and HTTP bindings",
+            ),
         ),
         (
             "tray-icon",
             "0.24.2",
             "MIT OR Apache-2.0",
-            "系统托盘图标与托盘菜单",
+            raptim::i18n::t("系统托盘图标与托盘菜单", "System tray icon and menu"),
         ),
-        ("rfd", "0.16.0", "MIT", "系统原生文件选择、目录选择与提示框"),
+        (
+            "rfd",
+            "0.16.0",
+            "MIT",
+            raptim::i18n::t(
+                "系统原生文件选择、目录选择与提示框",
+                "Native file, folder, and message dialogs",
+            ),
+        ),
         (
             "image",
             "0.25.10",
             "MIT OR Apache-2.0",
-            "PNG、JPEG 与 ICO 图标的解码、缩放与编码",
+            raptim::i18n::t(
+                "PNG、JPEG 与 ICO 图标的解码、缩放与编码",
+                "PNG, JPEG, and ICO image decoding, scaling, and encoding",
+            ),
         ),
-        ("pinyin", "0.10.0", "MIT", "离线中文全拼与首字母搜索"),
-        ("arboard", "3.6.1", "MIT OR Apache-2.0", "系统剪贴板读写"),
+        (
+            "pinyin",
+            "0.10.0",
+            "MIT",
+            raptim::i18n::t(
+                "离线中文全拼与首字母搜索",
+                "Offline Chinese Pinyin and initial-letter search",
+            ),
+        ),
+        (
+            "arboard",
+            "3.6.1",
+            "MIT OR Apache-2.0",
+            raptim::i18n::t("系统剪贴板读写", "System clipboard read/write"),
+        ),
         (
             "base64",
             "0.23.1",
             "MIT OR Apache-2.0",
-            "JSON 导入导出时的图标 Base64 编解码",
+            raptim::i18n::t(
+                "JSON 导入导出时的图标 Base64 编解码",
+                "Icon Base64 encoding and decoding for JSON export/restore",
+            ),
         ),
         (
             "serde / serde_json",
             "1.0.229 / 1.0.151",
             "MIT OR Apache-2.0",
-            "配置、本机窗口状态与 JSON 导入导出的序列化",
+            raptim::i18n::t(
+                "配置、本机窗口状态与 JSON 导入导出的序列化",
+                "Serialization for settings, window state, and JSON export/restore",
+            ),
         ),
         (
             "url",
             "2.5.8",
             "MIT OR Apache-2.0",
-            "网址解析与网页图标地址拼接",
+            raptim::i18n::t(
+                "网址解析与网页图标地址拼接",
+                "URL parsing and favicon URL resolution",
+            ),
         ),
-        ("thiserror", "2.0.20", "MIT OR Apache-2.0", "错误类型定义"),
+        (
+            "thiserror",
+            "2.0.20",
+            "MIT OR Apache-2.0",
+            raptim::i18n::t("错误类型定义", "Error type derivation"),
+        ),
         (
             "raw-window-handle",
             "0.6.2",
             "MIT OR Apache-2.0 OR Zlib",
-            "获取窗口底层 Win32 HWND 句柄",
+            raptim::i18n::t(
+                "获取窗口底层 Win32 HWND 句柄",
+                "Raw Win32 HWND handle access",
+            ),
         ),
     ]
     .into_iter()
@@ -393,6 +460,7 @@ fn create_settings(
     data: &std::path::Path,
 ) -> std::result::Result<SettingsWindow, slint::PlatformError> {
     let settings_ui = SettingsWindow::new()?;
+    settings_ui.global::<I18n>().set_en(raptim::i18n::is_en());
     settings_ui.set_app_version(env!("CARGO_PKG_VERSION").into());
     settings_ui.set_rust_version(env!("RAPTIM_RUST_VERSION").into());
     settings_ui.set_license_lines(strings(LICENSE_TEXT.lines().map(str::to_string)));
@@ -431,22 +499,35 @@ fn create_settings(
     settings_ui.on_open_changelog(bind_url(
         "https://github.com/KHWLGH/Raptim/blob/main/CHANGELOG.md",
     ));
-    let copy_text = |ui: &SettingsWindow, text: String, ok_message: &'static str| {
-        match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-            Ok(()) => ui.set_status(ok_message.into()),
-            Err(error) => ui.set_status(format!("复制失败：{error}").into()),
-        }
-    };
+    let copy_text =
+        |ui: &SettingsWindow, text: String, ok_zh: &'static str, ok_en: &'static str| {
+            match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                Ok(()) => ui.set_status(raptim::i18n::t(ok_zh, ok_en).into()),
+                Err(error) => ui.set_status(
+                    format!("{}: {error}", raptim::i18n::t("复制失败", "Copy failed")).into(),
+                ),
+            }
+        };
     let env_ui = settings_ui.as_weak();
     settings_ui.on_copy_env_info(move || {
         if let Some(ui) = env_ui.upgrade() {
-            copy_text(&ui, environment_summary(), "已复制环境信息");
+            copy_text(
+                &ui,
+                environment_summary(),
+                "已复制环境信息",
+                "Environment info copied",
+            );
         }
     });
     let license_ui = settings_ui.as_weak();
     settings_ui.on_copy_license(move || {
         if let Some(ui) = license_ui.upgrade() {
-            copy_text(&ui, LICENSE_TEXT.to_string(), "已复制 GPL-3.0 许可证全文");
+            copy_text(
+                &ui,
+                LICENSE_TEXT.to_string(),
+                "已复制 GPL-3.0 许可证全文",
+                "GPL-3.0 license copied",
+            );
         }
     });
     bind!(settings_ui, on_record_hotkey, |s| {

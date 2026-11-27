@@ -165,7 +165,13 @@ impl App {
                     if session.window.get_target().as_str() != requested_target {
                         session.icon_attempted = false;
                         session.window.set_saving(false);
-                        session.window.set_error("目标已更改，请重新保存".into());
+                        session.window.set_error(
+                            raptim::i18n::t(
+                                "目标已更改，请重新保存",
+                                "Target changed; please save again",
+                            )
+                            .into(),
+                        );
                         self.saving_editor = false;
                         return;
                     }
@@ -209,7 +215,10 @@ impl App {
                     return;
                 }
                 if new_icon.is_empty() {
-                    self.status("无法从目标提取图标，保留当前图标");
+                    self.status(raptim::i18n::t(
+                        "无法从目标提取图标，保留当前图标",
+                        "Could not extract icon from target; kept existing icon",
+                    ));
                     return;
                 }
                 let usable = self
@@ -219,7 +228,7 @@ impl App {
                     .is_some_and(|e| e.target.duplicate_key() == key && e.icon == old_icon);
                 if usable && self.replace_icon(id, new_icon) {
                     self.update_visible_icons();
-                    self.status("图标缓存已刷新");
+                    self.status(raptim::i18n::t("图标缓存已刷新", "Icon cache refreshed"));
                 }
             }
             AppEvent::FilesReady(result) => {
@@ -238,10 +247,16 @@ impl App {
                 });
                 match outcome {
                     Ok((added, duplicates)) => {
-                        self.status(format!("已添加 {added} 项，跳过 {duplicates} 项重复目标"));
+                        self.status(if raptim::i18n::is_en() {
+                            format!("Added {added} item(s), skipped {duplicates} duplicate(s)")
+                        } else {
+                            format!("已添加 {added} 项，跳过 {duplicates} 项重复目标")
+                        });
                         self.report_refresh();
                     }
-                    Err(e) => self.status(format!("未添加：{e}")),
+                    Err(e) => {
+                        self.status(format!("{}: {e}", raptim::i18n::t("未添加", "Not added")))
+                    }
                 }
             }
             AppEvent::FileSelected { kind, value } => {

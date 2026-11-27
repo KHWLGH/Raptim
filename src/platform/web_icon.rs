@@ -26,7 +26,11 @@ const TOUCH_ICON_EDGE: u32 = 180;
 /// How long one address may keep a background slot before the lookup is abandoned.
 const ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 /// A server that refuses unknown clients just gets the same answer as one that is not there.
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Raptim/0.0 favicon";
+const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Raptim/",
+    env!("CARGO_PKG_VERSION"),
+    " favicon"
+);
 
 struct Handle(*mut c_void);
 impl Drop for Handle {

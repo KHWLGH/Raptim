@@ -304,7 +304,14 @@ fn new_paint(scale: f32, dark: bool) -> Paint {
             foreground: COLORREF(if dark { 0xf4f4f4 } else { 0x242424 }),
             muted: COLORREF(if dark { 0x888888 } else { 0xa0a0a0 }),
             stroke: COLORREF(if dark { 0x505050 } else { 0xd0d0d0 }),
-            font: font(w!("Microsoft YaHei UI"), 13),
+            font: font(
+                if crate::i18n::is_en() {
+                    w!("Segoe UI")
+                } else {
+                    w!("Microsoft YaHei UI")
+                },
+                13,
+            ),
             icons: font(w!("Segoe Fluent Icons"), 16),
         }
     }

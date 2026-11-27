@@ -38,7 +38,11 @@ impl App {
                 .iter()
                 .find(|c| c.id == id)
                 .cloned()
-                .ok_or_else(|| Error::Invalid("分类已不存在".into()))
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        raptim::i18n::t("分类已不存在", "Category no longer exists").into(),
+                    )
+                })
                 .and_then(|c| self.store.save_collection(Some(id), c.parent_id, &name)),
             3 => self.store.save_collection(None, None, &name),
             _ => self.store.save_collection(None, Some(id), &name),
@@ -151,7 +155,10 @@ impl App {
             return;
         }
         if self.editor.is_some() {
-            self.status("请先完成项目编辑");
+            self.status(raptim::i18n::t(
+                "请先完成项目编辑",
+                "Finish editing the item first",
+            ));
             return;
         }
         if !self.finish_inline() {
@@ -307,14 +314,25 @@ impl App {
             &self.data_dir,
             self.main.get_conversion_relative(),
         );
-        let summary = format!(
-            "已选 {} 个位置 · {} 个项目\n可转换 {} · 无需修改 {} · 跳过 {}",
-            self.scope_selection.len(),
-            preview.selected.len(),
-            preview.entries.len(),
-            preview.unchanged,
-            preview.skipped.len()
-        );
+        let summary = if raptim::i18n::is_en() {
+            format!(
+                "Selected {} scope(s) · {} item(s)\nConvertible {} · Unchanged {} · Skipped {}",
+                self.scope_selection.len(),
+                preview.selected.len(),
+                preview.entries.len(),
+                preview.unchanged,
+                preview.skipped.len()
+            )
+        } else {
+            format!(
+                "已选 {} 个位置 · {} 个项目\n可转换 {} · 无需修改 {} · 跳过 {}",
+                self.scope_selection.len(),
+                preview.selected.len(),
+                preview.entries.len(),
+                preview.unchanged,
+                preview.skipped.len()
+            )
+        };
         self.main.set_conversion_summary(summary.into());
         self.main
             .set_conversion_details(preview.skipped.join("\n").into());
@@ -501,7 +519,13 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
         } else if let Some(d) = s.main.get_delete_destinations().row_data(index as usize) {
             s.store.migrate_delete(id, i64::from(d.id))
         } else {
-            Err(Error::Invalid("没有可用迁移目标，至少保留一个分组".into()))
+            Err(Error::Invalid(
+                raptim::i18n::t(
+                    "没有可用迁移目标，至少保留一个分组",
+                    "No destination available; keep at least one group",
+                )
+                .into(),
+            ))
         };
         match result {
             Ok(()) => {
@@ -513,7 +537,10 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
     });
     bind!(on_begin_conversion, |s, relative| {
         if s.editor.is_some() || !s.finish_inline() {
-            s.status("请先完成项目编辑");
+            s.status(raptim::i18n::t(
+                "请先完成项目编辑",
+                "Finish editing the item first",
+            ));
             return;
         }
         s.scope_selection = s.current_scope();
@@ -554,8 +581,13 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
     });
     bind!(on_apply_conversion, |s| {
         if s.importing || s.editor.is_some() {
-            s.main
-                .set_conversion_summary("请先完成收录或项目编辑".into());
+            s.main.set_conversion_summary(
+                raptim::i18n::t(
+                    "请先完成收录或项目编辑",
+                    "Finish importing or editing first",
+                )
+                .into(),
+            );
             return;
         }
         let old = s.conversion_preview.clone();
@@ -565,8 +597,13 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
         }
         s.update_conversion();
         if old != s.conversion_preview {
-            s.main
-                .set_conversion_summary("数据已变化，预览已更新，请核对后重新转换".into());
+            s.main.set_conversion_summary(
+                raptim::i18n::t(
+                    "数据已变化，预览已更新，请核对后重新转换",
+                    "Data changed and preview updated; review before converting",
+                )
+                .into(),
+            );
             return;
         }
         if let Some(preview) = s.conversion_preview.clone() {
@@ -575,11 +612,19 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                     s.report_refresh();
                     s.update_conversion();
                     s.main.set_conversion_summary(
-                        format!(
-                            "已转换 {} 项，跳过 {} 项",
-                            preview.entries.len(),
-                            preview.skipped.len()
-                        )
+                        if raptim::i18n::is_en() {
+                            format!(
+                                "Converted {} item(s), skipped {} item(s)",
+                                preview.entries.len(),
+                                preview.skipped.len()
+                            )
+                        } else {
+                            format!(
+                                "已转换 {} 项，跳过 {} 项",
+                                preview.entries.len(),
+                                preview.skipped.len()
+                            )
+                        }
                         .into(),
                     );
                 }
@@ -631,7 +676,10 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
         match s.store.copy_to_collection(i64::from(id), i64::from(target)) {
             Ok(_) => {
                 s.report_refresh();
-                s.status("已复制到所选分类");
+                s.status(raptim::i18n::t(
+                    "已复制到所选分类",
+                    "Copied to selected category",
+                ));
             }
             Err(error) => s.status(error),
         }
@@ -660,7 +708,10 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                     // `show_relocate` still refuses kinds that have no path to re-point.
                     s.show_relocate(
                         i64::from(id),
-                        "重新定位会替换该项目指向的路径，参数、工作目录与窗口方式保持不变。",
+                        raptim::i18n::t(
+                            "重新定位会替换该项目指向的路径，参数、工作目录与窗口方式保持不变。",
+                            "Relocating replaces only the target path; arguments, working dir, and run mode stay unchanged.",
+                        ),
                         true,
                     );
                 }
@@ -699,7 +750,13 @@ pub(super) fn bind_ui_commands(app: &Rc<RefCell<App>>) {
                         let target = raptim::paths::resolve_for_shell(&e.target, &base);
                         let result = platform::desktop_shortcut(&e.name, &target);
                         let message = result
-                            .map(|path| format!("已创建：{}", path.display()))
+                            .map(|path| {
+                                format!(
+                                    "{}: {}",
+                                    raptim::i18n::t("已创建", "Created"),
+                                    path.display()
+                                )
+                            })
                             .unwrap_or_else(|e| e);
                         let _ = weak.upgrade_in_event_loop(move |ui| ui.set_status(message.into()));
                     });

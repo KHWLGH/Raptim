@@ -47,7 +47,9 @@ pub fn parse(value: &str) -> Result<Shortcut, String> {
             continue;
         }
         if key.is_some() {
-            return Err("只允许一个主按键".into());
+            return Err(
+                crate::i18n::t("只允许一个主按键", "Only one primary key is allowed.").into(),
+            );
         }
         let code = match upper.as_str() {
             "SPACE" | "空格" => {
@@ -137,26 +139,43 @@ pub fn parse(value: &str) -> Result<Shortcut, String> {
             _ if upper.starts_with("NUMPAD") => {
                 let digit = upper["NUMPAD".len()..].parse::<u32>().ok();
                 let Some(digit) = digit.filter(|d| *d <= 9) else {
-                    return Err("无效小键盘数字键".into());
+                    return Err(crate::i18n::t("无效小键盘数字键", "Invalid numpad digit.").into());
                 };
                 name = format!("Numpad{digit}");
                 0x60 + digit
             }
             _ if upper.starts_with('F') => {
-                let n = upper[1..].parse::<u32>().map_err(|_| "无效功能键")?;
+                let n = upper[1..]
+                    .parse::<u32>()
+                    .map_err(|_| crate::i18n::t("无效功能键", "Invalid function key."))?;
                 if !(1..=24).contains(&n) {
-                    return Err("功能键应为 F1–F24".into());
+                    return Err(crate::i18n::t(
+                        "功能键应为 F1–F24",
+                        "Function keys must be F1–F24.",
+                    )
+                    .into());
                 }
                 name = upper.clone();
                 0x6f + n
             }
-            _ => return Err("使用 Ctrl、Alt、Shift、Win 与常用按键或功能键组合".into()),
+            _ => {
+                return Err(crate::i18n::t(
+                    "使用 Ctrl、Alt、Shift、Win 与常用按键或功能键组合",
+                    "Combine Ctrl, Alt, Shift, or Win with a standard or function key.",
+                )
+                .into());
+            }
         };
         key = Some(code);
     }
-    let key = key.ok_or("请按下完整的组合键")?;
+    let key = key
+        .ok_or_else(|| crate::i18n::t("请按下完整的组合键", "Press a complete key combination."))?;
     if modifiers & (1 | 2 | 8) == 0 {
-        return Err("请至少包含 Ctrl、Alt 或 Win".into());
+        return Err(crate::i18n::t(
+            "请至少包含 Ctrl、Alt 或 Win",
+            "Include at least Ctrl, Alt, or Win.",
+        )
+        .into());
     }
     let mut parts = Vec::new();
     for (bit, label) in [(2, "Ctrl"), (1, "Alt"), (4, "Shift"), (8, "Win")] {

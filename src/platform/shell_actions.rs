@@ -163,7 +163,7 @@ pub fn create_shortcut_in(
         .collect();
     let mut safe = safe.trim().trim_end_matches('.').to_string();
     if safe.is_empty() {
-        safe = "Raptim 快捷方式".into();
+        safe = crate::i18n::t("Raptim 快捷方式", "Raptim Shortcut").into();
     }
     let stem = safe.split('.').next().unwrap_or("").to_ascii_uppercase();
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
@@ -195,7 +195,9 @@ pub fn create_shortcut_in(
                 Err(e) => Some(Err(e.to_string())),
             }
         })
-        .unwrap_or_else(|| Err("同名快捷方式过多".into()))?;
+        .unwrap_or_else(|| {
+            Err(crate::i18n::t("同名快捷方式过多", "Too many shortcuts with the same name").into())
+        })?;
     let result: Result<(), String> = (|| {
         if let Target::Url { url } = target {
             use std::io::Write;
@@ -307,7 +309,8 @@ unsafe extern "system" fn shell_proc(
 }
 pub fn shell_context_menu(window: &slint::Window, path: &Path) -> Result<(), String> {
     let _com = ComGuard::new()?;
-    let hwnd = native_handle(window).ok_or("窗口未就绪")?;
+    let hwnd =
+        native_handle(window).ok_or_else(|| crate::i18n::t("窗口未就绪", "Window is not ready"))?;
     unsafe {
         let mut pidl = std::ptr::null_mut();
         SHParseDisplayName(
@@ -348,7 +351,11 @@ pub fn shell_context_menu(window: &slint::Window, path: &Path) -> Result<(), Str
             )
             .as_bool()
             {
-                return Err("无法连接系统菜单".into());
+                return Err(crate::i18n::t(
+                    "无法连接系统菜单",
+                    "Failed to attach Windows context menu",
+                )
+                .into());
             }
             let (x, y) = cursor();
             let _ = SetForegroundWindow(hwnd);

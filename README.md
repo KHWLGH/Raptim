@@ -6,6 +6,8 @@
 
 **一款面向 Windows 的轻量本地启动器**
 
+**简体中文** | [English](README.en.md)
+
 [![License](https://img.shields.io/badge/license-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim/stargazers)
 [![Issues](https://img.shields.io/github/issues/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim/issues)
@@ -28,7 +30,95 @@ Raptim 可以把常用的程序、文件、文件夹、网址和系统应用集�
 
 程序使用 **Rust**、**Slint** 和内置 **SQLite** 原生构建，不依赖 WebView 或外部运行库，也不做后台全盘扫描。所有配置、分组和图标都离线保存在本地目录里，只在添加或刷新网址时联网获取网站图标。
 
-> 当前处于开发阶段（`0.0.0`），界面与文档以简体中文为主。
+> 当前版本 `0.1.0`，支持 **简体中文** 与 **English** 双语界面及文档（首次启动自动匹配 Windows 系统语言，也可在「设置 → 常规 → 界面语言」中实时切换）。
+
+## 界面预览
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/previews/overview-dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/previews/overview-light.png" />
+    <img src="docs/previews/overview-light.png" alt="Raptim 界面总览" width="100%" />
+  </picture>
+</p>
+
+<p align="center">
+  <sub>主窗口网格、快速搜索、项目编辑与设置界面总览（以上截图随 GitHub 浅色 / 深色主题自动切换）</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>主窗口 · 网格视图</strong><br />
+      <sub>一级分组栏、二级分类导航与多列项目网格</sub><br /><br />
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/main-grid.png" />
+        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/main-grid.png" />
+        <img src="docs/previews/light/main-grid.png" alt="主窗口网格视图" width="320" />
+      </picture>
+    </td>
+    <td width="50%" align="center">
+      <strong>主窗口 · 快速搜索</strong><br />
+      <sub>支持全部 / 分组 / 分类范围与中文全拼、首字母检索</sub><br /><br />
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/main-search.png" />
+        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/main-search.png" />
+        <img src="docs/previews/light/main-search.png" alt="主窗口搜索浮层" width="320" />
+      </picture>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>扫描导入已安装软件</strong><br />
+      <sub>自动识别开始菜单与系统应用，支持关键字筛选批量导入</sub><br /><br />
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/main-discover.png" />
+        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/main-discover.png" />
+        <img src="docs/previews/light/main-discover.png" alt="扫描导入已安装软件" width="320" />
+      </picture>
+    </td>
+    <td width="50%" align="center">
+      <strong>项目编辑表单</strong><br />
+      <sub>支持程序、文件、文件夹、网址、快捷方式与 UWP 应用</sub><br /><br />
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/editor-program.png" />
+        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/editor-program.png" />
+        <img src="docs/previews/light/editor-program.png" alt="项目编辑窗口" width="360" />
+      </picture>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>设置 · 呼出与贴边收纳</strong><br />
+      <sub>全局热键录制、贴边自动隐藏、露边宽度与始终置顶</sub><br /><br />
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/settings-summon.png" />
+        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/settings-summon.png" />
+        <img src="docs/previews/light/settings-summon.png" alt="设置呼出与隐藏页" width="420" />
+      </picture>
+    </td>
+    <td width="50%" align="center">
+      <strong>设置 · 游戏勿扰保护</strong><br />
+      <sub>全屏自动免打扰、临时旁路开关与严格保护程序列表</sub><br /><br />
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/settings-protection.png" />
+        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/settings-protection.png" />
+        <img src="docs/previews/light/settings-protection.png" alt="设置游戏勿扰页" width="420" />
+      </picture>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary>查看深色主题总览</summary>
+
+<p align="center">
+  <img src="docs/previews/overview-dark.png" alt="Raptim 深色主题界面总览" width="100%" />
+</p>
+
+</details>
+
+> 如需本地无头生成全部 21 个界面（含批量整理、路径转换、失效检查及图库页），可运行 `powershell -File scripts/preview.ps1 -Preset all`，详见[界面预览生成工具](docs/DEVELOPMENT.md#界面预览生成工具)。
 
 ## 技术栈与选型原因
 
@@ -49,7 +139,7 @@ Raptim 可以把常用的程序、文件、文件夹、网址和系统应用集�
 - **导入与批量整理**：支持拖入本地文件和浏览器网址，也能扫描开始菜单和已安装应用批量导入；提供多选移动、复制、移除，失效项目巡检与重定位，以及相对/绝对路径批量转换。
 - **贴边收纳与随时呼出**：窗口可停靠在屏幕左、右或上边缘自动收起，鼠标贴边、全局热键（默认 `Ctrl+Alt+Space`）或托盘点击都能呼出；支持调节露边宽度、收起延迟、失焦隐藏、窗口置顶与开机静默启动。
 - **游戏勿扰**：自动识别全屏游戏或演示场景，也可手动添加严格保护程序列表，游戏期间自动拦截热键和鼠标贴边弹出；需要时能在托盘菜单中临时暂停。
-- **本地存储与迁移**：配置、分组和图标全部保存在程序同级目录的 `raptim.db` 中，支持 JSON 导出与恢复，也能通过 `--data-dir` 指定独立数据目录隔离多套配置。
+- **本地存储与双语界面**：配置、分组和图标全部保存在程序同级目录的 `raptim.db` 中，支持 JSON 导出与恢复，也能通过 `--data-dir` 指定独立数据目录隔离多套配置；内置中英文界面与自动系统语言匹配。
 
 ## 快速开始
 
@@ -88,7 +178,7 @@ cargo run --release --locked
 | [技术架构](docs/ARCHITECTURE.md) | 模块划分、事件模型、SQLite 存储结构、防打扰状态机与窗口边界 |
 | [开发与构建](docs/DEVELOPMENT.md) | 环境要求、编译配置、无头验证脚本、测试边界与更新日志流程 |
 | [性能基准与边界](docs/PERFORMANCE.md) | 存储与启动实测数据、图标缓存策略及 DWM 合成器已知边界 |
-| [更新日志](CHANGELOG.md) | 版本发布索引与当前未发布改动记录（[Unreleased 草稿](changelog/unreleased/zh-CN.md)） |
+| [更新日志](CHANGELOG.md) | 版本发布索引与各版本变更记录（最新 [0.1.0](changelog/0.1.0/zh-CN.md) · [English](changelog/0.1.0/en-US.md)） |
 | [许可证 (GPL-3.0-only)](LICENSE) · [第三方组件](THIRD_PARTY_NOTICES.md) | GNU GPLv3 协议全文、直接依赖许可核查与内置资产归属 |
 
 ## 开发验证

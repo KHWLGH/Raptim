@@ -1,4 +1,4 @@
-← 返回 [README](../README.md)
+← 返回 [README](../README.md) · **简体中文** | [English](en/DEVELOPMENT.md)
 
 # 开发与构建
 
@@ -7,6 +7,7 @@
 - [环境要求](#环境要求)
 - [构建与运行](#构建与运行)
 - [质量检查与验证门禁](#质量检查与验证门禁)
+- [界面预览生成工具](#界面预览生成工具)
 - [测试与回归边界](#测试与回归边界)
 - [提交与协作规范](#提交与协作规范)
 - [版本与更新日志流程](#版本与更新日志流程)
@@ -59,6 +60,8 @@ powershell -File scripts/verify.ps1
 powershell -File scripts/verify.ps1 -Release
 ```
 
+> 若系统 PowerShell 执行策略禁止运行未签名本地脚本，请改用 `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1`。
+
 脚本按顺序执行以下四项检查，任一环节失败即中止：
 
 1. `cargo fmt --check`
@@ -75,6 +78,7 @@ powershell -File scripts/verify.ps1 -Release
 cargo test --lib --locked
 cargo test --lib --locked storage::
 cargo test --lib --locked menus::
+cargo test --lib --locked i18n::
 
 # 仅运行二进制入口内的单元测试
 cargo test --bin raptim --locked
@@ -91,6 +95,36 @@ cargo test --bin raptim --locked
 powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
 ```
 
+## 界面预览生成工具
+
+仓库提供完全离屏、不创建真实系统窗口也不抢占前台焦点的界面预览生成器（`examples/ui_preview/`，通过 Slint 软件渲染器直接渲染到内存像素缓冲）：
+
+```powershell
+# 生成默认精选场景（浅色 + 深色，2x DPI，带 Windows 11 圆角与阴影）及本地图库
+powershell -File scripts/preview.ps1
+
+# 生成全部 21 个场景（含所有浮层、编辑器与设置分页）；加 -Lang en 可渲染英文界面
+powershell -File scripts/preview.ps1 -Preset all -Theme both
+powershell -File scripts/preview.ps1 -Preset all -Lang en -Theme both
+
+# 使用展示卡片底色导出，或只渲染指定场景
+powershell -File scripts/preview.ps1 -Frame card -Scenes "main-grid,main-search,settings-about"
+
+# 基于已有数据目录或导出 JSON 渲染真实项目列表（不新建空库）
+powershell -File scripts/preview.ps1 -DataDir C:\Temp\RaptimTrial
+powershell -File scripts/preview.ps1 -ImportJson C:\Temp\raptim-export.json
+```
+
+也可直接通过 Cargo 运行并查看全部 CLI 参数与场景列表：
+
+```powershell
+cargo run --release --locked --example ui_preview -- --list --lang zh
+cargo run --release --locked --example ui_preview -- --help
+```
+
+- 默认输出目录为 `target/ui-previews`（不污染工作区 Git 状态），包含 `light/<scene>.png`、`dark/<scene>.png`、`overview-light.png` / `overview-dark.png`、`manifest.json` 与自包含图库页面 `index.html`（支持浅/深色切换、分组筛选、大图灯箱预览与路径/Markdown 一键复制）。
+- `scripts/preview.ps1` 保持纯 ASCII 编码并默认不自动打开浏览器，仅在显式传入 `-Open` 时打开 `index.html`。
+
 ## 测试与回归边界
 
 当前自动化测试聚焦于**核心纯逻辑与关键数据不变量**，不在 CI/常规提交中维护脆弱的界面坐标、像素色值或静态文案断言：
@@ -99,7 +133,7 @@ powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
   - `model` / `paths` / `storage`：目标校验、网址补全、相对路径往返、`dup_key` 统一查重、已含撞车库兼容打开、JSON 导出/恢复事务与设置校验。
   - `search`：排除文件路径、全拼/首字母/驼峰/多词匹配与增量更新。
   - `docking` / `windowing` / `policy` / `session`：停靠过伸几何、阻尼动画与失焦淡出曲线、物理更新矩形转换、保护决策优先级、轮询间隔与 `NoticeQueue` 合并规则。
-  - `menus`：五类菜单树命令号唯一性及与 `region()` 双向路由一致性。
+  - `menus` / `i18n`：五类双语菜单树命令号唯一性及与 `region()` 双向路由一致性；BCP-47 语言标签解析与无全局状态副作用的语言解析测试。
   - `gestures` / `diagnostics` / `platform` / `main`：180 ms/12 DIP 拖拽防误触、IME 组合保护、日志脱敏与按行半段截断、`.lnk`/`.url` 读写、网页图标标签解析与状态校验、`AppOption`/等待结果分类、字符搜索按键过滤等。
 - **需人工真机验收的边界**：
   - 真实浏览器（Edge / Chrome / Firefox 等）OLE 拖入交互与各种 URL 剪贴板格式。
@@ -119,7 +153,7 @@ powershell -File scripts/verify.ps1 -TargetDir C:\Temp\raptim-target -Jobs 1
 
 仓库遵循「单索引 + 分版本正文」的更新日志组织方式：
 
-- **日常开发**：只更新 [changelog/unreleased/zh-CN.md](../changelog/unreleased/zh-CN.md)，按 `新增`、`变更`、`修复`、`性能与维护` 四个小节记录用户可感知的变更及重大技术边界调整；正文中的仓库内链接以文件所在目录为基准（例如 `../../docs/USAGE.md`）。
+- **日常开发**：同时更新 [changelog/unreleased/zh-CN.md](../changelog/unreleased/zh-CN.md) 与 [changelog/unreleased/en-US.md](../changelog/unreleased/en-US.md)，按 `新增` / `Added`、`变更` / `Changed`、`修复` / `Fixed`、`性能与维护` / `Performance & Maintenance` 记录用户可感知的变更及重大技术边界调整；正文中的仓库内链接以文件所在目录为基准（例如 `../../docs/USAGE.md`）。
 - **准备正式版本**：
   1. 整理校对 `changelog/unreleased/zh-CN.md`，将其归档至 `changelog/<version>/zh-CN.md`（首行标题使用 `# <version> - YYYY-MM-DD`）。
   2. 在根目录 [CHANGELOG.md](../CHANGELOG.md) 的 `<!-- releases:start -->` 下方插入新版本入口并链接到归档文件，同时保留 `[Unreleased]` 入口并将 `changelog/unreleased/zh-CN.md` 重置为 `# Unreleased`。

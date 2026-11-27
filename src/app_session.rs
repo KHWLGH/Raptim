@@ -88,9 +88,13 @@ impl App {
                 }
                 Err(error) => {
                     session.drop_failed = true;
-                    session
-                        .window
-                        .set_error(format!("图片拖入不可用：{error}").into());
+                    session.window.set_error(
+                        format!(
+                            "{}: {error}",
+                            raptim::i18n::t("图片拖入不可用", "Image drop unavailable")
+                        )
+                        .into(),
+                    );
                 }
             }
         }
@@ -147,7 +151,10 @@ impl App {
             });
         }) {
             Ok(r) => self.external_drop = Some(r),
-            Err(e) => self.status(format!("外部拖入不可用：{e}")),
+            Err(e) => self.status(format!(
+                "{}: {e}",
+                raptim::i18n::t("外部拖入不可用", "External drop unavailable")
+            )),
         }
     }
 
@@ -165,7 +172,10 @@ impl App {
         match drop_data {
             raptim::importing::ExternalDrop::Files(paths) => {
                 if paths.is_empty() {
-                    self.status("每次最多添加 500 项");
+                    self.status(raptim::i18n::t(
+                        "每次最多添加 500 项",
+                        "You can add at most 500 items at once",
+                    ));
                 } else if let Err(e) = self.queue_files(paths, destination) {
                     self.status(e);
                 }
@@ -175,7 +185,11 @@ impl App {
                     .and_then(|entries| self.store.add_entries(&entries))
                 {
                     Ok((added, duplicates)) => {
-                        self.status(format!("已添加 {added} 项，跳过 {duplicates} 项重复目标"));
+                        self.status(if raptim::i18n::is_en() {
+                            format!("Added {added} item(s), skipped {duplicates} duplicate(s)")
+                        } else {
+                            format!("已添加 {added} 项，跳过 {duplicates} 项重复目标")
+                        });
                         self.report_refresh();
                         let wanted: Vec<_> = self
                             .entries
@@ -734,7 +748,13 @@ impl App {
             return;
         }
         if self.editor.is_some() || self.importing || self.file_dialog_open {
-            self.main.set_batch_error("请先完成编辑或收录".into());
+            self.main.set_batch_error(
+                raptim::i18n::t(
+                    "请先完成编辑或收录",
+                    "Finish editing or importing items first",
+                )
+                .into(),
+            );
             return;
         }
         let ids: Vec<_> = self
@@ -743,7 +763,13 @@ impl App {
             .filter(|id| self.browsing.selected.contains(id))
             .collect();
         if ids.len() != self.browsing.selected.len() {
-            self.main.set_batch_error("项目已变化，请重新选择".into());
+            self.main.set_batch_error(
+                raptim::i18n::t(
+                    "项目已变化，请重新选择",
+                    "Items changed; please select again",
+                )
+                .into(),
+            );
             return;
         }
         let dest = (action != 2).then_some(i64::from(destination));
@@ -754,7 +780,11 @@ impl App {
                 self.report_refresh();
                 self.update_selection();
                 self.main.invoke_focus_browser();
-                self.status(format!("已处理 {} 项", ids.len()));
+                self.status(if raptim::i18n::is_en() {
+                    format!("Processed {} item(s)", ids.len())
+                } else {
+                    format!("已处理 {} 项", ids.len())
+                });
             }
             Err(e) => self.main.set_batch_error(e.to_string().into()),
         }

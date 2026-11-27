@@ -4,16 +4,35 @@ use std::path::PathBuf;
 
 pub fn file_entries(paths: Vec<(PathBuf, i64)>) -> Result<Vec<Entry>> {
     if paths.len() > 500 {
-        return Err(Error::Invalid("每次最多添加 500 项".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "每次最多添加 500 项",
+                "You can add at most 500 items at once.",
+            )
+            .into(),
+        ));
     }
     paths
         .into_iter()
         .map(|(path, collection_id)| {
-            let metadata = std::fs::metadata(&path)
-                .map_err(|e| Error::Invalid(format!("无法读取 {}：{e}", path.display())))?;
+            let metadata = std::fs::metadata(&path).map_err(|e| {
+                Error::Invalid(format!(
+                    "{}{}：{e}",
+                    crate::i18n::t("无法读取 ", "Cannot read "),
+                    path.display()
+                ))
+            })?;
             let value = path
                 .to_str()
-                .ok_or_else(|| Error::Invalid("路径包含无法表示的字符".into()))?
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        crate::i18n::t(
+                            "路径包含无法表示的字符",
+                            "Path contains unsupported characters.",
+                        )
+                        .into(),
+                    )
+                })?
                 .to_string();
             let extension = path
                 .extension()
@@ -129,7 +148,9 @@ pub enum ExternalDrop {
 
 pub fn url_entries(text: &str, collection_id: i64) -> Result<Vec<Entry>> {
     if text.len() > 1024 * 1024 {
-        return Err(Error::Invalid("拖入文本过长".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t("拖入文本过长", "Dropped text is too large.").into(),
+        ));
     }
     let lines: Vec<_> = text
         .lines()
@@ -159,11 +180,21 @@ pub fn url_entries(text: &str, collection_id: i64) -> Result<Vec<Entry>> {
     }
     if entries.is_empty() {
         return Err(Error::Invalid(
-            "请拖入网址，可省略 https:// 直接写 example.com".into(),
+            crate::i18n::t(
+                "请拖入网址，可省略 https:// 直接写 example.com",
+                "Drop a URL (you can omit https://, e.g. example.com).",
+            )
+            .into(),
         ));
     }
     if entries.len() > 500 {
-        return Err(Error::Invalid("每次最多添加 500 项".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "每次最多添加 500 项",
+                "You can add at most 500 items at once.",
+            )
+            .into(),
+        ));
     }
     Ok(entries)
 }

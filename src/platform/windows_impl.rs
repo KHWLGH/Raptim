@@ -214,12 +214,25 @@ pub fn launch(target: &Target) -> Result<(), LaunchError> {
     target
         .validate()
         .map_err(|e| LaunchError::Invalid(e.to_string()))?;
-    let _com = ComGuard::new().map_err(|e| LaunchError::Other(format!("COM 初始化失败：{e}")))?;
+    let _com = ComGuard::new().map_err(|e| {
+        LaunchError::Other(format!(
+            "{}{e}",
+            crate::i18n::t("COM 初始化失败：", "COM initialization failed: ")
+        ))
+    })?;
     unsafe {
         if let Target::App { aumid } = target {
             let manager: IApplicationActivationManager =
                 CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)
-                    .map_err(|e| LaunchError::Other(format!("无法创建应用激活器：{e}")))?;
+                    .map_err(|e| {
+                        LaunchError::Other(format!(
+                            "{}{e}",
+                            crate::i18n::t(
+                                "无法创建应用激活器：",
+                                "Failed to create app activator: "
+                            )
+                        ))
+                    })?;
             let app = wide(aumid);
             // ActivateApplication reports catalog problems as facility-bearing HRESULTs whose
             // low word collides with unrelated Win32 codes, so classify it as its own case.
@@ -1260,18 +1273,30 @@ pub fn reveal_file(path: &Path) -> Result<(), String> {
     let _com = ComGuard::new()?;
     let path = crate::paths::normal_path(path);
     if !path.exists() {
-        return Err(format!("目标已不存在：{}", path.display()));
+        return Err(format!(
+            "{}{}",
+            crate::i18n::t("目标已不存在：", "Target no longer exists: "),
+            path.display()
+        ));
     }
     unsafe {
         let name = wide(&path.to_string_lossy());
         let pidl = ILCreateFromPathW(PCWSTR(name.as_ptr()));
         if pidl.is_null() {
-            return Err("无法解析目标所在位置".into());
+            return Err(crate::i18n::t(
+                "无法解析目标所在位置",
+                "Failed to resolve target location",
+            )
+            .into());
         }
         // A fully qualified PIDL handles Unicode, commas, UNC and directories,
         // without Explorer command-line parsing or incorrectly opening the directory itself.
-        let result =
-            SHOpenFolderAndSelectItems(pidl, None, 0).map_err(|e| format!("无法打开所在位置：{e}"));
+        let result = SHOpenFolderAndSelectItems(pidl, None, 0).map_err(|e| {
+            format!(
+                "{}{e}",
+                crate::i18n::t("无法打开所在位置：", "Failed to open location: ")
+            )
+        });
         ILFree(Some(pidl));
         result
     }
@@ -1381,6 +1406,74 @@ pub fn resolve_dark_mode(theme_mode: u8) -> bool {
         2 => true,
         _ => system_dark_mode(),
     }
+}
+
+fn reg_string_tag(
+    subkey: PCWSTR,
+    name: PCWSTR,
+    flags: windows::Win32::System::Registry::REG_ROUTINE_FLAGS,
+) -> Option<String> {
+    use windows::Win32::System::Registry::*;
+    let mut size = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey,
+            name,
+            flags,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if status != ERROR_SUCCESS || size < 2 {
+        return None;
+    }
+    let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+    let mut read = size;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey,
+            name,
+            flags,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut read),
+        )
+    };
+    if status != ERROR_SUCCESS || read < 2 {
+        return None;
+    }
+    let len = (read as usize / 2).min(buf.len());
+    let first = buf[..len].split(|&c| c == 0).next().unwrap_or(&[]);
+    let text = String::from_utf16_lossy(first).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+pub fn system_locale() -> crate::i18n::Locale {
+    use windows::Win32::System::Registry::{RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ};
+    let tag = reg_string_tag(
+        w!("Control Panel\\Desktop"),
+        w!("PreferredUILanguages"),
+        RRF_RT_REG_MULTI_SZ,
+    )
+    .or_else(|| {
+        reg_string_tag(
+            w!("Control Panel\\International\\UserProfile"),
+            w!("Languages"),
+            RRF_RT_REG_MULTI_SZ,
+        )
+    })
+    .or_else(|| {
+        reg_string_tag(
+            w!("Control Panel\\International"),
+            w!("LocaleName"),
+            RRF_RT_REG_SZ,
+        )
+    });
+    tag.as_deref()
+        .map_or(crate::i18n::Locale::EnUs, crate::i18n::parse_locale_tag)
 }
 
 pub fn apply_window_theme(window: &slint::Window, theme_mode: u8, force_redraw: bool) -> bool {

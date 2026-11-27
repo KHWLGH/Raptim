@@ -1,7 +1,7 @@
 export { Palette } from "std-widgets.slint";
-export { Theme } from "chrome.slint";
+export { Theme, I18n } from "chrome.slint";
 import { Button, LineEdit, TextEdit, ComboBox, CheckBox, Switch, Slider, SpinBox, ListView, ScrollView, Palette, AboutSlint } from "std-widgets.slint";
-import { AppWindow, TitleBar, IconButton, Theme, SettingRow, SettingsSelect, StepperButton, HintSurface } from "chrome.slint";
+import { AppWindow, TitleBar, IconButton, Theme, I18n, SettingRow, SettingsSelect, StepperButton, HintSurface } from "chrome.slint";
 
 export struct NavItem { id: int, name: string }
 export struct ScopeNode { id: int, parent: int, label: string, depth: int, state: int }
@@ -22,7 +22,7 @@ component PixelWidthInput inherits Rectangle {
     border-color: invalid ? #c42b1c : input.has-focus ? Palette.accent-background : Theme.stroke;
     forward-focus: input;
     accessible-role: text-input;
-    accessible-label: "露边宽度（物理像素）";
+    accessible-label: I18n.en ? "Edge strip width (physical pixels)" : "露边宽度（物理像素）";
     accessible-enabled: enabled;
     accessible-value <=> input.text;
     accessible-action-set-value(v) => { input.text = v; root.validate(); }
@@ -39,7 +39,7 @@ component PixelWidthInput inherits Rectangle {
         edited => { root.validate(); }
         changed has-focus => { if !self.has-focus { self.text = root.value; root.invalid = false; } }
     }
-    Tooltip { HintSurface { title: root.invalid ? "请输入 1–12 的整数" : "1–12 个物理像素"; } }
+    Tooltip { HintSurface { title: root.invalid ? (I18n.en ? "Enter an integer from 1 to 12" : "请输入 1–12 的整数") : (I18n.en ? "1–12 physical pixels" : "1–12 个物理像素"); } }
 }
 
 component Tile inherits Rectangle {
@@ -75,7 +75,7 @@ component Tile inherits Rectangle {
     border-width: root.keyboard-focused && root.selected && !root.search-result ? 1.5px : 0px;
     border-color: Palette.accent-background;
     accessible-role: button;
-    accessible-label: root.batch-mode ? (item.checked ? "已选 " : "未选 ") + item.name : item.name;
+    accessible-label: root.batch-mode ? (item.checked ? (I18n.en ? "Selected " : "已选 ") : (I18n.en ? "Unselected " : "未选 ")) + item.name : item.name;
     accessible-action-default => { root.launch(); }
     forward-focus: key;
     drop := DropArea {
@@ -431,23 +431,23 @@ export component MainWindow inherits AppWindow {
         Rectangle { height: 44px;
             TouchArea { pointer-event(event) => { if event.kind == PointerEventKind.down && event.button == PointerEventButton.left { root.drag-start(); } } }
             HorizontalLayout { padding-left: 10px; padding-right: 6px; padding-top: 6px; padding-bottom: 6px; spacing: 2px;
-            if !root.search-open: IconButton { icon: @image-url("icons/search.svg"); label: "搜索 · Ctrl+F"; clicked => { root.focus-search(); } }
+            if !root.search-open: IconButton { icon: @image-url("icons/search.svg"); label: I18n.en ? "Search · Ctrl+F" : "搜索 · Ctrl+F"; clicked => { root.focus-search(); } }
             Rectangle { visible: root.search-open; horizontal-stretch: 1; min-width: root.search-open ? 230px : 0px;
                 HorizontalLayout { spacing: 4px;
-                    ComboBox { width: 108px; model: ["全部", "当前分组", "当前分类"]; current-index <=> root.search-scope; accessible-label: "搜索范围"; selected => { root.search-scope-changed(); } }
-                    search-input := LineEdit { min-width: 72px; text <=> root.query; placeholder-text: "搜索项目"; accessible-label: "搜索已收录项目"; edited(value) => { root.search(value); } accepted => { if !root.composing { root.submit-search(); } } }
-                    IconButton { icon: @image-url("icons/close.svg"); label: root.query == "" ? "关闭搜索" : "清空搜索"; clicked => { if root.query == "" { root.dismiss-search(); } else { root.clear-search(); } } }
+                    ComboBox { width: 108px; model: I18n.en ? ["All", "Group", "Category"] : ["全部", "当前分组", "当前分类"]; current-index <=> root.search-scope; accessible-label: I18n.en ? "Search scope" : "搜索范围"; selected => { root.search-scope-changed(); } }
+                    search-input := LineEdit { min-width: 72px; text <=> root.query; placeholder-text: I18n.en ? "Search items" : "搜索项目"; accessible-label: I18n.en ? "Search saved items" : "搜索已收录项目"; edited(value) => { root.search(value); } accepted => { if !root.composing { root.submit-search(); } } }
+                    IconButton { icon: @image-url("icons/close.svg"); label: root.query == "" ? (I18n.en ? "Close search" : "关闭搜索") : (I18n.en ? "Clear search" : "清空搜索"); clicked => { if root.query == "" { root.dismiss-search(); } else { root.clear-search(); } } }
                 }
             }
             if !root.search-open: Rectangle { horizontal-stretch: 1; }
             if !root.search-open: Rectangle { width: 32px;
-            IconButton { icon: @image-url("icons/add.svg"); label: "添加项目"; clicked => { root.add(); } }
+            IconButton { icon: @image-url("icons/add.svg"); label: I18n.en ? "Add item" : "添加项目"; clicked => { root.add(); } }
             }
             if !root.search-open: Rectangle { width: 32px;
-            IconButton { icon: @image-url("icons/pin.svg"); label: root.pinned ? "取消固定" : "临时固定"; checked: root.pinned; clicked => { root.pinned = !root.pinned; root.pin-changed(); } }
+            IconButton { icon: @image-url("icons/pin.svg"); label: root.pinned ? (I18n.en ? "Unpin" : "取消固定") : (I18n.en ? "Pin" : "临时固定"); checked: root.pinned; clicked => { root.pinned = !root.pinned; root.pin-changed(); } }
             }
-            IconButton { icon: @image-url("icons/more.svg"); label: "更多"; checked: root.more-open; clicked => { root.show-more(); } }
-            IconButton { icon: @image-url("icons/close.svg"); label: "关闭"; danger: true; clicked => { root.request-hide(); } }
+            IconButton { icon: @image-url("icons/more.svg"); label: I18n.en ? "More" : "更多"; checked: root.more-open; clicked => { root.show-more(); } }
+            IconButton { icon: @image-url("icons/close.svg"); label: I18n.en ? "Close" : "关闭"; danger: true; clicked => { root.request-hide(); } }
             }
         }
         // Groups share the title surface; categories occupy the vertical rail.
@@ -471,7 +471,7 @@ export component MainWindow inherits AppWindow {
                     }
                     }
                 }
-                IconButton { icon: @image-url("icons/add.svg"); label: "新建分组"; clicked => { root.collection-action(0,0,0); } }
+                IconButton { icon: @image-url("icons/add.svg"); label: I18n.en ? "New group" : "新建分组"; clicked => { root.collection-action(0,0,0); } }
             }
         }
         Rectangle { height: 1px; background: Theme.stroke; }
@@ -497,7 +497,7 @@ export component MainWindow inherits AppWindow {
                             }
                         }
                     }
-                    IconButton { icon: @image-url("icons/add.svg"); label: "新建子分类"; clicked => { root.collection-action(0,1,0); } }
+                    IconButton { icon: @image-url("icons/add.svg"); label: I18n.en ? "New category" : "新建子分类"; clicked => { root.collection-action(0,1,0); } }
                 }
             }
             Rectangle { background: Theme.surface;
@@ -532,11 +532,11 @@ export component MainWindow inherits AppWindow {
                             }
                         }
                             if root.items.length == 0: VerticalLayout { width: parent.width; height: 220px; alignment: center; spacing: 12px;
-                                Text { text: "还没有项目"; color: Palette.alternate-foreground; horizontal-alignment: center; }
-                                Text { text: "也可以直接拖入文件、快捷方式或网址"; color: Palette.alternate-foreground; font-size: 12px; horizontal-alignment: center; }
+                                Text { text: I18n.en ? "No items yet" : "还没有项目"; color: Palette.alternate-foreground; horizontal-alignment: center; }
+                                Text { text: I18n.en ? "You can also drop files, shortcuts, or URLs here" : "也可以直接拖入文件、快捷方式或网址"; color: Palette.alternate-foreground; font-size: 12px; horizontal-alignment: center; }
                                 HorizontalLayout { alignment: center; spacing: 8px;
-                                    Button { text: "添加项目"; clicked => { root.add(); } }
-                                    Button { text: "扫描导入"; clicked => { root.discover-apps(); } }
+                                    Button { text: I18n.en ? "Add item" : "添加项目"; clicked => { root.add(); } }
+                                    Button { text: I18n.en ? "Scan & import" : "扫描导入"; clicked => { root.discover-apps(); } }
                                 }
                             }
                     }
@@ -546,7 +546,7 @@ export component MainWindow inherits AppWindow {
         if root.status != "": Rectangle { height: 36px; background: Theme.navigation;
             HorizontalLayout { padding-left: 12px; spacing: 8px;
                 Text { text:root.status; color:Palette.alternate-foreground; font-size:12px; overflow:elide; vertical-alignment:center; }
-                IconButton { icon: @image-url("icons/close.svg"); label: "关闭提示"; clicked => { root.status = ""; } }
+                IconButton { icon: @image-url("icons/close.svg"); label: I18n.en ? "Dismiss" : "关闭提示"; clicked => { root.status = ""; } }
             }
             Tooltip { HintSurface { title: root.status; } }
         }
@@ -560,14 +560,14 @@ export component MainWindow inherits AppWindow {
             width: 360px; height: 214px;
             background: Theme.surface; border-width: 1px; border-color: Theme.stroke; border-radius: 8px;
             VerticalLayout { padding: 20px; spacing: 12px;
-                Text { text: root.inline-kind == 3 ? "新建分组" : root.inline-kind == 4 ? "新建子分类" : "修改名称"; font-weight: 600; color: Palette.foreground; }
-                Text { text: "名称"; color: Palette.alternate-foreground; }
-                inline-name := LineEdit { text <=> root.inline-text; accessible-label: "名称";
+                Text { text: root.inline-kind == 3 ? (I18n.en ? "New group" : "新建分组") : root.inline-kind == 4 ? (I18n.en ? "New category" : "新建子分类") : (I18n.en ? "Rename" : "修改名称"); font-weight: 600; color: Palette.foreground; }
+                Text { text: I18n.en ? "Name" : "名称"; color: Palette.alternate-foreground; }
+                inline-name := LineEdit { text <=> root.inline-text; accessible-label: I18n.en ? "Name" : "名称";
                     accepted => { if !root.composing { root.commit-name(); } } }
                 if root.inline-error != "": Text { text: root.inline-error; color: #c42b1c; wrap: word-wrap; }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.cancel-name(); } }
-                    Button { text: "确定"; primary: true; enabled: root.inline-text != ""; clicked => { root.commit-name(); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.cancel-name(); } }
+                    Button { text: I18n.en ? "OK" : "确定"; primary: true; enabled: root.inline-text != ""; clicked => { root.commit-name(); } }
                 }
             }
         }
@@ -578,7 +578,7 @@ export component MainWindow inherits AppWindow {
         Rectangle { x: 12px; y: 8px; width: parent.width - 24px; height: parent.height - (root.batch-mode ? 104px : 20px); background: Theme.surface; border-width: 1px; border-color: Theme.stroke; border-radius: 6px;
             TouchArea { }
             VerticalLayout { padding: 12px; spacing: 10px;
-                if root.results.length == 0: Text { text: root.query == "" ? "搜索全部已收录项目" : "没有匹配项目"; color: Palette.alternate-foreground; horizontal-alignment: center; }
+                if root.results.length == 0: Text { text: root.query == "" ? (I18n.en ? "Search all saved items" : "搜索全部已收录项目") : (I18n.en ? "No matching items" : "没有匹配项目"); color: Palette.alternate-foreground; horizontal-alignment: center; }
                 search-results := ListView {
                         for item in root.results: Tile { height: 64px; item: item; list-mode: true; search-result: true; batch-mode: root.batch-mode; destinations: root.destinations; double-click: root.double-click;
                             selected: root.selected-id == item.id;
@@ -603,24 +603,24 @@ export component MainWindow inherits AppWindow {
             // puts 全选 and 完成 exactly above 复制到… and 删除.
             HorizontalLayout { spacing: 4px;
                 Rectangle { horizontal-stretch: 1; min-width: 96px;
-                    Text { x: 0px; width: parent.width; height: parent.height; text: "已选 " + root.batch-count; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
+                    Text { x: 0px; width: parent.width; height: parent.height; text: (I18n.en ? "Selected: " : "已选 ") + root.batch-count; color: Palette.foreground; vertical-alignment: center; overflow: elide; }
                 }
                 Rectangle { horizontal-stretch: 1; min-width: 96px;
-                    Button { width: parent.width; height: parent.height; text: root.batch-all-selected ? "取消全选" : "全选"; clicked => { root.batch-all(); } }
+                    Button { width: parent.width; height: parent.height; text: root.batch-all-selected ? (I18n.en ? "Clear all" : "取消全选") : (I18n.en ? "Select all" : "全选"); clicked => { root.batch-all(); } }
                 }
                 Rectangle { horizontal-stretch: 1; min-width: 96px;
-                    Button { width: parent.width; height: parent.height; text: "完成"; clicked => { root.batch-cancel(); } }
+                    Button { width: parent.width; height: parent.height; text: I18n.en ? "Done" : "完成"; clicked => { root.batch-cancel(); } }
                 }
             }
             HorizontalLayout { spacing: 4px;
                 Rectangle { horizontal-stretch: 1; min-width: 96px;
-                    Button { width: parent.width; height: parent.height; text: "移动到…"; enabled: root.batch-count > 0; clicked => { root.batch-target(0); } }
+                    Button { width: parent.width; height: parent.height; text: I18n.en ? "Move to…" : "移动到…"; enabled: root.batch-count > 0; clicked => { root.batch-target(0); } }
                 }
                 Rectangle { horizontal-stretch: 1; min-width: 96px;
-                    Button { width: parent.width; height: parent.height; text: "复制到…"; enabled: root.batch-count > 0; clicked => { root.batch-target(1); } }
+                    Button { width: parent.width; height: parent.height; text: I18n.en ? "Copy to…" : "复制到…"; enabled: root.batch-count > 0; clicked => { root.batch-target(1); } }
                 }
                 Rectangle { horizontal-stretch: 1; min-width: 96px;
-                    Button { width: parent.width; height: parent.height; text: "删除"; enabled: root.batch-count > 0; clicked => { root.batch-error = ""; root.batch-confirm = true; } }
+                    Button { width: parent.width; height: parent.height; text: I18n.en ? "Delete" : "删除"; enabled: root.batch-count > 0; clicked => { root.batch-error = ""; root.batch-confirm = true; } }
                 }
             }
         }
@@ -633,7 +633,7 @@ export component MainWindow inherits AppWindow {
             x: 16px; y: 52px; width: parent.width - 32px; height: parent.height - 76px;
             background: Theme.surface; border-width: 1px; border-color: Theme.stroke; border-radius: 8px;
             VerticalLayout { padding: 14px; spacing: 10px;
-                Text { text: root.batch-action == 0 ? "移动到" : "复制到"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
+                Text { text: root.batch-action == 0 ? (I18n.en ? "Move to" : "移动到") : (I18n.en ? "Copy to" : "复制到"); font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 batch-tree := NavTree {
                     nodes: root.batch-nodes; selected: root.batch-destination; cursor: root.batch-tree-index;
                     pick(id) => { root.batch-node(id); }
@@ -642,8 +642,8 @@ export component MainWindow inherits AppWindow {
                 Text { text: root.batch-target-name; color: Palette.foreground; wrap: word-wrap; }
                 if root.batch-error != "": Text { text: root.batch-error; color: #c42b1c; wrap: word-wrap; }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.batch-target-open = false; root.focus-browser(); } }
-                    Button { text: root.batch-action == 0 ? "移动" : "复制"; primary: true; enabled: root.batch-destination != 0; clicked => { root.batch-execute(root.batch-action,root.batch-destination); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.batch-target-open = false; root.focus-browser(); } }
+                    Button { text: root.batch-action == 0 ? (I18n.en ? "Move" : "移动") : (I18n.en ? "Copy" : "复制"); primary: true; enabled: root.batch-destination != 0; clicked => { root.batch-execute(root.batch-action,root.batch-destination); } }
                 }
             }
         }
@@ -651,12 +651,12 @@ export component MainWindow inherits AppWindow {
     if root.batch-confirm: Rectangle { background: #0005; TouchArea { }
         Rectangle { x: 20px; y: (parent.height - self.height) / 2; width: parent.width - 40px; height: self.preferred-height; background: Theme.surface; border-radius: 8px;
             VerticalLayout { padding: 16px; spacing: 12px;
-                Text { text: "删除选中的 " + root.batch-count + " 个项目？"; color: Palette.foreground; }
-                Text { text: "只删除启动器记录，原文件保留。"; color: Palette.alternate-foreground; }
+                Text { text: I18n.en ? "Delete " + root.batch-count + (root.batch-count == 1 ? " selected item?" : " selected items?") : "删除选中的 " + root.batch-count + " 个项目？"; color: Palette.foreground; }
+                Text { text: I18n.en ? "Only launcher entries are removed; original files remain." : "只删除启动器记录，原文件保留。"; color: Palette.alternate-foreground; }
                 if root.batch-error != "": Text { text: root.batch-error; color: #c42b1c; wrap: word-wrap; }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.batch-confirm = false; root.focus-browser(); } }
-                    Button { text: "删除"; primary: true; clicked => { root.batch-execute(2,0); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.batch-confirm = false; root.focus-browser(); } }
+                    Button { text: I18n.en ? "Delete" : "删除"; primary: true; clicked => { root.batch-execute(2,0); } }
                 }
             }
         }
@@ -664,12 +664,12 @@ export component MainWindow inherits AppWindow {
     if root.relocate-open: Rectangle { background: #0005; TouchArea { }
         Rectangle { x: 20px; y: (parent.height - self.height) / 2; width: parent.width - 40px; height: self.preferred-height; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 16px; spacing: 12px;
-                Text { text: "重新定位「" + root.relocate-name + "」"; color: Palette.foreground; wrap: word-wrap; }
+                Text { text: I18n.en ? "Relocate \"" + root.relocate-name + "\"" : "重新定位「" + root.relocate-name + "」"; color: Palette.foreground; wrap: word-wrap; }
                 Text { text: root.relocate-target; color: Palette.alternate-foreground; wrap: word-wrap; font-size: 12px; }
                 Text { text: root.relocate-message; color: Palette.alternate-foreground; wrap: word-wrap; }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.relocate-open = false; root.focus-browser(); } }
-                    Button { text: "选择新目标"; clicked => { root.relocate(); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.relocate-open = false; root.focus-browser(); } }
+                    Button { text: I18n.en ? "Choose new target" : "选择新目标"; clicked => { root.relocate(); } }
                 }
             }
         }
@@ -677,8 +677,8 @@ export component MainWindow inherits AppWindow {
     if root.conversion-open: Rectangle { background: #0005; TouchArea { }
         Rectangle { x: 12px; y: 52px; width: parent.width - 24px; height: parent.height - 72px; background: Theme.surface; border-radius: 10px; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 16px; spacing: 12px;
-                Text { text: root.conversion-relative ? "转换为相对路径" : "转换为绝对路径"; font-size: 18px; font-weight: 600; color: Palette.foreground; }
-                HorizontalLayout { alignment: start; Button { text: "全选"; clicked => { root.scope-all(true); } } Button { text: "清空"; clicked => { root.scope-all(false); } } }
+                Text { text: root.conversion-relative ? (I18n.en ? "Convert to relative paths" : "转换为相对路径") : (I18n.en ? "Convert to absolute paths" : "转换为绝对路径"); font-size: 18px; font-weight: 600; color: Palette.foreground; }
+                HorizontalLayout { alignment: start; Button { text: I18n.en ? "Select all" : "全选"; clicked => { root.scope-all(true); } } Button { text: I18n.en ? "Clear" : "清空"; clicked => { root.scope-all(false); } } }
                 ScrollView { content-width: self.visible-width;
                     VerticalLayout { spacing: 4px; alignment: start;
                         for node in root.scopes: HorizontalLayout { height: 32px; padding-left: node.depth * 20px;
@@ -697,7 +697,7 @@ export component MainWindow inherits AppWindow {
                 }
                 Text { text: root.conversion-summary; wrap: word-wrap; color: Palette.foreground; }
                 if root.conversion-details != "": ScrollView { height: 70px; content-width: self.visible-width; Text { text: root.conversion-details; wrap: word-wrap; color: Palette.alternate-foreground; font-size: 12px; } }
-                HorizontalLayout { alignment: end; Button { text: "关闭"; clicked => { root.conversion-open = false; } } Button { text: "转换"; primary: true; enabled: root.scope-selected && !root.busy; clicked => { root.apply-conversion(); } } }
+                HorizontalLayout { alignment: end; Button { text: I18n.en ? "Close" : "关闭"; clicked => { root.conversion-open = false; } } Button { text: I18n.en ? "Convert" : "转换"; primary: true; enabled: root.scope-selected && !root.busy; clicked => { root.apply-conversion(); } } }
             }
         }
     }
@@ -716,15 +716,15 @@ export component MainWindow inherits AppWindow {
                 }
             }
             delete-form := VerticalLayout { padding: 20px; spacing: 14px;
-                Text { text: root.collection-delete ? (root.delete-is-group ? "删除分组？" : "删除分类？") : "删除项目？"; font-size: 18px; font-weight: 600; color: Palette.foreground; }
+                Text { text: root.collection-delete ? (root.delete-is-group ? (I18n.en ? "Delete group?" : "删除分组？") : (I18n.en ? "Delete category?" : "删除分类？")) : (I18n.en ? "Delete item?" : "删除项目？"); font-size: 18px; font-weight: 600; color: Palette.foreground; }
                 Text { text: root.delete-name; color: Palette.foreground; overflow: elide; font-weight: 600; }
-                Text { text: root.collection-delete ? (root.delete-has-content ? (root.delete-discard ? "项目和子分类将一并从 Raptim 移除，原文件不会被删除。" : "将内容迁移到下列位置，然后删除。") : "此位置没有内容，可以直接删除。") : "仅从 Raptim 移除，原文件不会被删除。"; wrap: word-wrap; color: Palette.alternate-foreground; }
-                if root.collection-delete && root.delete-has-content && !root.delete-discard: ComboBox { model: root.delete-names; current-index <=> root.delete-target; accessible-label: "内容迁移到"; }
-                if root.collection-delete && root.delete-has-content: CheckBox { text: "不迁移，直接删除其中的项目和子分类"; checked <=> root.delete-discard; }
+                Text { text: root.collection-delete ? (root.delete-has-content ? (root.delete-discard ? (I18n.en ? "Items and subcategories will be removed from Raptim. Original files will not be deleted." : "项目和子分类将一并从 Raptim 移除，原文件不会被删除。") : (I18n.en ? "Move contents to the destination below, then delete." : "将内容迁移到下列位置，然后删除。")) : (I18n.en ? "This container is empty and can be deleted directly." : "此位置没有内容，可以直接删除。")) : (I18n.en ? "Only removed from Raptim; original files will not be deleted." : "仅从 Raptim 移除，原文件不会被删除。"); wrap: word-wrap; color: Palette.alternate-foreground; }
+                if root.collection-delete && root.delete-has-content && !root.delete-discard: ComboBox { model: root.delete-names; current-index <=> root.delete-target; accessible-label: I18n.en ? "Move contents to" : "内容迁移到"; }
+                if root.collection-delete && root.delete-has-content: CheckBox { text: I18n.en ? "Delete items and subcategories without moving" : "不迁移，直接删除其中的项目和子分类"; checked <=> root.delete-discard; }
                 if root.inline-error != "": Text { text: root.inline-error; wrap: word-wrap; color: #c42b1c; }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.confirm-delete = false; root.collection-delete = false; } }
-                    Button { text: root.collection-delete && root.delete-has-content && !root.delete-discard ? "迁移并删除" : "删除"; primary: true; clicked => { if root.collection-delete { root.finish-delete(root.delete-target); } else { root.remove(root.selected-id); root.confirm-delete = false; } } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.confirm-delete = false; root.collection-delete = false; } }
+                    Button { text: root.collection-delete && root.delete-has-content && !root.delete-discard ? (I18n.en ? "Move & delete" : "迁移并删除") : (I18n.en ? "Delete" : "删除"); primary: true; clicked => { if root.collection-delete { root.finish-delete(root.delete-target); } else { root.remove(root.selected-id); root.confirm-delete = false; } } }
                 }
             }
         }
@@ -735,13 +735,13 @@ export component MainWindow inherits AppWindow {
             x: 16px; y: 48px; width: parent.width - 32px; height: parent.height - 68px;
             background: Theme.surface; border-width: 1px; border-color: Theme.stroke; border-radius: 8px;
             VerticalLayout { padding: 14px; spacing: 10px;
-                Text { text: "扫描导入已安装软件"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
-                Text { text: "导入目标：" + root.discover-target-name; color: Palette.alternate-foreground; font-size: 12px; overflow: elide; }
-                discover-filter-input := LineEdit { text <=> root.discover-filter; placeholder-text: "按名称或路径筛选"; accessible-label: "筛选软件"; changed text => { root.discover-refilter(); } }
+                Text { text: I18n.en ? "Scan & import installed apps" : "扫描导入已安装软件"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
+                Text { text: (I18n.en ? "Destination: " : "导入目标：") + root.discover-target-name; color: Palette.alternate-foreground; font-size: 12px; overflow: elide; }
+                discover-filter-input := LineEdit { text <=> root.discover-filter; placeholder-text: I18n.en ? "Filter by name or path" : "按名称或路径筛选"; accessible-label: I18n.en ? "Filter apps" : "筛选软件"; changed text => { root.discover-refilter(); } }
                 HorizontalLayout { spacing: 8px; alignment: start;
-                    Button { text: "全选"; enabled: !root.discover-loading && root.discover-items.length > 0; clicked => { root.discover-all(true); } }
-                    Button { text: "全不选"; enabled: !root.discover-loading && root.discover-items.length > 0; clicked => { root.discover-all(false); } }
-                    Text { text: root.discover-loading ? "正在扫描开始菜单与应用列表…" : "已选 " + root.discover-selected-count + " / " + root.discover-items.length; color: Palette.alternate-foreground; vertical-alignment: center; font-size: 12px; }
+                    Button { text: I18n.en ? "Select all" : "全选"; enabled: !root.discover-loading && root.discover-items.length > 0; clicked => { root.discover-all(true); } }
+                    Button { text: I18n.en ? "Select none" : "全不选"; enabled: !root.discover-loading && root.discover-items.length > 0; clicked => { root.discover-all(false); } }
+                    Text { text: root.discover-loading ? (I18n.en ? "Scanning Start Menu and installed apps…" : "正在扫描开始菜单与应用列表…") : (I18n.en ? "Selected " : "已选 ") + root.discover-selected-count + " / " + root.discover-items.length; color: Palette.alternate-foreground; vertical-alignment: center; font-size: 12px; }
                 }
                 ListView { vertical-stretch: 1;
                     for option in root.discover-items: Rectangle {
@@ -764,8 +764,8 @@ export component MainWindow inherits AppWindow {
                     }
                 }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.discover-open = false; root.focus-browser(); } }
-                    Button { text: "导入所选"; primary: true; enabled: !root.discover-loading && root.discover-selected-count > 0; clicked => { root.discover-import(); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.discover-open = false; root.focus-browser(); } }
+                    Button { text: I18n.en ? "Import selected" : "导入所选"; primary: true; enabled: !root.discover-loading && root.discover-selected-count > 0; clicked => { root.discover-import(); } }
                 }
             }
         }
@@ -775,8 +775,8 @@ export component MainWindow inherits AppWindow {
             x: 16px; y: 48px; width: parent.width - 32px; height: parent.height - 68px;
             background: Theme.surface; border-width: 1px; border-color: Theme.stroke; border-radius: 8px;
             VerticalLayout { padding: 14px; spacing: 10px;
-                Text { text: "失效项目检查"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
-                Text { text: root.broken-loading ? "正在检查本地路径与已安装应用…" : root.broken-items.length == 0 ? "所有本地路径与应用目标均有效。" : "发现 " + root.broken-items.length + " 个失效目标（未检查网页地址）："; color: Palette.alternate-foreground; font-size: 12px; wrap: word-wrap; }
+                Text { text: I18n.en ? "Broken item check" : "失效项目检查"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
+                Text { text: root.broken-loading ? (I18n.en ? "Checking local paths and installed apps…" : "正在检查本地路径与已安装应用…") : root.broken-items.length == 0 ? (I18n.en ? "All local paths and app targets are valid." : "所有本地路径与应用目标均有效。") : (I18n.en ? "Found " + root.broken-items.length + (root.broken-items.length == 1 ? " broken target (URLs skipped):" : " broken targets (URLs skipped):") : "发现 " + root.broken-items.length + " 个失效目标（未检查网页地址）："); color: Palette.alternate-foreground; font-size: 12px; wrap: word-wrap; }
                 ListView { vertical-stretch: 1;
                     for item in root.broken-items: Rectangle {
                         height: 68px;
@@ -789,9 +789,9 @@ export component MainWindow inherits AppWindow {
                                     Text { text: item.reason; color: #c42b1c; font-size: 11px; overflow: elide; }
                                 }
                                 HorizontalLayout { spacing: 4px; y: 12px; height: 32px;
-                                    if item.relocatable: Button { text: "重定位"; clicked => { root.broken-relocate(item.id); } }
-                                    Button { text: "编辑"; clicked => { root.broken-edit(item.id); } }
-                                    Button { text: "移除"; clicked => { root.broken-remove(item.id); } }
+                                    if item.relocatable: Button { text: I18n.en ? "Relocate" : "重定位"; clicked => { root.broken-relocate(item.id); } }
+                                    Button { text: I18n.en ? "Edit" : "编辑"; clicked => { root.broken-edit(item.id); } }
+                                    Button { text: I18n.en ? "Remove" : "移除"; clicked => { root.broken-remove(item.id); } }
                                 }
                             }
                             Tooltip { HintSurface { title: item.name; detail: item.target; notes: item.reason; } }
@@ -799,8 +799,8 @@ export component MainWindow inherits AppWindow {
                     }
                 }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "重新检查"; enabled: !root.broken-loading; clicked => { root.broken-check(); } }
-                    Button { text: "关闭"; clicked => { root.broken-open = false; root.focus-browser(); } }
+                    Button { text: I18n.en ? "Re-check" : "重新检查"; enabled: !root.broken-loading; clicked => { root.broken-check(); } }
+                    Button { text: I18n.en ? "Close" : "关闭"; clicked => { root.broken-open = false; root.focus-browser(); } }
                 }
             }
         }
@@ -840,7 +840,7 @@ export component EditorWindow inherits AppWindow {
     in-out property <bool> topmost-window;
     in property <bool> editing;
     always-on-top: root.topmost-window;
-    title: root.editing ? "编辑项目" : "添加项目";
+    title: root.editing ? (I18n.en ? "Edit item" : "编辑项目") : (I18n.en ? "Add item" : "添加项目");
     preferred-width: 520px; preferred-height: 650px;
     min-width: 460px; min-height: 480px;
     in-out property <string> entry-name;
@@ -884,69 +884,69 @@ export component EditorWindow inherits AppWindow {
     public function focus-collection-tree() { collection-tree.focus-tree(); }
     VerticalLayout {
         spacing: 0px;
-        TitleBar { title: root.editing ? "编辑项目" : "添加项目"; close => { root.cancel(); } }
+        TitleBar { title: root.editing ? (I18n.en ? "Edit item" : "编辑项目") : (I18n.en ? "Add item" : "添加项目"); close => { root.cancel(); } }
         Rectangle { background: Theme.surface;
             VerticalLayout { padding: 20px; spacing: 12px;
                 ScrollView { content-width: self.visible-width;
                     VerticalLayout { padding-right: 8px; spacing: 10px; alignment: start;
                         HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; text: "名称"; color: Palette.foreground; vertical-alignment: center; }
-                            name-input := LineEdit { enabled: !root.saving; text <=> root.entry-name; placeholder-text: "项目名称"; accessible-label: "名称"; accepted => { if !root.composing { root.save(); } } }
+                            Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Name" : "名称"; color: Palette.foreground; vertical-alignment: center; }
+                            name-input := LineEdit { enabled: !root.saving; text <=> root.entry-name; placeholder-text: I18n.en ? "Item name" : "项目名称"; accessible-label: I18n.en ? "Name" : "名称"; accepted => { if !root.composing { root.save(); } } }
                         }
                         HorizontalLayout { spacing: 12px; alignment: start;
-                            Text { width: 64px; text: "图标"; color: Palette.foreground; vertical-alignment: center; }
+                            Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Icon" : "图标"; color: Palette.foreground; vertical-alignment: center; }
                             Image {
                                 width: 40px; height: 40px;
                                 source: root.entry-icon.width > 0 ? root.entry-icon : root.kind == 2 ? @image-url("icons/folder.svg") : root.kind == 3 ? @image-url("icons/web.svg") : root.kind == 1 ? @image-url("icons/file.svg") : root.kind == 5 ? @image-url("icons/app.svg") : @image-url("icons/program.svg");
                                 colorize: root.entry-icon.width > 0 ? #0000 : (root.kind == 2 ? #b68422 : root.kind == 3 ? #278879 : root.kind == 5 ? #8065b9 : Palette.accent-background);
                             }
-                            Button { text: "选择图标"; clicked => { root.browse-icon(); } }
-                            Button { text: root.kind == 3 ? "提取网页图标" : root.kind == 5 ? "提取应用图标" : "从目标提取"; clicked => { root.reset-icon(); } }
+                            Button { text: I18n.en ? "Choose icon" : "选择图标"; clicked => { root.browse-icon(); } }
+                            Button { text: root.kind == 3 ? (I18n.en ? "Fetch web icon" : "提取网页图标") : root.kind == 5 ? (I18n.en ? "Extract app icon" : "提取应用图标") : (I18n.en ? "Extract from target" : "从目标提取"); clicked => { root.reset-icon(); } }
                         }
                         HorizontalLayout { spacing: 12px;
                             VerticalLayout { width: 132px; spacing: 6px;
-                                Text { text: "类型"; color: Palette.alternate-foreground; font-size: 12px; }
-                                ComboBox { min-width: 0px; model: ["程序", "文件", "文件夹", "网址", "快捷方式", "应用 AUMID"]; current-index <=> root.kind; accessible-label: "目标类型"; }
+                                Text { text: I18n.en ? "Type" : "类型"; color: Palette.alternate-foreground; font-size: 12px; }
+                                ComboBox { min-width: 0px; model: I18n.en ? ["Program", "File", "Folder", "URL", "Shortcut", "App AUMID"] : ["程序", "文件", "文件夹", "网址", "快捷方式", "应用 AUMID"]; current-index <=> root.kind; accessible-label: I18n.en ? "Target type" : "目标类型"; }
                             }
                             VerticalLayout { spacing: 6px;
-                                Text { text: "所属分类"; color: Palette.alternate-foreground; font-size: 12px; }
+                                Text { text: I18n.en ? "Category" : "所属分类"; color: Palette.alternate-foreground; font-size: 12px; }
                                 Button { text: root.collection-name; enabled: !root.collection-open; clicked => { root.pick-collection(); } }
                             }
                         }
                         Rectangle { height: 1px; background: Theme.stroke; }
                         HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; text: root.kind == 5 ? "应用标识" : root.kind == 3 ? "网址" : "目标路径"; color: Palette.foreground; vertical-alignment: center; }
-                            LineEdit { text <=> root.target; enabled: root.kind != 5; accessible-label: "目标"; placeholder-text: root.kind == 3 ? "https://example.com 或 example.com" : root.kind == 5 ? "从下方应用列表选择" : "选择或输入目标"; accepted => { if !root.composing { root.save(); } } }
-                            if root.kind == 5: IconButton { icon: @image-url("icons/app.svg"); label: "从应用列表选择"; clicked => { root.pick-app(); } }
-                            if root.kind != 3 && root.kind != 5: IconButton { icon: @image-url("icons/folder.svg"); label: "选择目标"; clicked => { root.browse(); } }
+                            Text { width: I18n.en ? 84px : 64px; text: root.kind == 5 ? (I18n.en ? "App ID" : "应用标识") : root.kind == 3 ? (I18n.en ? "URL" : "网址") : (I18n.en ? "Target path" : "目标路径"); color: Palette.foreground; vertical-alignment: center; }
+                            LineEdit { text <=> root.target; enabled: root.kind != 5; accessible-label: I18n.en ? "Target" : "目标"; placeholder-text: root.kind == 3 ? (I18n.en ? "https://example.com or example.com" : "https://example.com 或 example.com") : root.kind == 5 ? (I18n.en ? "Choose from app list" : "从下方应用列表选择") : (I18n.en ? "Choose or enter target" : "选择或输入目标"); accepted => { if !root.composing { root.save(); } } }
+                            if root.kind == 5: IconButton { icon: @image-url("icons/app.svg"); label: I18n.en ? "Choose from installed apps" : "从应用列表选择"; clicked => { root.pick-app(); } }
+                            if root.kind != 3 && root.kind != 5: IconButton { icon: @image-url("icons/folder.svg"); label: I18n.en ? "Browse target" : "选择目标"; clicked => { root.browse(); } }
                         }
-                        if root.kind != 3 && root.kind != 5: HorizontalLayout { padding-left: 76px; alignment: start; spacing: 8px;
-                            Button { text: "转为相对路径"; clicked => { root.convert-path(true); } }
-                            Button { text: "转为绝对路径"; clicked => { root.convert-path(false); } }
-                        }
-                        if root.kind == 0: HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; text: "参数"; color: Palette.foreground; vertical-alignment: center; }
-                            LineEdit { text <=> root.arguments; accessible-label: "参数"; accepted => { if !root.composing { root.save(); } } }
+                        if root.kind != 3 && root.kind != 5: HorizontalLayout { padding-left: I18n.en ? 96px : 76px; alignment: start; spacing: 8px;
+                            Button { text: I18n.en ? "To relative path" : "转为相对路径"; clicked => { root.convert-path(true); } }
+                            Button { text: I18n.en ? "To absolute path" : "转为绝对路径"; clicked => { root.convert-path(false); } }
                         }
                         if root.kind == 0: HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; text: "工作目录"; color: Palette.foreground; vertical-alignment: center; }
-                            LineEdit { text <=> root.working-dir; accessible-label: "工作目录"; accepted => { if !root.composing { root.save(); } } }
-                            IconButton { icon: @image-url("icons/folder.svg"); label: "选择工作目录"; clicked => { root.browse-working-dir(); } }
+                            Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Arguments" : "参数"; color: Palette.foreground; vertical-alignment: center; }
+                            LineEdit { text <=> root.arguments; accessible-label: I18n.en ? "Arguments" : "参数"; accepted => { if !root.composing { root.save(); } } }
                         }
-                        if root.kind == 0: HorizontalLayout { padding-left: 76px; alignment: start;
-                            CheckBox { text: "以管理员身份运行"; checked <=> root.elevated; }
+                        if root.kind == 0: HorizontalLayout { spacing: 12px;
+                            Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Working dir" : "工作目录"; color: Palette.foreground; vertical-alignment: center; }
+                            LineEdit { text <=> root.working-dir; accessible-label: I18n.en ? "Working directory" : "工作目录"; accepted => { if !root.composing { root.save(); } } }
+                            IconButton { icon: @image-url("icons/folder.svg"); label: I18n.en ? "Browse working directory" : "选择工作目录"; clicked => { root.browse-working-dir(); } }
+                        }
+                        if root.kind == 0: HorizontalLayout { padding-left: I18n.en ? 96px : 76px; alignment: start;
+                            CheckBox { text: I18n.en ? "Run as administrator" : "以管理员身份运行"; checked <=> root.elevated; }
                         }
                         if root.kind == 0 || root.kind == 4: HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; text: "打开方式"; color: Palette.foreground; vertical-alignment: center; }
-                            ComboBox { model: ["普通", "最大化", "最小化"]; current-index <=> root.show-mode; }
+                            Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Run mode" : "打开方式"; color: Palette.foreground; vertical-alignment: center; }
+                            ComboBox { model: I18n.en ? ["Normal", "Maximized", "Minimized"] : ["普通", "最大化", "最小化"]; current-index <=> root.show-mode; }
                         }
                         Rectangle { height: 1px; background: Theme.stroke; }
                         HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; text: "别名"; color: Palette.foreground; vertical-alignment: center; }
-                            LineEdit { text <=> root.aliases; accessible-label: "别名"; placeholder-text: "用于搜索"; accepted => { if !root.composing { root.save(); } } }
+                            Text { width: I18n.en ? 84px : 64px; text: I18n.en ? "Aliases" : "别名"; color: Palette.foreground; vertical-alignment: center; }
+                            LineEdit { text <=> root.aliases; accessible-label: I18n.en ? "Aliases" : "别名"; placeholder-text: I18n.en ? "Keywords for search" : "用于搜索"; accepted => { if !root.composing { root.save(); } } }
                         }
                         HorizontalLayout { spacing: 12px;
-                            Text { width: 64px; height: 24px; text: "备注"; color: Palette.foreground; vertical-alignment: center; }
+                            Text { width: I18n.en ? 84px : 64px; height: 24px; text: I18n.en ? "Notes" : "备注"; color: Palette.foreground; vertical-alignment: center; }
                             TextEdit { height: 76px; text <=> root.notes; wrap: word-wrap; }
                         }
                     }
@@ -956,18 +956,18 @@ export component EditorWindow inherits AppWindow {
         }
         Rectangle { height: 1px; background: Theme.stroke; }
         HorizontalLayout { padding: 16px; spacing: 8px; alignment: end;
-            Button { text: "取消"; clicked => { root.cancel(); } }
-            Button { text: root.saving ? "正在保存…" : root.editing ? "保存" : "添加"; enabled: !root.saving; primary: true; clicked => { root.save(); } }
+            Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.cancel(); } }
+            Button { text: root.saving ? (I18n.en ? "Saving…" : "正在保存…") : root.editing ? (I18n.en ? "Save" : "保存") : (I18n.en ? "Add" : "添加"); enabled: !root.saving; primary: true; clicked => { root.save(); } }
         }
     }
     if root.discard-confirm: Rectangle { background: #0005; TouchArea { }
         Rectangle { x: 24px; width: parent.width - 48px; height: discard-form.preferred-height; y: (parent.height - self.height) / 2; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.stroke;
             discard-form := VerticalLayout { padding: 20px; spacing: 16px;
-                Text { text: "放弃未保存的更改？"; font-size: 18px; font-weight: 600; color: Palette.foreground; }
-                Text { text: "关闭后将丢失本次编辑的内容。"; color: Palette.alternate-foreground; wrap: word-wrap; }
+                Text { text: I18n.en ? "Discard unsaved changes?" : "放弃未保存的更改？"; font-size: 18px; font-weight: 600; color: Palette.foreground; }
+                Text { text: I18n.en ? "Closing now will discard your edits." : "关闭后将丢失本次编辑的内容。"; color: Palette.alternate-foreground; wrap: word-wrap; }
                 HorizontalLayout { spacing: 8px; alignment: end;
-                    Button { text: "继续编辑"; clicked => { root.discard-confirm = false; root.keep-editing(); } }
-                    Button { text: "放弃更改"; clicked => { root.discard(); } }
+                    Button { text: I18n.en ? "Keep editing" : "继续编辑"; clicked => { root.discard-confirm = false; root.keep-editing(); } }
+                    Button { text: I18n.en ? "Discard" : "放弃更改"; clicked => { root.discard(); } }
                 }
             }
         }
@@ -976,14 +976,14 @@ export component EditorWindow inherits AppWindow {
     Rectangle { visible: root.collection-open; background: #0005; TouchArea { }
         Rectangle { x: 24px; y: 48px; width: parent.width - 48px; height: parent.height - 96px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 14px; spacing: 10px;
-                Text { text: "选择所属分类"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
+                Text { text: I18n.en ? "Choose category" : "选择所属分类"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
                 collection-tree := NavTree {
                     nodes: root.collection-nodes; selected: root.collection-id; cursor: root.collection-cursor;
                     pick(id) => { root.collection-node(id); }
                     key(delta) => { root.collection-key(delta); }
                 }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.collection-open = false; root.focus-name(); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.collection-open = false; root.focus-name(); } }
                 }
             }
         }
@@ -992,8 +992,8 @@ export component EditorWindow inherits AppWindow {
     Rectangle { visible: root.picker-open; background: #0005; TouchArea { }
         Rectangle { x: 24px; y: 48px; width: parent.width - 48px; height: parent.height - 96px; background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 14px; spacing: 10px;
-                Text { text: "选择已安装应用"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
-                picker-filter-input := LineEdit { text <=> root.picker-filter; placeholder-text: "按名称筛选"; accessible-label: "按名称筛选"; changed text => { root.picker-refilter(); } }
+                Text { text: I18n.en ? "Choose installed app" : "选择已安装应用"; font-size: 16px; font-weight: 600; color: Palette.foreground; }
+                picker-filter-input := LineEdit { text <=> root.picker-filter; placeholder-text: I18n.en ? "Filter by name" : "按名称筛选"; accessible-label: I18n.en ? "Filter by name" : "按名称筛选"; changed text => { root.picker-refilter(); } }
                 ListView { vertical-stretch: 1;
                     for option in root.picker-shown: Rectangle {
                         height: 46px;
@@ -1015,8 +1015,8 @@ export component EditorWindow inherits AppWindow {
                     }
                 }
                 HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { text: "取消"; clicked => { root.picker-open = false; root.focus-name(); } }
-                    Button { text: "添加"; enabled: root.picker-aumid != ""; clicked => { root.picker-confirm(root.picker-aumid, root.picker-name); } }
+                    Button { text: I18n.en ? "Cancel" : "取消"; clicked => { root.picker-open = false; root.focus-name(); } }
+                    Button { text: I18n.en ? "Add" : "添加"; enabled: root.picker-aumid != ""; clicked => { root.picker-confirm(root.picker-aumid, root.picker-name); } }
                 }
             }
         }
@@ -1035,7 +1035,7 @@ export component SettingsWindow inherits AppWindow {
     in-out property <bool> window-active <=> root.frame-active;
     in-out property <bool> topmost-window;
     always-on-top: root.topmost-window;
-    title: "设置 · Raptim";
+    title: I18n.en ? "Settings · Raptim" : "设置 · Raptim";
     preferred-width: 660px; preferred-height: 480px;
     min-width: 580px; min-height: 400px;
     in-out property <string> hotkey-text: "Ctrl+Alt+Space";
@@ -1044,6 +1044,7 @@ export component SettingsWindow inherits AppWindow {
     callback record-hotkey; callback reset-hotkey; callback captured-hotkey(string);
     in-out property <int> page;
     in-out property <int> theme-mode: 0;
+    in-out property <int> language-mode: 0;
     in-out property <bool> autostart;
     in property <string> autostart-warning;
     in-out property <bool> double-click;
@@ -1076,20 +1077,20 @@ export component SettingsWindow inherits AppWindow {
     changed page => { settings-scroll.content-y = 0px; }
     VerticalLayout {
         padding: 0px; spacing: 0px;
-        TitleBar { title: "设置"; close => { root.cancel(); } }
+        TitleBar { title: I18n.en ? "Settings" : "设置"; close => { root.cancel(); } }
         HorizontalLayout {
             spacing: 0px;
             Rectangle {
-                width: 140px; horizontal-stretch: 0; background: Theme.navigation;
+                width: I18n.en ? 156px : 140px; horizontal-stretch: 0; background: Theme.navigation;
                 VerticalLayout { padding: 10px; spacing: 4px; alignment: start;
-                    for name[index] in ["常规", "呼出与隐藏", "游戏勿扰", "数据", "关于"]: Rectangle {
+                    for name[index] in (I18n.en ? ["General", "Summon & Hide", "Game DND", "Data", "About"] : ["常规", "呼出与隐藏", "游戏勿扰", "数据", "关于"]): Rectangle {
                         height: 36px; border-radius: 6px;
                         background: root.page == index ? Theme.selection : nav-touch.has-hover ? Theme.hover : transparent;
                         border-width: nav-focus.has-focus ? 1px : 0px;
                         border-color: Palette.accent-background;
                         accessible-role: button; accessible-label: name; accessible-action-default => { root.page = index; }
                         if root.page == index: Rectangle { x: 0px; y: 9px; height: 18px; width: 3px; border-radius: 1.5px; background: Palette.accent-background; }
-                        Text { x: 12px; width: parent.width - 20px; height: parent.height; text: name; vertical-alignment: center; font-weight: root.page == index ? 600 : 400; color: root.page == index ? Palette.accent-background : Palette.foreground; }
+                        Text { x: 12px; width: parent.width - 20px; height: parent.height; text: name; vertical-alignment: center; font-weight: root.page == index ? 600 : 400; color: root.page == index ? Palette.accent-background : Palette.foreground; overflow: elide; }
                         nav-focus := FocusScope { x: 0px; width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.page = index; return accept; } return reject; } }
                         nav-touch := TouchArea { clicked => { root.page = index; } }
                     }
@@ -1106,15 +1107,23 @@ export component SettingsWindow inherits AppWindow {
                             padding-left: 24px; padding-right: 24px;
                             padding-top: 12px; padding-bottom: 20px;
                             spacing: 0px; alignment: start;
-                            if root.page == 0: SettingRow { label: "外观主题";
+                            if root.page == 0: SettingRow { label: I18n.en ? "Theme" : "外观主题";
                                 SettingsSelect {
-                                    width: 150px; accessible-name: "外观主题";
-                                    model: ["跟随系统", "浅色", "深色"];
+                                    width: 150px; accessible-name: I18n.en ? "Theme" : "外观主题";
+                                    model: I18n.en ? ["Follow system", "Light", "Dark"] : ["跟随系统", "浅色", "深色"];
                                     current-index <=> root.theme-mode;
                                     selected(value) => { root.change(0); }
                                 }
                             }
-                            if root.page == 0: SettingRow { label: "开机启动"; divider: root.autostart-warning == "";
+                            if root.page == 0: SettingRow { label: I18n.en ? "Language" : "界面语言";
+                                SettingsSelect {
+                                    width: 150px; accessible-name: I18n.en ? "Language" : "界面语言";
+                                    model: I18n.en ? ["Follow system", "简体中文", "English"] : ["跟随系统", "简体中文", "English"];
+                                    current-index <=> root.language-mode;
+                                    selected(value) => { root.change(0); }
+                                }
+                            }
+                            if root.page == 0: SettingRow { label: I18n.en ? "Launch at startup" : "开机启动"; divider: root.autostart-warning == "";
                                 Switch { height: 32px; checked <=> root.autostart; toggled => { root.change(0); } }
                             }
                             if root.page == 0 && root.autostart-warning != "": VerticalLayout {
@@ -1126,110 +1135,110 @@ export component SettingsWindow inherits AppWindow {
                                 }
                                 Rectangle { height: 1px; background: Theme.stroke; }
                             }
-                            if root.page == 0: SettingRow { label: "打开项目后隐藏";
+                            if root.page == 0: SettingRow { label: I18n.en ? "Hide after launch" : "打开项目后隐藏";
                                 Switch { height: 32px; checked <=> root.hide-after-launch; toggled => { root.change(0); } }
                             }
-                            if root.page == 0: SettingRow { label: "启动方式";
+                            if root.page == 0: SettingRow { label: I18n.en ? "Launch click" : "启动方式";
                                 SettingsSelect {
-                                    width: 150px; accessible-name: "启动方式";
-                                    model: ["单击", "双击"];
+                                    width: 150px; accessible-name: I18n.en ? "Launch click" : "启动方式";
+                                    model: I18n.en ? ["Single click", "Double click"] : ["单击", "双击"];
                                     current-index: root.double-click ? 1 : 0;
                                     selected(value) => { root.double-click = self.current-index == 1; root.change(0); }
                                 }
                             }
-                            if root.page == 0: SettingRow { label: "获焦后直接打字搜索";
+                            if root.page == 0: SettingRow { label: I18n.en ? "Type to search when focused" : "获焦后直接打字搜索";
                                 Switch { height: 32px; checked <=> root.type-to-search; toggled => { root.change(0); } }
                             }
-                            if root.page == 0: SettingRow { label: "悬停切换分类"; divider: root.hover-switch;
+                            if root.page == 0: SettingRow { label: I18n.en ? "Switch categories on hover" : "悬停切换分类"; divider: root.hover-switch;
                                 Switch { height: 32px; checked <=> root.hover-switch; toggled => { root.change(0); } }
                             }
-                            if root.page == 0 && root.hover-switch: SettingRow { label: "悬停延迟"; divider: false;
+                            if root.page == 0 && root.hover-switch: SettingRow { label: I18n.en ? "Hover delay" : "悬停延迟"; divider: false;
                                 SettingsSelect {
-                                    width: 150px; accessible-name: "悬停延迟";
+                                    width: 150px; accessible-name: I18n.en ? "Hover delay" : "悬停延迟";
                                     model: ["200 ms", "350 ms", "600 ms"];
                                     current-index: root.hover-delay == 200 ? 0 : root.hover-delay == 600 ? 2 : 1;
                                     selected(value) => { root.hover-delay = self.current-index == 0 ? 200 : self.current-index == 2 ? 600 : 350; root.change(0); }
                                 }
                             }
 
-                            if root.page == 1: SettingRow { label: "呼出热键"; control-width: 288px; divider: root.hotkey-error == "";
-                                Button { width: 192px; height: 32px; text: root.recording-hotkey ? "请按组合键 · Esc 取消" : root.hotkey-text; clicked => { root.record-hotkey(); } }
-                                Button { width: 88px; height: 32px; text: "恢复默认"; clicked => { root.reset-hotkey(); } }
+                            if root.page == 1: SettingRow { label: I18n.en ? "Global hotkey" : "呼出热键"; control-width: 288px; divider: root.hotkey-error == "";
+                                Button { width: 192px; height: 32px; text: root.recording-hotkey ? (I18n.en ? "Press shortcut · Esc to cancel" : "请按组合键 · Esc 取消") : root.hotkey-text; clicked => { root.record-hotkey(); } }
+                                Button { width: 88px; height: 32px; text: I18n.en ? "Reset" : "恢复默认"; clicked => { root.reset-hotkey(); } }
                             }
                             if root.page == 1 && root.hotkey-error != "": VerticalLayout {
                                 padding-bottom: 10px; spacing: 8px;
                                 Text { text: root.hotkey-error; wrap: word-wrap; color: #c42b1c; font-size: 12px; }
                                 Rectangle { height: 1px; background: Theme.stroke; }
                             }
-                            if root.page == 1: SettingRow { label: "贴边自动收纳";
+                            if root.page == 1: SettingRow { label: I18n.en ? "Auto-hide at screen edge" : "贴边自动收纳";
                                 Switch { height: 32px; checked <=> root.edge-hide; toggled => { root.change(0); } }
                             }
-                            if root.page == 1: SettingRow { label: "显示露边"; enabled: root.edge-hide;
+                            if root.page == 1: SettingRow { label: I18n.en ? "Show edge strip" : "显示露边"; enabled: root.edge-hide;
                                 Switch { height: 32px; enabled: root.edge-hide; checked <=> root.edge-strip-visible; toggled => { root.change(0); } }
                             }
                             if root.page == 1: SettingRow {
-                                label: "露边宽度";
-                                description: "物理像素；关闭后悬停边缘仍可展开";
+                                label: I18n.en ? "Edge strip width" : "露边宽度";
+                                description: I18n.en ? "Physical pixels; hovering the edge still expands when off" : "物理像素；关闭后悬停边缘仍可展开";
                                 control-width: 228px;
                                 enabled: root.edge-hide && root.edge-strip-visible;
                                 Slider { enabled: root.edge-hide && root.edge-strip-visible; width: 108px; height: 32px; minimum: 1; maximum: 12; value: root.edge-strip-width; changed(value) => { root.edge-strip-width = round(value); root.change(0); } }
                                 HorizontalLayout { width: 112px; height: 32px; spacing: 4px;
-                                    StepperButton { text: "−"; label: "减小露边宽度"; enabled: root.edge-hide && root.edge-strip-visible && root.edge-strip-width > 1; clicked => { root.edge-strip-width -= 1; root.change(0); } }
+                                    StepperButton { text: "−"; label: I18n.en ? "Decrease strip width" : "减小露边宽度"; enabled: root.edge-hide && root.edge-strip-visible && root.edge-strip-width > 1; clicked => { root.edge-strip-width -= 1; root.change(0); } }
                                     PixelWidthInput { value <=> root.edge-strip-width; enabled: root.edge-hide && root.edge-strip-visible; edited => { root.change(0); } }
-                                    StepperButton { text: "+"; label: "增大露边宽度"; enabled: root.edge-hide && root.edge-strip-visible && root.edge-strip-width < 12; clicked => { root.edge-strip-width += 1; root.change(0); } }
+                                    StepperButton { text: "+"; label: I18n.en ? "Increase strip width" : "增大露边宽度"; enabled: root.edge-hide && root.edge-strip-visible && root.edge-strip-width < 12; clicked => { root.edge-strip-width += 1; root.change(0); } }
                                 }
                             }
-                            if root.page == 1: SettingRow { label: "贴边收起延迟"; enabled: root.edge-hide;
+                            if root.page == 1: SettingRow { label: I18n.en ? "Edge collapse delay" : "贴边收起延迟"; enabled: root.edge-hide;
                                 SettingsSelect {
-                                    width: 150px; enabled: root.edge-hide; accessible-name: "贴边收起延迟";
+                                    width: 150px; enabled: root.edge-hide; accessible-name: I18n.en ? "Edge collapse delay" : "贴边收起延迟";
                                     model: ["150 ms", "250 ms", "450 ms"];
                                     current-index: root.edge-collapse-delay <= 150 ? 0 : root.edge-collapse-delay >= 450 ? 2 : 1;
                                     selected(value) => { root.edge-collapse-delay = self.current-index == 0 ? 150 : self.current-index == 2 ? 450 : 250; root.change(0); }
                                 }
                             }
-                            if root.page == 1: SettingRow { label: "窗口始终置顶";
+                            if root.page == 1: SettingRow { label: I18n.en ? "Always on top" : "窗口始终置顶";
                                 Switch { height: 32px; checked <=> root.keep-topmost; toggled => { root.change(3); } }
                             }
-                            if root.page == 1: SettingRow { label: "失去焦点时隐藏";
+                            if root.page == 1: SettingRow { label: I18n.en ? "Hide on focus loss" : "失去焦点时隐藏";
                                 Switch { height: 32px; checked <=> root.hide-on-focus-loss; toggled => { root.change(0); } }
                             }
-                            if root.page == 1: SettingRow { label: "主窗口位置异常"; divider: false;
-                                Button { width: 150px; height: 32px; text: "恢复窗口位置"; clicked => { root.restore-position(); } }
+                            if root.page == 1: SettingRow { label: I18n.en ? "Window position off-screen?" : "主窗口位置异常"; divider: false;
+                                Button { width: 150px; height: 32px; text: I18n.en ? "Reset position" : "恢复窗口位置"; clicked => { root.restore-position(); } }
                             }
 
-                            if root.page == 2: SettingRow { label: "全屏保护";
+                            if root.page == 2: SettingRow { label: I18n.en ? "Fullscreen protection" : "全屏保护";
                                 Switch { height: 32px; checked <=> root.fullscreen-protection; toggled => { root.change(0); } }
                             }
                             if root.page == 2: SettingRow {
-                                label: "暂停游戏勿扰";
-                                description: "仅本次运行有效：暂停期间热键、托盘与贴边呼出恢复可用，退出后自动恢复判定";
+                                label: I18n.en ? "Pause Game DND" : "暂停游戏勿扰";
+                                description: I18n.en ? "Applies to this session only: hotkeys, tray, and edge summon remain active until exit" : "仅本次运行有效：暂停期间热键、托盘与贴边呼出恢复可用，退出后自动恢复判定";
                                 control-width: 56px;
                                 Switch { height: 32px; checked: root.protection-bypass; toggled => { root.protection-bypass-changed(!root.protection-bypass); } }
                             }
                             if root.page == 2: SettingRow {
-                                label: "记录保护判定";
-                                description: "记录前台应用、通知状态与被阻止的呼出请求，保存于数据目录（含本地路径，分享前请检查）";
+                                label: I18n.en ? "Log protection decisions" : "记录保护判定";
+                                description: I18n.en ? "Saves foreground app, notification state, and blocked requests in the data dir (check paths before sharing)" : "记录前台应用、通知状态与被阻止的呼出请求，保存于数据目录（含本地路径，分享前请检查）";
                                 control-width: 56px;
                                 Switch { height: 32px; checked <=> root.protection-log; toggled => { root.change(0); } }
                             }
                             if root.page == 2: VerticalLayout {
                                 padding-top: 14px; spacing: 10px;
                                 HorizontalLayout { spacing: 8px;
-                                    Text { text: "严格保护程序"; font-weight: 600; font-size: 14px; color: Palette.foreground; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Text { text: I18n.en ? "Strict protected apps" : "严格保护程序"; font-weight: 600; font-size: 14px; color: Palette.foreground; horizontal-stretch: 1; vertical-alignment: center; }
                                     Text { text: root.protected-apps.length + " / 100"; font-size: 12px; color: Theme.muted; vertical-alignment: center; }
                                 }
                                 HorizontalLayout { spacing: 8px; height: 32px;
-                                    LineEdit { text <=> root.protected-input; placeholder-text: "输入程序完整路径"; horizontal-stretch: 1;
-                                        accessible-label: "严格保护程序路径";
+                                    LineEdit { text <=> root.protected-input; placeholder-text: I18n.en ? "Enter full executable path" : "输入程序完整路径"; horizontal-stretch: 1;
+                                        accessible-label: I18n.en ? "Strict protected app path" : "严格保护程序路径";
                                         accepted(text) => { if !root.composing { root.add-protected-app(text); } } }
-                                    Button { width: 68px; height: 32px; text: "添加"; clicked => { root.add-protected-app(root.protected-input); } }
-                                    IconButton { icon: @image-url("icons/folder.svg"); label: "选择游戏程序"; clicked => { root.browse-game(); } }
+                                    Button { width: 68px; height: 32px; text: I18n.en ? "Add" : "添加"; clicked => { root.add-protected-app(root.protected-input); } }
+                                    IconButton { icon: @image-url("icons/folder.svg"); label: I18n.en ? "Browse game executable" : "选择游戏程序"; clicked => { root.browse-game(); } }
                                 }
                                 if root.protected-error != "": Text { text: root.protected-error; wrap: word-wrap; color: #c42b1c; font-size: 12px; }
                                 if root.protected-apps.length == 0: Rectangle {
                                     height: 44px; border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
                                     HorizontalLayout { padding-left: 12px; padding-right: 12px;
-                                        Text { text: "尚未添加严格保护的程序"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                                        Text { text: I18n.en ? "No strict protected apps added" : "尚未添加严格保护的程序"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
                                     }
                                 }
                                 if root.protected-apps.length > 0: Rectangle {
@@ -1241,18 +1250,18 @@ export component SettingsWindow inherits AppWindow {
                                             protected-row-touch := TouchArea { }
                                             HorizontalLayout { padding-left: 8px; padding-right: 2px; spacing: 6px;
                                                 Text { horizontal-stretch: 1; text: path; font-size: 13px; vertical-alignment: center; overflow: elide; color: Palette.foreground; }
-                                                IconButton { y: 1px; icon: @image-url("icons/close.svg"); label: "移除 " + path; width: 32px; height: 32px; clicked => { root.remove-protected-app(index); } }
+                                                IconButton { y: 1px; icon: @image-url("icons/close.svg"); label: (I18n.en ? "Remove " : "移除 ") + path; width: 32px; height: 32px; clicked => { root.remove-protected-app(index); } }
                                             }
                                             Tooltip { HintSurface { title: path; } }
                                         }
                                     }
                                 }
-                                Text { text: "前台窗口命中任一路径即进入严格保护，最多可添加 100 项。"; wrap: word-wrap; color: Theme.muted; font-size: 12px; }
+                                Text { text: I18n.en ? "Strict protection activates whenever a foreground window matches any listed path (up to 100 entries)." : "前台窗口命中任一路径即进入严格保护，最多可添加 100 项。"; wrap: word-wrap; color: Theme.muted; font-size: 12px; }
                             }
 
                             if root.page == 3: VerticalLayout { spacing: 0px;
                                 VerticalLayout { padding-top: 4px; padding-bottom: 14px; spacing: 8px;
-                                    Text { text: "数据目录"; font-weight: 600; font-size: 14px; color: Palette.foreground; }
+                                    Text { text: I18n.en ? "Data directory" : "数据目录"; font-weight: 600; font-size: 14px; color: Palette.foreground; }
                                     Rectangle { border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
                                         HorizontalLayout { padding-left: 12px; padding-right: 12px; padding-top: 9px; padding-bottom: 9px;
                                             Text { text: root.data-path; font-size: 13px; wrap: char-wrap; color: Palette.foreground; }
@@ -1261,26 +1270,26 @@ export component SettingsWindow inherits AppWindow {
                                 }
                                 Rectangle { height: 1px; background: Theme.stroke; }
                                 SettingRow {
-                                    label: "新增项目优先使用相对路径";
-                                    description: "以数据目录为基准保存程序路径与工作目录，便于便携迁移";
+                                    label: I18n.en ? "Prefer relative paths for new items" : "新增项目优先使用相对路径";
+                                    description: I18n.en ? "Stores program and working dir paths relative to the data directory for portable setups" : "以数据目录为基准保存程序路径与工作目录，便于便携迁移";
                                     control-width: 56px;
                                     Switch { height: 32px; checked <=> root.relative-paths; toggled => { root.change(0); } }
                                 }
                                 VerticalLayout { padding-top: 14px; spacing: 12px;
-                                    Text { text: "数据管理"; font-weight: 600; font-size: 14px; color: Palette.foreground; }
+                                    Text { text: I18n.en ? "Data management" : "数据管理"; font-weight: 600; font-size: 14px; color: Palette.foreground; }
                                     HorizontalLayout { spacing: 8px; alignment: start;
-                                        Button { min-width: 72px; height: 32px; text: "导出"; clicked => { root.export-data(); } }
-                                        Button { min-width: 72px; height: 32px; text: "恢复"; clicked => { root.import-data(); } }
-                                        Button { height: 32px; text: "打开数据目录"; clicked => { root.open-data-dir(); } }
-                                        if root.has-error-log: Button { height: 32px; text: "查看错误日志"; clicked => { root.open-error-log(); } }
+                                        Button { min-width: 72px; height: 32px; text: I18n.en ? "Export" : "导出"; clicked => { root.export-data(); } }
+                                        Button { min-width: 72px; height: 32px; text: I18n.en ? "Restore" : "恢复"; clicked => { root.import-data(); } }
+                                        Button { height: 32px; text: I18n.en ? "Open data folder" : "打开数据目录"; clicked => { root.open-data-dir(); } }
+                                        if root.has-error-log: Button { height: 32px; text: I18n.en ? "View error log" : "查看错误日志"; clicked => { root.open-error-log(); } }
                                     }
                                     if root.restore-confirm: Rectangle {
                                         border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
                                         VerticalLayout { padding: 12px; spacing: 10px;
-                                            Text { text: "替换当前数据？请先自行备份数据目录。"; wrap: word-wrap; color: Palette.foreground; }
+                                            Text { text: I18n.en ? "Replace current data? Please back up your data directory first." : "替换当前数据？请先自行备份数据目录。"; wrap: word-wrap; color: Palette.foreground; }
                                             HorizontalLayout { spacing: 8px; alignment: start;
-                                                Button { min-width: 72px; height: 32px; primary: true; text: "恢复"; clicked => { root.confirm-restore(); } }
-                                                Button { min-width: 72px; height: 32px; text: "取消"; clicked => { root.restore-confirm = false; } }
+                                                Button { min-width: 72px; height: 32px; primary: true; text: I18n.en ? "Restore" : "恢复"; clicked => { root.confirm-restore(); } }
+                                                Button { min-width: 72px; height: 32px; text: I18n.en ? "Cancel" : "取消"; clicked => { root.restore-confirm = false; } }
                                             }
                                         }
                                     }
@@ -1302,20 +1311,20 @@ export component SettingsWindow inherits AppWindow {
                                                 }
                                             }
                                         }
-                                        Text { text: "面向 Windows 的轻量本地启动器"; font-size: 12px; color: Theme.muted; wrap: word-wrap; }
+                                        Text { text: I18n.en ? "Lightweight local launcher for Windows" : "面向 Windows 的轻量本地启动器"; font-size: 12px; color: Theme.muted; wrap: word-wrap; }
                                     }
                                 }
                                 HorizontalLayout { spacing: 8px; alignment: start;
-                                    Button { height: 30px; text: "GitHub 仓库"; clicked => { root.open-repo(); } }
-                                    Button { height: 30px; text: "反馈问题"; clicked => { root.open-issues(); } }
-                                    Button { height: 30px; text: "更新日志"; clicked => { root.open-changelog(); } }
-                                    Button { height: 30px; text: "复制环境信息"; clicked => { root.copy-env-info(); } }
+                                    Button { height: 30px; text: I18n.en ? "GitHub" : "GitHub 仓库"; clicked => { root.open-repo(); } }
+                                    Button { height: 30px; text: I18n.en ? "Issues" : "反馈问题"; clicked => { root.open-issues(); } }
+                                    Button { height: 30px; text: I18n.en ? "Changelog" : "更新日志"; clicked => { root.open-changelog(); } }
+                                    Button { height: 30px; text: I18n.en ? "Copy env info" : "复制环境信息"; clicked => { root.copy-env-info(); } }
                                 }
                                 Rectangle {
                                     border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
                                     VerticalLayout { padding: 12px; spacing: 8px;
                                         HorizontalLayout { spacing: 8px;
-                                            Text { horizontal-stretch: 1; text: "版权与开源许可"; font-weight: 600; font-size: 13px; color: Palette.foreground; vertical-alignment: center; }
+                                            Text { horizontal-stretch: 1; text: I18n.en ? "Copyright & License" : "版权与开源许可"; font-weight: 600; font-size: 13px; color: Palette.foreground; vertical-alignment: center; }
                                             Rectangle {
                                                 height: 22px; border-radius: 4px; background: Theme.selection;
                                                 HorizontalLayout { padding-left: 8px; padding-right: 8px;
@@ -1324,10 +1333,10 @@ export component SettingsWindow inherits AppWindow {
                                             }
                                         }
                                         Text { text: "Copyright (C) 2026 KHWLGH"; font-size: 12px; color: Palette.foreground; }
-                                        Text { text: "本软件基于 GNU General Public License v3.0（GPL-3.0-only）开源发布，按现状提供且不附带任何担保。"; wrap: word-wrap; font-size: 12px; color: Theme.muted; }
+                                        Text { text: I18n.en ? "Released under GNU General Public License v3.0 (GPL-3.0-only), provided as-is without any warranty." : "本软件基于 GNU General Public License v3.0（GPL-3.0-only）开源发布，按现状提供且不附带任何担保。"; wrap: word-wrap; font-size: 12px; color: Theme.muted; }
                                         HorizontalLayout { padding-top: 2px; spacing: 8px; alignment: start;
-                                            Button { height: 30px; text: "查看开源许可证"; clicked => { root.legal-tab = 0; root.legal-open = true; } }
-                                            Button { height: 30px; text: "第三方组件说明"; clicked => { root.legal-tab = 1; root.legal-open = true; } }
+                                            Button { height: 30px; text: I18n.en ? "View license" : "查看开源许可证"; clicked => { root.legal-tab = 0; root.legal-open = true; } }
+                                            Button { height: 30px; text: I18n.en ? "Third-party notices" : "第三方组件说明"; clicked => { root.legal-tab = 1; root.legal-open = true; } }
                                         }
                                     }
                                 }
@@ -1343,7 +1352,7 @@ export component SettingsWindow inherits AppWindow {
                                             Text { text: "Version " + root.rust-version; horizontal-alignment: center; font-weight: 600; color: Palette.foreground; }
                                             Text { text: "https://www.rust-lang.org/"; horizontal-alignment: center; font-size: 12px; color: Theme.muted; }
                                         }
-                                        accessible-role: button; accessible-label: "Rust 官网"; accessible-action-default => { root.open-rust(); }
+                                        accessible-role: button; accessible-label: I18n.en ? "Rust website" : "Rust 官网"; accessible-action-default => { root.open-rust(); }
                                         rust-focus := FocusScope { x: 0px; width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-rust(); return accept; } return reject; } }
                                         rust-touch := TouchArea { mouse-cursor: pointer; clicked => { root.open-rust(); } }
                                         Tooltip { HintSurface { title: "https://www.rust-lang.org/"; } }
@@ -1357,7 +1366,7 @@ export component SettingsWindow inherits AppWindow {
                                         VerticalLayout { padding: 4px; alignment: center;
                                             AboutSlint { height: 118px; }
                                         }
-                                        accessible-role: button; accessible-label: "Slint 官网"; accessible-action-default => { root.open-slint(); }
+                                        accessible-role: button; accessible-label: I18n.en ? "Slint website" : "Slint 官网"; accessible-action-default => { root.open-slint(); }
                                         slint-focus := FocusScope { x: 0px; width: 0px; key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-slint(); return accept; } return reject; } }
                                         slint-touch := TouchArea { mouse-cursor: pointer; clicked => { root.open-slint(); } }
                                         Tooltip { HintSurface { title: "https://slint.dev/"; } }
@@ -1366,22 +1375,22 @@ export component SettingsWindow inherits AppWindow {
                                 Rectangle {
                                     border-radius: 6px; background: Theme.navigation; border-width: 1px; border-color: Theme.stroke;
                                     VerticalLayout { padding: 12px; spacing: 6px;
-                                        Text { text: "构建与运行信息"; font-weight: 600; font-size: 13px; color: Palette.foreground; }
+                                        Text { text: I18n.en ? "Build & runtime" : "构建与运行信息"; font-weight: 600; font-size: 13px; color: Palette.foreground; }
                                         HorizontalLayout { spacing: 8px;
-                                            Text { width: 84px; text: "应用版本"; font-size: 12px; color: Theme.muted; }
+                                            Text { width: I18n.en ? 104px : 84px; text: I18n.en ? "App version" : "应用版本"; font-size: 12px; color: Theme.muted; }
                                             Text { horizontal-stretch: 1; text: root.app-version; font-size: 12px; color: Palette.foreground; overflow: elide; }
                                         }
                                         HorizontalLayout { spacing: 8px;
-                                            Text { width: 84px; text: "编译工具链"; font-size: 12px; color: Theme.muted; }
+                                            Text { width: I18n.en ? 104px : 84px; text: I18n.en ? "Toolchain" : "编译工具链"; font-size: 12px; color: Theme.muted; }
                                             Text { horizontal-stretch: 1; text: "Rust " + root.rust-version; font-size: 12px; color: Palette.foreground; overflow: elide; }
                                         }
                                         HorizontalLayout { spacing: 8px;
-                                            Text { width: 84px; text: "界面引擎"; font-size: 12px; color: Theme.muted; }
-                                            Text { horizontal-stretch: 1; text: "Slint 1.18.0（Fluent 样式，软件渲染）"; font-size: 12px; color: Palette.foreground; overflow: elide; }
+                                            Text { width: I18n.en ? 104px : 84px; text: I18n.en ? "UI engine" : "界面引擎"; font-size: 12px; color: Theme.muted; }
+                                            Text { horizontal-stretch: 1; text: I18n.en ? "Slint 1.18.0 (Fluent style, software renderer)" : "Slint 1.18.0（Fluent 样式，软件渲染）"; font-size: 12px; color: Palette.foreground; overflow: elide; }
                                         }
                                         HorizontalLayout { spacing: 8px;
-                                            Text { width: 84px; text: "数据存储"; font-size: 12px; color: Theme.muted; }
-                                            Text { horizontal-stretch: 1; text: "内置 SQLite（WAL 模式）"; font-size: 12px; color: Palette.foreground; overflow: elide; }
+                                            Text { width: I18n.en ? 104px : 84px; text: I18n.en ? "Storage" : "数据存储"; font-size: 12px; color: Theme.muted; }
+                                            Text { horizontal-stretch: 1; text: I18n.en ? "Built-in SQLite (WAL mode)" : "内置 SQLite（WAL 模式）"; font-size: 12px; color: Palette.foreground; overflow: elide; }
                                         }
                                     }
                                 }
@@ -1408,10 +1417,10 @@ export component SettingsWindow inherits AppWindow {
             background: Theme.surface; border-radius: 8px; border-width: 1px; border-color: Theme.stroke;
             VerticalLayout { padding: 16px; spacing: 10px;
                 HorizontalLayout { spacing: 8px;
-                    Button { height: 30px; primary: root.legal-tab == 0; text: "GPL-3.0 许可证"; clicked => { root.legal-tab = 0; } }
-                    Button { height: 30px; primary: root.legal-tab == 1; text: "第三方组件"; clicked => { root.legal-tab = 1; } }
+                    Button { height: 30px; primary: root.legal-tab == 0; text: I18n.en ? "GPL-3.0 License" : "GPL-3.0 许可证"; clicked => { root.legal-tab = 0; } }
+                    Button { height: 30px; primary: root.legal-tab == 1; text: I18n.en ? "Third-party" : "第三方组件"; clicked => { root.legal-tab = 1; } }
                     Rectangle { horizontal-stretch: 1; }
-                    IconButton { icon: @image-url("icons/close.svg"); label: "关闭"; clicked => { root.legal-open = false; } }
+                    IconButton { icon: @image-url("icons/close.svg"); label: I18n.en ? "Close" : "关闭"; clicked => { root.legal-open = false; } }
                 }
                 if root.legal-tab == 0: Rectangle {
                     vertical-stretch: 1; border-radius: 6px; background: Palette.background; border-width: 1px; border-color: Theme.stroke;
@@ -1426,8 +1435,8 @@ export component SettingsWindow inherits AppWindow {
                     }
                 }
                 if root.legal-tab == 0: HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { height: 32px; text: "复制全文"; clicked => { root.copy-license(); } }
-                    Button { height: 32px; primary: true; text: "关闭"; clicked => { root.legal-open = false; } }
+                    Button { height: 32px; text: I18n.en ? "Copy full text" : "复制全文"; clicked => { root.copy-license(); } }
+                    Button { height: 32px; primary: true; text: I18n.en ? "Close" : "关闭"; clicked => { root.legal-open = false; } }
                 }
                 if root.legal-tab == 1: ListView {
                     vertical-stretch: 1;
@@ -1449,11 +1458,11 @@ export component SettingsWindow inherits AppWindow {
                     }
                 }
                 if root.legal-tab == 1: Text {
-                    text: "其余传递依赖均采用与 GPL-3.0-only 兼容的宽松开源许可。内置 Rust 标志遵循 CC BY 4.0 协议，运行期提取的本机与网页图标仅保存在本地数据库中，不随软件分发。";
+                    text: I18n.en ? "All other transitive dependencies use permissive licenses compatible with GPL-3.0-only. The bundled Rust logo follows CC BY 4.0. App and web icons extracted at runtime stay in your local database and are not redistributed." : "其余传递依赖均采用与 GPL-3.0-only 兼容的宽松开源许可。内置 Rust 标志遵循 CC BY 4.0 协议，运行期提取的本机与网页图标仅保存在本地数据库中，不随软件分发。";
                     wrap: word-wrap; font-size: 11.5px; color: Theme.muted;
                 }
                 if root.legal-tab == 1: HorizontalLayout { alignment: end; spacing: 8px;
-                    Button { height: 32px; primary: true; text: "关闭"; clicked => { root.legal-open = false; } }
+                    Button { height: 32px; primary: true; text: I18n.en ? "Close" : "关闭"; clicked => { root.legal-open = false; } }
                 }
             }
         }

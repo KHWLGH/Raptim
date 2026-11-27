@@ -63,7 +63,13 @@ pub fn convert(value: &str, base: &Path, relative: bool) -> Result<String> {
         })
         .count();
     if common == 0 {
-        return Err(Error::Invalid("目标不在同一驱动器，保留绝对路径".into()));
+        return Err(Error::Invalid(
+            crate::i18n::t(
+                "目标不在同一驱动器，保留绝对路径",
+                "Target is on another drive; kept absolute path.",
+            )
+            .into(),
+        ));
     }
     let mut out = PathBuf::from(".");
     for _ in common..a.len() {
@@ -89,7 +95,15 @@ pub fn convert_target(target: &Target, base: &Path, relative: bool) -> Result<Ta
         Target::File { path } | Target::Folder { path } | Target::Shortcut { path, .. } => {
             *path = convert(path, base, relative)?
         }
-        _ => return Err(Error::Invalid("网址和应用标识没有文件路径".into())),
+        _ => {
+            return Err(Error::Invalid(
+                crate::i18n::t(
+                    "网址和应用标识没有文件路径",
+                    "URLs and app AUMIDs have no file path.",
+                )
+                .into(),
+            ));
+        }
     }
     Ok(out)
 }

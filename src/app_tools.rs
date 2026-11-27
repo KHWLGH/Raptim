@@ -181,7 +181,10 @@ impl App {
             });
         }
         if new_entries.is_empty() {
-            self.status("请先勾选要导入的软件");
+            self.status(raptim::i18n::t(
+                "请先勾选要导入的软件",
+                "Select at least one app to import",
+            ));
             return;
         }
         match self.store.add_entries(&new_entries) {
@@ -204,7 +207,13 @@ impl App {
                     })
                     .collect();
                 self.fill_icons_with_sources(wanted);
-                self.status(if skipped > 0 {
+                self.status(if raptim::i18n::is_en() {
+                    if skipped > 0 {
+                        format!("Imported {added} item(s), skipped {skipped} duplicate(s)")
+                    } else {
+                        format!("Imported {added} app(s)")
+                    }
+                } else if skipped > 0 {
                     format!("已导入 {added} 项，跳过 {skipped} 项重复")
                 } else {
                     format!("已导入 {added} 项软件")
@@ -248,7 +257,10 @@ impl App {
                         if installed.contains(&aumid.to_lowercase()) {
                             None
                         } else {
-                            Some("未找到对应的已安装应用")
+                            Some(raptim::i18n::t(
+                                "未找到对应的已安装应用",
+                                "Installed app not found",
+                            ))
                         }
                     }
                     Target::Folder { path } => {
@@ -257,7 +269,10 @@ impl App {
                         if low.starts_with("shell:") || low.starts_with("::{") || p.is_dir() {
                             None
                         } else {
-                            Some("目标文件夹不存在")
+                            Some(raptim::i18n::t(
+                                "目标文件夹不存在",
+                                "Target folder does not exist",
+                            ))
                         }
                     }
                     Target::Program { path, .. }
@@ -274,7 +289,10 @@ impl App {
                         {
                             None
                         } else {
-                            Some("目标文件或快捷方式不存在")
+                            Some(raptim::i18n::t(
+                                "目标文件或快捷方式不存在",
+                                "Target file or shortcut does not exist",
+                            ))
                         }
                     }
                 };
@@ -313,7 +331,10 @@ impl App {
 
     pub(super) fn remove_broken_entry(&mut self, id: i64) {
         if self.editor.as_ref().is_some_and(|e| e.original.id == id) {
-            self.status("请先关闭此项目的编辑窗口");
+            self.status(raptim::i18n::t(
+                "请先关闭此项目的编辑窗口",
+                "Close the editor window for this item first",
+            ));
             return;
         }
         if let Err(e) = self.store.delete_entry(id) {

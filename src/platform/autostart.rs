@@ -67,7 +67,13 @@ pub fn autostart_mismatch(data_dir: &Path, expected_enabled: bool) -> Option<Str
         )
         .is_err()
         {
-            return Some("开机启动项未写入系统注册表，请重新开关生效".into());
+            return Some(
+                crate::i18n::t(
+                    "开机启动项未写入系统注册表，请重新开关生效",
+                    "Startup entry missing from registry; toggle Autostart again to apply.",
+                )
+                .into(),
+            );
         }
         let mut reg_type = REG_VALUE_TYPE::default();
         let mut size = 0u32;
@@ -102,10 +108,22 @@ pub fn autostart_mismatch(data_dir: &Path, expected_enabled: bool) -> Option<Str
         };
         let _ = RegCloseKey(run_key);
         let Some(actual) = actual else {
-            return Some("开机启动项未写入系统注册表，请重新开关生效".into());
+            return Some(
+                crate::i18n::t(
+                    "开机启动项未写入系统注册表，请重新开关生效",
+                    "Startup entry missing from registry; toggle Autostart again to apply.",
+                )
+                .into(),
+            );
         };
         if !actual.trim().eq_ignore_ascii_case(expected.trim()) {
-            return Some("程序路径、数据目录或静默参数已变更，请重新开关「开机启动」更新".into());
+            return Some(
+                crate::i18n::t(
+                    "程序路径、数据目录或静默参数已变更，请重新开关「开机启动」更新",
+                    "Executable, data dir, or flags changed; toggle Autostart to update.",
+                )
+                .into(),
+            );
         }
         let mut approved = HKEY::default();
         if RegOpenKeyExW(
@@ -133,7 +151,13 @@ pub fn autostart_mismatch(data_dir: &Path, expected_enabled: bool) -> Option<Str
                 && (buf[0] & 1 == 1)
             {
                 let _ = RegCloseKey(approved);
-                return Some("系统任务管理器已禁用开机启动，请在任务管理器启用或重新开关".into());
+                return Some(
+                    crate::i18n::t(
+                        "系统任务管理器已禁用开机启动，请在任务管理器启用或重新开关",
+                        "Startup disabled in Task Manager; re-enable there or toggle Autostart.",
+                    )
+                    .into(),
+                );
             }
             let _ = RegCloseKey(approved);
         }

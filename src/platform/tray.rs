@@ -3,8 +3,12 @@ use super::*;
 
 pub struct Tray {
     _icon: tray_icon::TrayIcon,
+    show: tray_icon::menu::MenuItem,
+    restore: tray_icon::menu::MenuItem,
     pause_hide: tray_icon::menu::CheckMenuItem,
     pause_protection: tray_icon::menu::CheckMenuItem,
+    settings: tray_icon::menu::MenuItem,
+    exit: tray_icon::menu::MenuItem,
 }
 
 impl Tray {
@@ -14,12 +18,26 @@ impl Tray {
             menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
         };
         let menu = Menu::new();
-        let show = MenuItem::new("显示 Raptim", true, None);
-        let restore = MenuItem::new("恢复窗口位置", true, None);
-        let pause_hide = CheckMenuItem::new("暂停自动隐藏", true, false, None);
-        let pause_protection = CheckMenuItem::new("暂停游戏勿扰", true, false, None);
-        let settings = MenuItem::new("设置", true, None);
-        let exit = MenuItem::new("退出", true, None);
+        let show = MenuItem::new(crate::i18n::t("显示 Raptim", "Show Raptim"), true, None);
+        let restore = MenuItem::new(
+            crate::i18n::t("恢复窗口位置", "Restore Window Position"),
+            true,
+            None,
+        );
+        let pause_hide = CheckMenuItem::new(
+            crate::i18n::t("暂停自动隐藏", "Pause Auto-Hide"),
+            true,
+            false,
+            None,
+        );
+        let pause_protection = CheckMenuItem::new(
+            crate::i18n::t("暂停游戏勿扰", "Pause Game DND"),
+            true,
+            false,
+            None,
+        );
+        let settings = MenuItem::new(crate::i18n::t("设置", "Settings"), true, None);
+        let exit = MenuItem::new(crate::i18n::t("退出", "Quit"), true, None);
         // Window · toggles · app · quit: the same four sections as the launcher's 更多 menu.
         let (sep_window, sep_toggles, sep_app) = (
             PredefinedMenuItem::separator(),
@@ -92,9 +110,26 @@ impl Tray {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             _icon: icon,
+            show,
+            restore,
             pause_hide,
             pause_protection,
+            settings,
+            exit,
         })
+    }
+
+    pub fn refresh_language(&self) {
+        self.show
+            .set_text(crate::i18n::t("显示 Raptim", "Show Raptim"));
+        self.restore
+            .set_text(crate::i18n::t("恢复窗口位置", "Restore Window Position"));
+        self.pause_hide
+            .set_text(crate::i18n::t("暂停自动隐藏", "Pause Auto-Hide"));
+        self.pause_protection
+            .set_text(crate::i18n::t("暂停游戏勿扰", "Pause Game DND"));
+        self.settings.set_text(crate::i18n::t("设置", "Settings"));
+        self.exit.set_text(crate::i18n::t("退出", "Quit"));
     }
 
     /// Keeps the two check marks honest after a toggle from any other entry point.

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use raptim::{
-    AppOption, BrokenOption, DestinationNode, DiscoverOption, EditorWindow, Item, MainWindow,
+    AppOption, BrokenOption, DestinationNode, DiscoverOption, EditorWindow, I18n, Item, MainWindow,
     NavItem, NoticeItem, Palette, ScopeNode, SettingsWindow,
     launch::Failure,
     model::*,
@@ -339,6 +339,27 @@ impl App {
         }
     }
 
+    fn apply_language(&self) {
+        let en =
+            raptim::i18n::apply_language_mode(self.settings.language) == raptim::i18n::Locale::EnUs;
+        self.main.global::<I18n>().set_en(en);
+        if let Some(ui) = self.settings_ui.get() {
+            ui.global::<I18n>().set_en(en);
+            ui.set_notice_items(app_settings::notice_items());
+        }
+        if let Some(editor) = &self.editor {
+            editor.window.global::<I18n>().set_en(en);
+        }
+        self.tray.refresh_language();
+        windowing::invalidate(self.main.window());
+        if let Some(ui) = self.settings_ui.get() {
+            windowing::invalidate(ui.window());
+        }
+        if let Some(editor) = &self.editor {
+            windowing::invalidate(editor.window.window());
+        }
+    }
+
     fn sync_edge_appearance(&self) {
         self.sync_edge_ui();
         let appearance = raptim::docking::collapsed_appearance(
@@ -421,9 +442,12 @@ impl App {
         self.sync_tray_states();
         self.sync_settings_ui();
         self.status(if self.policy.bypass() {
-            "已暂停游戏勿扰，仅本次运行有效"
+            raptim::i18n::t(
+                "已暂停游戏勿扰，仅本次运行有效",
+                "Game DND paused for this session",
+            )
         } else {
-            "已恢复游戏勿扰判定"
+            raptim::i18n::t("已恢复游戏勿扰判定", "Game DND resumed")
         });
     }
 
@@ -1306,7 +1330,10 @@ impl App {
                     show,
                 },
                 _ => {
-                    self.status("该类型不支持管理员打开");
+                    self.status(raptim::i18n::t(
+                        "该类型不支持管理员打开",
+                        "This target type does not support running as administrator",
+                    ));
                     return;
                 }
             };
@@ -1325,7 +1352,11 @@ impl App {
             } else {
                 Some(Failure {
                     entry: id,
-                    message: "当前处于全屏或游戏保护，已取消启动".into(),
+                    message: raptim::i18n::t(
+                        "当前处于全屏或游戏保护，已取消启动",
+                        "Launch canceled: fullscreen or Game DND protection active",
+                    )
+                    .into(),
                     relocatable: false,
                 })
             };
@@ -1337,11 +1368,17 @@ impl App {
         self.protection_resume.cancel();
         self.save_window(true);
         if self.importing || !self.pending_files.is_empty() {
-            self.status("正在收录文件，请完成后再退出");
+            self.status(raptim::i18n::t(
+                "正在收录文件，请完成后再退出",
+                "Importing files; wait until finished before exiting",
+            ));
             return;
         }
         if self.file_dialog_open {
-            self.status("请先关闭文件选择窗口");
+            self.status(raptim::i18n::t(
+                "请先关闭文件选择窗口",
+                "Please close the file dialog first",
+            ));
             return;
         }
         self.quitting = true;
@@ -1396,19 +1433,24 @@ impl App {
                 DialogKind::EditorTarget if folder => dialog.pick_folder(),
                 DialogKind::EditorTarget => dialog.pick_file(),
                 DialogKind::EditorIcon => dialog
-                    .add_filter("图标", &["png", "jpg", "jpeg", "ico"])
+                    .add_filter(
+                        raptim::i18n::t("图标", "Images"),
+                        &["png", "jpg", "jpeg", "ico"],
+                    )
                     .pick_file(),
-                DialogKind::ProtectedApp => dialog.add_filter("程序", &["exe"]).pick_file(),
+                DialogKind::ProtectedApp => dialog
+                    .add_filter(raptim::i18n::t("程序", "Programs"), &["exe"])
+                    .pick_file(),
                 DialogKind::ExportJson => dialog
-                    .add_filter("Raptim 导出", &["json"])
+                    .add_filter(raptim::i18n::t("Raptim 导出", "Raptim Export"), &["json"])
                     .set_file_name("raptim-export.json")
                     .save_file(),
                 DialogKind::RelocateTarget if folder => dialog.pick_folder(),
                 DialogKind::RelocateTarget => dialog.pick_file(),
                 DialogKind::EditorWorkingDir => dialog.pick_folder(),
-                DialogKind::RestoreJson | DialogKind::AddFiles => {
-                    dialog.add_filter("Raptim 导出", &["json"]).pick_file()
-                }
+                DialogKind::RestoreJson | DialogKind::AddFiles => dialog
+                    .add_filter(raptim::i18n::t("Raptim 导出", "Raptim Export"), &["json"])
+                    .pick_file(),
             };
             let value = path
                 .map(|p| p.to_string_lossy().to_string())
@@ -1491,12 +1533,19 @@ impl App {
                     .open(path)?;
                 file.write_all(&bytes)?;
                 file.sync_all()?;
-                self.settings_ui.set_status("已导出".into());
+                self.settings_ui
+                    .set_status(raptim::i18n::t("已导出", "Exported").into());
             }
             DialogKind::RelocateTarget => self.apply_relocate(value)?,
             DialogKind::RestoreJson => {
                 if self.editor.is_some() {
-                    return Err(Error::Invalid("请先保存或取消项目编辑".into()));
+                    return Err(Error::Invalid(
+                        raptim::i18n::t(
+                            "请先保存或取消项目编辑",
+                            "Save or discard the current item edit first",
+                        )
+                        .into(),
+                    ));
                 }
                 use std::io::Read;
                 let mut bytes = Vec::new();
@@ -1504,21 +1553,35 @@ impl App {
                     .take(32 * 1024 * 1024 + 1)
                     .read_to_end(&mut bytes)?;
                 if bytes.len() > 32 * 1024 * 1024 {
-                    return Err(Error::Invalid("导出文件超过 32 MB".into()));
+                    return Err(Error::Invalid(
+                        raptim::i18n::t("导出文件超过 32 MB", "Export file exceeds 32 MB").into(),
+                    ));
                 }
                 let data: Export = serde_json::from_slice(&bytes)?;
                 raptim::storage::validate_export(&data)?;
                 if let Some(name) = self.store.export_clash(&data.entries) {
-                    return Err(Error::Invalid(format!(
-                        "同一分类内有指向同一目标的不同写法：{name}；未改动数据"
-                    )));
+                    return Err(Error::Invalid(if raptim::i18n::is_en() {
+                        format!(
+                            "Different representations point to the same target in one category: {name}; no changes made"
+                        )
+                    } else {
+                        format!("同一分类内有指向同一目标的不同写法：{name}；未改动数据")
+                    }));
                 }
                 self.settings_ui.set_status(
-                    format!(
-                        "将恢复 {} 个分组/分类、{} 个项目",
-                        data.collections.len(),
-                        data.entries.len()
-                    )
+                    if raptim::i18n::is_en() {
+                        format!(
+                            "Will restore {} collection(s) and {} item(s)",
+                            data.collections.len(),
+                            data.entries.len()
+                        )
+                    } else {
+                        format!(
+                            "将恢复 {} 个分组/分类、{} 个项目",
+                            data.collections.len(),
+                            data.entries.len()
+                        )
+                    }
                     .into(),
                 );
                 self.pending_import = Some(data);
@@ -1537,7 +1600,13 @@ impl App {
             .extend(paths.into_iter().take(capacity).map(|p| (p, collection)));
         self.last_drop = Instant::now();
         if overflow {
-            return Err(Error::Invalid("每次最多添加 500 项，请分批拖入".into()));
+            return Err(Error::Invalid(
+                raptim::i18n::t(
+                    "每次最多添加 500 项，请分批拖入",
+                    "You can add at most 500 items at once; drop in smaller batches",
+                )
+                .into(),
+            ));
         }
         Ok(())
     }
@@ -1550,7 +1619,7 @@ impl App {
             return;
         }
         self.importing = true;
-        self.status("正在读取文件…");
+        self.status(raptim::i18n::t("正在读取文件…", "Reading files…"));
         let paths = std::mem::take(&mut self.pending_files);
         let sink = self.events.clone();
         std::thread::spawn(move || {
@@ -1561,10 +1630,22 @@ impl App {
 
     fn restore(&mut self) -> Result<()> {
         if self.importing || !self.pending_files.is_empty() || self.main.get_busy() {
-            return Err(Error::Invalid("请先等待文件收录完成，再恢复数据".into()));
+            return Err(Error::Invalid(
+                raptim::i18n::t(
+                    "请先等待文件收录完成，再恢复数据",
+                    "Wait for file import to finish before restoring data",
+                )
+                .into(),
+            ));
         }
         if self.editor.is_some() {
-            return Err(Error::Invalid("请先保存或取消项目编辑".into()));
+            return Err(Error::Invalid(
+                raptim::i18n::t(
+                    "请先保存或取消项目编辑",
+                    "Save or discard the current item edit first",
+                )
+                .into(),
+            ));
         }
         let Some(data) = self.pending_import.as_ref() else {
             return Ok(());
@@ -1584,12 +1665,14 @@ impl App {
         self.browsing.views.clear();
         self.browsing.group_categories.clear();
         self.settings = self.store.settings()?;
+        self.apply_language();
         self.sync_settings_ui();
         self.apply_theme();
         self.refresh()?;
         self.pending_import = None;
         self.settings_ui.set_restore_confirm(false);
-        self.settings_ui.set_status("已恢复".into());
+        self.settings_ui
+            .set_status(raptim::i18n::t("已恢复", "Restored").into());
         self.evaluate();
         Ok(())
     }
@@ -1674,30 +1757,46 @@ impl App {
 }
 
 fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    raptim::i18n::apply_language_mode(raptim::i18n::LANGUAGE_SYSTEM);
     let mut data_dir = None;
     let mut portable = false;
     let mut silent = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--data-dir" {
-            data_dir = Some(PathBuf::from(args.next().ok_or("--data-dir 需要目录")?));
+            data_dir = Some(PathBuf::from(args.next().ok_or(raptim::i18n::t(
+                "--data-dir 需要目录",
+                "--data-dir requires a directory",
+            ))?));
         } else if arg == "--portable" {
             portable = true;
         } else if arg == "--silent" {
             silent = true;
         } else {
-            return Err(format!("未知参数：{}", arg.to_string_lossy()).into());
+            return Err(format!(
+                "{}: {}",
+                raptim::i18n::t("未知参数", "Unknown argument"),
+                arg.to_string_lossy()
+            )
+            .into());
         }
     }
     if portable && data_dir.is_some() {
-        return Err("--portable 与 --data-dir 不能同时使用".into());
+        return Err(raptim::i18n::t(
+            "--portable 与 --data-dir 不能同时使用",
+            "--portable and --data-dir cannot be used together",
+        )
+        .into());
     }
     run_at_with_mode(
         match data_dir {
             Some(path) => path,
             None => std::env::current_exe()?
                 .parent()
-                .ok_or("无法确定程序目录")?
+                .ok_or(raptim::i18n::t(
+                    "无法确定程序目录",
+                    "Unable to determine application directory",
+                ))?
                 .to_path_buf(),
         },
         silent,
@@ -1723,7 +1822,7 @@ fn run_at_with_mode(
     raptim::diagnostics::attach(&data_dir);
     std::panic::set_hook(Box::new(|info| {
         let location = info.location().map_or_else(
-            || "<未知位置>".into(),
+            || raptim::i18n::t("<未知位置>", "<unknown location>").into(),
             |l| format!("{}:{}", l.file(), l.line()),
         );
         let payload = info
@@ -1731,7 +1830,7 @@ fn run_at_with_mode(
             .downcast_ref::<&str>()
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "<非字符串 panic>".into());
+            .unwrap_or_else(|| raptim::i18n::t("<非字符串 panic>", "<non-string panic>").into());
         eprintln!("panic at {location}: {payload}");
         raptim::diagnostics::error("panic", &format!("{location} {payload}"));
     }));
@@ -1742,6 +1841,7 @@ fn run_at_with_mode(
     store.ensure_categories()?;
     let initial = store.take_initial()?;
     let settings = initial.settings.clone();
+    raptim::i18n::apply_language_mode(settings.language);
     raptim::diagnostics::set_protection_log(settings.protection_log);
     let saved_window = store.window_state()?;
     let selector = slint::BackendSelector::new()
@@ -1763,6 +1863,7 @@ fn run_at_with_mode(
         });
     selector.select()?;
     let main = MainWindow::new()?;
+    main.global::<I18n>().set_en(raptim::i18n::is_en());
     let mut policy = DisplayPolicy::default();
     let signals = platform::collect_signals(&settings, &mut platform::ProtectionCache::default());
     policy.update(decide(signals), Instant::now(), signals.hold_release());
@@ -2003,7 +2104,10 @@ fn run_at_with_mode(
             .as_ref()
             .is_some_and(|e| e.original.id == i64::from(id))
         {
-            s.status("请先关闭此项目的编辑窗口");
+            s.status(raptim::i18n::t(
+                "请先关闭此项目的编辑窗口",
+                "Close the editor window for this item first",
+            ));
         } else {
             if let Err(e) = s.store.delete_entry(i64::from(id)) {
                 s.status(e);
@@ -2046,7 +2150,7 @@ fn run_at_with_mode(
     });
     bind!(main, on_convert_path, |s, id, relative| {
         if s.editor.is_some() {
-            s.status("请先完成当前编辑");
+            s.status(raptim::i18n::t("请先完成当前编辑", "Finish editing first"));
             return;
         }
         if let Some(mut entry) = s.entries.iter().find(|e| e.id == i64::from(id)).cloned() {
@@ -2146,7 +2250,10 @@ fn run_at_with_mode(
             .as_ref()
             .is_some_and(|e| e.original.id == i64::from(id))
         {
-            s.status("请先完成此项目的编辑");
+            s.status(raptim::i18n::t(
+                "请先完成此项目的编辑",
+                "Finish editing this item first",
+            ));
         } else {
             if let Err(e) = s
                 .store
@@ -2307,23 +2414,40 @@ fn main() {
         Ok(Ok(())) => return,
         Ok(Err(error)) => {
             eprintln!("Raptim: {error}");
-            ("Raptim 无法启动", error.to_string())
+            (
+                raptim::i18n::t("Raptim 无法启动", "Raptim could not start"),
+                error.to_string(),
+            )
         }
         Err(payload) => {
             let text = payload
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "发生意外错误".into());
+                .unwrap_or_else(|| {
+                    raptim::i18n::t("发生意外错误", "An unexpected error occurred").into()
+                });
             raptim::diagnostics::error("fatal", &text);
-            ("Raptim 运行中断", text)
+            (
+                raptim::i18n::t("Raptim 运行中断", "Raptim stopped unexpectedly"),
+                text,
+            )
         }
     };
     let detail = raptim::diagnostics::error_log_path()
-        .map(|path| format!("\n详细记录：{}", path.display()))
+        .map(|path| {
+            format!(
+                "\n{}: {}",
+                raptim::i18n::t("详细记录", "Error log"),
+                path.display()
+            )
+        })
         .unwrap_or_default();
     let permission_hint = if is_permission_error(&message.1) {
-        "\n\n提示：当前数据目录可能只读或缺少写入权限，可通过 `--data-dir <可写目录>` 指定数据位置，或将程序放到用户有写入权限的文件夹。"
+        raptim::i18n::t(
+            "\n\n提示：当前数据目录可能只读或缺少写入权限，可通过 `--data-dir <可写目录>` 指定数据位置，或将程序放到用户有写入权限的文件夹。",
+            "\n\nTip: The data folder may be read-only or lack write permissions. Pass `--data-dir <writable-dir>` or move Raptim to a writable folder.",
+        )
     } else {
         ""
     };

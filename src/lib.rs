@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod docking;
 pub mod gestures;
 pub mod hotkey;
+pub mod i18n;
 pub mod icons;
 pub mod importing;
 pub mod launch;

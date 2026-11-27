@@ -113,7 +113,13 @@ impl App {
     pub(super) fn save_editor(&mut self) {
         if self.icon_pending {
             if let Some(e) = &self.editor {
-                e.window.set_error("正在读取图标，请稍候保存".into());
+                e.window.set_error(
+                    raptim::i18n::t(
+                        "正在读取图标，请稍候保存",
+                        "Loading icon; please wait before saving",
+                    )
+                    .into(),
+                );
             }
             return;
         }
@@ -250,7 +256,10 @@ pub(super) fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
         return;
     }
     if state.file_dialog_open {
-        state.status("请先关闭文件选择窗口");
+        state.status(raptim::i18n::t(
+            "请先关闭文件选择窗口",
+            "Please close the file dialog first",
+        ));
         return;
     }
     if !state.allowed(ShowSource::Editor) {
@@ -261,7 +270,13 @@ pub(super) fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
         && (session.original.id == id || state.editor_dirty())
     {
         if session.original.id != id {
-            session.window.set_error("请先保存或取消当前编辑".into());
+            session.window.set_error(
+                raptim::i18n::t(
+                    "请先保存或取消当前编辑",
+                    "Save or discard the current edit first",
+                )
+                .into(),
+            );
         }
         session.window.set_topmost_window(state.child_topmost());
         let _ = state.show_child_window(session.window.window());
@@ -299,6 +314,7 @@ pub(super) fn open_editor(app: &Rc<RefCell<App>>, id: i64) {
             return;
         }
     };
+    ui.global::<I18n>().set_en(raptim::i18n::is_en());
     ui.set_entry_icon(raptim::icons::display(&entry.icon));
     ui.set_entry_name(entry.name.clone().into());
     ui.set_target(entry.target.value().into());
