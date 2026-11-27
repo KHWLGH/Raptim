@@ -59,13 +59,50 @@ fn physical_rect_to_logical(
     Some((x0, y0, (x1 - x0).max(1.), (y1 - y0).max(1.)))
 }
 
-/// Slint 1.18 still wraps custom Tooltip content in the styled ToolTipImpl.
-/// Remove only that first outline before painting; HintSurface owns the surface.
-/// Kept with the other version-pinned rendering bridges until upstream fixes it.
+fn clear_outline_brushes(
+    background: core::pin::Pin<&i_slint_core::Property<i_slint_core::Brush>>,
+    border_color: core::pin::Pin<&i_slint_core::Property<i_slint_core::Brush>>,
+) {
+    // Clear only the non-constant brush bindings so the software renderer skips painting without
+    // mutating ToolTipImpl's constant border_width/border_radius properties.
+    background.set(Default::default());
+    border_color.set(Default::default());
+}
+
+fn strip_tooltip_outline(item: core::pin::Pin<i_slint_core::items::ItemRef<'_>>) -> bool {
+    use i_slint_core::items::{BasicBorderRectangle, BorderRectangle, ItemRef};
+    if let Some(outline) = ItemRef::downcast_pin::<BasicBorderRectangle>(item) {
+        clear_outline_brushes(
+            BasicBorderRectangle::FIELD_OFFSETS
+                .background()
+                .apply_pin(outline),
+            BasicBorderRectangle::FIELD_OFFSETS
+                .border_color()
+                .apply_pin(outline),
+        );
+        return true;
+    }
+    if let Some(outline) = ItemRef::downcast_pin::<BorderRectangle>(item) {
+        clear_outline_brushes(
+            BorderRectangle::FIELD_OFFSETS
+                .background()
+                .apply_pin(outline),
+            BorderRectangle::FIELD_OFFSETS
+                .border_color()
+                .apply_pin(outline),
+        );
+        return true;
+    }
+    false
+}
+
+/// Slint 1.18 wraps custom Tooltip content in ToolTipImpl, which lowers uniform rounded borders
+/// into BasicBorderRectangle with constant border_width/border_radius. Clear only that first
+/// outer wrapper's brushes before painting so HintSurface owns the card surface without corners
+/// peeking through or mutating constant properties.
 pub fn prepare_tooltips(window: &slint::Window) {
     use i_slint_core::{
         item_tree::{ItemVisitorResult, visit_items},
-        items::BorderRectangle,
         window::{WindowInner, WindowKind},
     };
     for popup in WindowInner::from_pub(window)
@@ -77,20 +114,11 @@ pub fn prepare_tooltips(window: &slint::Window) {
             &popup.component,
             i_slint_core::item_tree::TraversalOrder::BackToFront,
             |_, item, _, &()| {
-                if let Some(outline) =
-                    i_slint_core::items::ItemRef::downcast_pin::<BorderRectangle>(item)
-                {
-                    BorderRectangle::FIELD_OFFSETS
-                        .background()
-                        .apply_pin(outline)
-                        .set(Default::default());
-                    BorderRectangle::FIELD_OFFSETS
-                        .border_width()
-                        .apply_pin(outline)
-                        .set(Default::default());
-                    return ItemVisitorResult::Abort;
+                if strip_tooltip_outline(item) {
+                    ItemVisitorResult::Abort
+                } else {
+                    ItemVisitorResult::Continue(())
                 }
-                ItemVisitorResult::Continue(())
             },
             (),
         );
@@ -309,5 +337,80 @@ mod tests {
             physical_rect_to_logical(-5, -3, 10, 10, 1.25),
             Some((0., 0., 8., 8.))
         );
+    }
+
+    #[test]
+    fn strips_basic_border_rectangle_tooltip_outline_without_touching_constants() {
+        use i_slint_core::{
+            Brush, Color, Property, items::BasicBorderRectangle, lengths::LogicalLength,
+        };
+        use slint::private_unstable_api::re_exports::VRef;
+
+        let theme_bg = std::rc::Rc::pin(Property::new(Brush::SolidColor(Color::from_argb_u8(
+            255, 243, 243, 243,
+        ))));
+        let outline = std::pin::pin!(BasicBorderRectangle::default());
+        BasicBorderRectangle::FIELD_OFFSETS
+            .background()
+            .apply_pin(outline.as_ref())
+            .set_binding({
+                let theme_bg = theme_bg.clone();
+                move || theme_bg.as_ref().get()
+            });
+        BasicBorderRectangle::FIELD_OFFSETS
+            .border_color()
+            .apply_pin(outline.as_ref())
+            .set(Brush::SolidColor(Color::from_argb_u8(255, 180, 180, 180)));
+
+        let border_width = BasicBorderRectangle::FIELD_OFFSETS
+            .border_width()
+            .apply_pin(outline.as_ref());
+        border_width.set(LogicalLength::new(1.0));
+        border_width.set_constant();
+
+        let border_radius = BasicBorderRectangle::FIELD_OFFSETS
+            .border_radius()
+            .apply_pin(outline.as_ref());
+        border_radius.set(LogicalLength::new(4.0));
+        border_radius.set_constant();
+
+        let item = VRef::new_pin(outline.as_ref());
+        assert!(strip_tooltip_outline(item));
+        assert!(strip_tooltip_outline(item));
+
+        // Reactive palette changes must not revive the cleared outline.
+        theme_bg
+            .as_ref()
+            .set(Brush::SolidColor(Color::from_argb_u8(255, 32, 32, 32)));
+        assert_eq!(outline.as_ref().background(), Brush::default());
+        assert_eq!(outline.as_ref().border_color(), Brush::default());
+    }
+
+    #[test]
+    fn strips_border_rectangle_tooltip_outline_without_touching_constants() {
+        use i_slint_core::{Brush, Color, items::BorderRectangle, lengths::LogicalLength};
+        use slint::private_unstable_api::re_exports::VRef;
+
+        let outline = std::pin::pin!(BorderRectangle::default());
+        BorderRectangle::FIELD_OFFSETS
+            .background()
+            .apply_pin(outline.as_ref())
+            .set(Brush::SolidColor(Color::from_argb_u8(255, 240, 240, 240)));
+        BorderRectangle::FIELD_OFFSETS
+            .border_color()
+            .apply_pin(outline.as_ref())
+            .set(Brush::SolidColor(Color::from_argb_u8(255, 190, 190, 190)));
+
+        let border_width = BorderRectangle::FIELD_OFFSETS
+            .border_width()
+            .apply_pin(outline.as_ref());
+        border_width.set(LogicalLength::new(1.0));
+        border_width.set_constant();
+
+        let item = VRef::new_pin(outline.as_ref());
+        assert!(strip_tooltip_outline(item));
+        assert!(strip_tooltip_outline(item));
+        assert_eq!(outline.as_ref().background(), Brush::default());
+        assert_eq!(outline.as_ref().border_color(), Brush::default());
     }
 }

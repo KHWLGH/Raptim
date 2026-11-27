@@ -6,7 +6,10 @@
 
 - 建立基于 Rust + Slint 1.18.0（Fluent 样式、winit 后端与软件渲染器）的 Windows 本地快速启动器主干实现，默认在程序同级目录保存单库 `raptim.db`（WAL 模式），无账号、云同步或 WebView 依赖；支持 `--portable`、`--data-dir <目录>` 与 `--silent` 启动参数（[使用指南](../../docs/USAGE.md)）。
 - 新增分组与子分类双层组织：标题栏下方横向分组栏与左侧纵向分类栏均配备就近「＋」新建按钮（栏空白处不弹菜单），支持 `F2` 就地改名、同级拖拽排序、分类跨分组迁移以及「迁移后删除 / 不迁移直接移除」约束保护（至少保留一个分组，原文件保留）。
-- 新增项目视图与交互能力：支持小（最多 5 列）/ 中（最多 4 列）/ 大（最多 3 列）图标网格及列表视图（窄窗自动减少列数）；支持悬停自动切换分类（200 / 350 / 600 ms）、按住 ≥ 180 ms 且移动 ≥ 12 DIP 的拖拽排序与左右半区插入指示、6 秒自动收起并合并重复提示的状态条，以及显示完整路径与最多 6 行备注的悬停浮层。
+- 新增项目视图与交互能力：支持小（最多 5 列）/ 中（最多 4 列）/ 大（最多 3 列）图标网格（6 px 网格行列间距）及列表视图（窄窗自动减少列数）；支持悬停自动切换分类（200 / 350 / 600 ms）、按住 ≥ 180 ms 且移动 ≥ 12 DIP 的拖拽排序与左右半区插入指示、4.2 秒自动收起且悬停暂停的悬浮提示条 `ToastBar`，以及显示完整路径与最多 6 行备注的悬停浮层。
+- 新增英文界面与系统语言自适应支持（`src/i18n.rs` 与 Slint 全局 `I18n`）：首次启动自动检测 Windows UI 语言（读取注册表 `PreferredUILanguages` / `UserProfile\Languages` / `LocaleName`），新库按语言初始化默认分组/分类（「常用 / 默认分类」或 `Common / Default`），并可在「设置 → 常规 → 界面语言」中在「跟随系统 / 简体中文 / English」间实时切换（跨全部窗口、右键自绘菜单与托盘菜单即时生效，并同步切换 `Segoe UI` 与 `Microsoft YaHei UI` 字体）。
+- 新增完整英文文档与双语索引：[README.en.md](../../README.en.md)、[docs/en/{USAGE,ARCHITECTURE,DEVELOPMENT,PERFORMANCE}.md](../../docs/en/USAGE.md)、[changelog/0.1.0/en-US.md](en-US.md) 及 [CHANGELOG.md](../../CHANGELOG.md)。
+- 新增完全无头、不弹出也不抢占前台窗口的界面预览生成工具（`examples/ui_preview/` 与 `scripts/preview.ps1`）：支持 `--lang zh|en`（`-Lang`）参数与 `docs/previews/` 中英文文档预览图生成，基于 Slint 软件渲染器直接离屏生成主窗口、编辑窗口与设置各分页的浅/深色高清预览图、总览拼图与本地交互式 `index.html` 展示图库（支持精选/全部预设、Window/Card/Raw 边框样式，以及从现有数据目录或导出 JSON 读取真实条目渲染）。
 - 新增主窗内搜索浮层与完整键盘流：支持「全部 / 当前分组 / 当前分类」范围筛选，名称、别名、备注、多关键词、全拼与多种首字母（逐字/词首/驼峰）相关度匹配，以及 IME 输入法组合态防误触保护；新增「获焦后直接打字搜索」开关，以及 `Ctrl+F`、`Ctrl+N`、`Ctrl+,`、`Ctrl+Tab`/`Ctrl+Shift+Tab`、方向键/`Home`/`End`、`Enter`/`Shift+Enter`/`Alt+Enter`、`F2`、`Delete`、`Space`（批量选择）、`Ctrl+A` 与分层 `Esc` 等快捷键。
 - 新增多途径收录与巡检工具：支持程序、文件、文件夹、网址（自动补全 `https://`）、快捷方式、打包应用（`shell:AppsFolder` 列表筛选）六类目标；接入原生 OLE 文件与浏览器网址拖入及编辑窗单图拖入；新增「扫描导入软件」（检索开始菜单快捷方式与本机已安装应用）与「检查失效项目」（后台核查本地路径与已安装应用，支持就地重定位/编辑/移除）；新增批量多选整理与分组/分类树形路径转换预览。
 - 新增贴边收纳与窗口控制：支持左/右/上三边吸附、贴边过伸隐藏贴边侧系统圆角（`DOCK_OVERHANG_DIP`）、临界阻尼动画、1–12 物理像素露边调节、150/250/450 ms 收起延迟、失焦隐藏（100 ms 等待后 100 ms 淡出）与「窗口始终置顶」；支持系统托盘（含仅本次运行有效的「暂停自动隐藏」「暂停游戏勿扰」）、全局热键录制（默认 `Ctrl+Alt+Space`）与 Windows 当前用户开机启动（写入 `--data-dir` 与 `--silent` 并校验注册表及任务管理器批准状态）。
@@ -14,6 +17,9 @@
 
 ## 变更
 
+- 统一全应用下拉选择框视觉与交互样式（`ui/chrome.slint`、`ui/app.slint`）：扩展 `SettingsSelect` 支持自适应宽度、主题一致的悬停/按压/高亮色、`Theme.elevated-stroke` 边框及超出 6 项时的内置滚动列表，并用 `SettingsSelect` 替换主窗口（搜索范围、删除容器迁移目标）与添加/编辑项目窗口（目标类型、打开方式）原有的内置 `ComboBox`。
+- 重构批量多选浮层与界面层级过渡（`ui/chrome.slint`、`ui/app.slint`）：采用不挤占侧边栏与内容区高度的真悬浮单行多选工具栏（带计数徽章、适当间距的「全选 / 全不选」按钮、移动/复制/删除与退出入口、标题栏「多选整理」徽标以及长列表底部滚空余量），借助共用的三层软渲染阴影组件 `ElevationShadow` 与语义化浮层色阶（`elevated`、`elevated-stroke`、`shadow-*`）呈现清晰立体层级，并统一浅/深色卡片圆角与 `ease-out` 状态过渡。
+- 增强本地软件与快捷方式的高分辨率图标提取管线（`src/icons.rs`、`src/platform/discovery.rs`）：桌面应用与 `.lnk` 快捷方式优先直接解析 `.exe` / `.dll`（`RT_GROUP_ICON`）与 `.ico` 内最高分辨率帧（支持非 RGBA PNG 嵌入帧），UWP / MSIX 应用与通用项目优先通过 `IShellItemImageFactory` 请求 256 px 图像，回退 `SHIL_JUMBO` 时自动裁剪旧版小图标的左上角 256 px 透明留白，并统一改用 `Lanczos3` 降采样入库（保持 `STORE_MAX = 128` 内存基线）。
 - 完善「设置 → 关于」界面：自动读取 `CARGO_PKG_VERSION` 作为应用版本，新增 GitHub 仓库、问题反馈、更新日志与「复制环境信息」快捷操作，补充 `GPL-3.0-only` 版权许可卡片以及支持 `Esc` 关闭和全文复制的窗内离线阅读器（使用 `ListView` 逐行虚拟化展示 [LICENSE](../../LICENSE) 原文与第三方组件清单），并保留 Rust 与 `AboutSlint` 归属卡片。
 - 确立项目自有代码与整体分发采用 `GPL-3.0-only` 开源许可（Slint 1.18.0 同步选用 GPLv3 路径），补充根目录 [LICENSE](../../LICENSE) 原文与 `Cargo.toml` 许可元数据，并在 [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) 补全全部直接依赖核查清单与资产归属声明。
 - 优化本地存储与 JSON 导出格式：将图标从 `entries.payload` 迁出至独立 `icon BLOB` 列（JSON 导出改用 Base64 编码），写入时物化 `dup_key` 去重键，并将窗口几何与「始终置顶」拆入 `local_state` 本机状态表（不随导出迁移）；遇到无法识别的表结构或导出字段时直接报错并保留原文件不改写（[技术架构](../../docs/ARCHITECTURE.md#数据存储与兼容边界)）。
@@ -24,6 +30,8 @@
 
 ## 修复
 
+- 修复悬停提示（`Tooltip` / `HintSurface`）在四个圆角外露出灰色边角的问题：`prepare_tooltips` 同步剥离 Slint 1.18 将 `ToolTipImpl` 统一圆角编译而成的 `BasicBorderRectangle` 外框背景与边框画刷（并避免修改常量 `border_width` / `border_radius`），在保持原有 Fluent 圆角卡片外观的同时彻底消除重影灰角。
+- 修复批量多选、路径批量转换范围树与已安装软件扫描列表的复选框在软件渲染器下缺字显示为实心方框的问题：改为内嵌矢量勾选图标（`ui/icons/check.svg`）与矢量半选横线，确保选中态清晰显示对勾。
 - 统一 `update_targets_checked`（重新定位与路径转换落库点）与所有目标修改路径的 `dup_key` 查重逻辑，防止写入同分类撞车记录导致下次启动拒绝打开数据库，同时保持 `entries_collection` 为普通索引以便已有撞车库照常打开并支持批处理中间态。
 - 修复启动失败 `Failure.relocatable` 未读取导致取消 UAC 等无路径可改场景误弹重定位面板的问题，明确仅对「找不到目标 / 设备未就绪 / 网络不可用 / 无效路径」四类且目标具有文件路径的条目提供重定位。
 - 修复网址与应用标识无法创建桌面快捷方式、单实例唤醒线程遇 `WAIT_FAILED` 永久退出、热键 `configure` 超时后本地缓存与系统状态分叉、网页图标抓取未校验 HTTP 2xx 状态码及大写 `<LINK HREF>` 属性解析遗漏的问题。

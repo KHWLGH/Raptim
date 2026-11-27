@@ -10,13 +10,15 @@ use i_slint_core::window::{WindowAdapter, WindowInner};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::{ComponentHandle, Rgb8Pixel, SharedPixelBuffer};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 struct PreviewPlatform {
     latest: Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>,
+    clock: Rc<Cell<Duration>>,
 }
 
 impl slint::platform::Platform for PreviewPlatform {
@@ -25,20 +27,27 @@ impl slint::platform::Platform for PreviewPlatform {
         *self.latest.borrow_mut() = Some(msw.clone());
         Ok(msw)
     }
+
+    fn duration_since_start(&self) -> Duration {
+        self.clock.get()
+    }
 }
 
 pub struct PlatformHandle {
     latest: Rc<RefCell<Option<Rc<MinimalSoftwareWindow>>>>,
+    clock: Rc<Cell<Duration>>,
 }
 
 impl PlatformHandle {
     fn install() -> Result<Self, String> {
         let latest = Rc::new(RefCell::new(None));
+        let clock = Rc::new(Cell::new(Duration::ZERO));
         slint::platform::set_platform(Box::new(PreviewPlatform {
             latest: Rc::clone(&latest),
+            clock: Rc::clone(&clock),
         }))
         .map_err(|e| format!("初始化无头渲染平台失败：{e}"))?;
-        Ok(Self { latest })
+        Ok(Self { latest, clock })
     }
 
     /// Renders a component strictly in memory with zero Win32 HWND creation or focus change.
@@ -86,6 +95,8 @@ impl PlatformHandle {
             renderer.render(buffer.make_mut_slice(), phys.width as usize);
         });
 
+        self.clock
+            .set(self.clock.get() + Duration::from_millis(600));
         slint::platform::update_timers_and_animations();
         msw.request_redraw();
         msw.draw_if_needed(|renderer| {

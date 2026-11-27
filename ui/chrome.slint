@@ -1,4 +1,4 @@
-import { Palette } from "std-widgets.slint";
+import { Palette, ScrollView } from "std-widgets.slint";
 
 export global I18n {
     in-out property <bool> en: false;
@@ -8,11 +8,24 @@ export global Theme {
     out property <color> canvas: Palette.background;
     out property <color> navigation: Palette.background.mix(Palette.foreground, 0.965);
     out property <color> surface: Palette.background.mix(#ffffff, 0.975);
+    out property <color> elevated: Palette.color-scheme == ColorScheme.dark ? Palette.background.mix(#ffffff, 0.92) : #ffffff;
     out property <color> hover: Palette.background.mix(Palette.foreground, 0.90);
     out property <color> active: Palette.background.mix(Palette.foreground, 0.84);
     out property <color> stroke: Palette.background.mix(Palette.foreground, 0.87);
+    out property <color> subtle-stroke: Palette.background.mix(Palette.foreground, 0.92);
+    out property <color> elevated-stroke: Palette.color-scheme == ColorScheme.dark ? Palette.background.mix(Palette.foreground, 0.80) : Palette.background.mix(Palette.foreground, 0.82);
     out property <color> selection: Palette.background.mix(Palette.accent-background, 0.87);
     out property <color> muted: Palette.background.mix(Palette.foreground, 0.38);
+    out property <color> scrim: Palette.color-scheme == ColorScheme.dark ? #00000080 : #00000038;
+    out property <color> shadow: Palette.color-scheme == ColorScheme.dark ? #00000066 : #00000022;
+    out property <color> shadow-ambient: Palette.color-scheme == ColorScheme.dark ? #00000038 : #0000000c;
+    out property <color> shadow-mid: Palette.color-scheme == ColorScheme.dark ? #00000050 : #00000014;
+    out property <color> shadow-key: Palette.color-scheme == ColorScheme.dark ? #00000066 : #0000001c;
+    out property <color> danger: Palette.color-scheme == ColorScheme.dark ? #ff99a4 : #c42b1c;
+    out property <color> danger-hover: Palette.color-scheme == ColorScheme.dark ? #c42b1c36 : #c42b1c18;
+    out property <length> radius-sm: 4px;
+    out property <length> radius-md: 6px;
+    out property <length> radius-lg: 8px;
 }
 
 export component HintSurface inherits Rectangle {
@@ -20,10 +33,13 @@ export component HintSurface inherits Rectangle {
     in property <string> detail;
     in property <string> notes;
     max-width: 360px;
-    background: Theme.surface;
+    background: Theme.elevated;
     border-width: 1px;
     border-color: Theme.stroke;
-    border-radius: 4px;
+    border-radius: Theme.radius-md;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: Theme.shadow;
     VerticalLayout {
         padding: 10px; spacing: 4px; alignment: start;
         Text { text: root.title; vertical-stretch: 0; max-width: 340px; color: Palette.foreground; font-size: root.detail == "" && root.notes == "" ? 12px : 13px; font-weight: root.detail == "" && root.notes == "" ? 400 : 600; wrap: char-wrap; }
@@ -41,9 +57,9 @@ export component IconButton inherits Rectangle {
     callback clicked;
     width: 32px; height: 32px;
     horizontal-stretch: 0;
-    border-radius: 6px;
-    background: checked ? Theme.selection : area.pressed ? Theme.active : area.has-hover ? Theme.hover : transparent;
-    animate background { duration: 100ms; }
+    border-radius: Theme.radius-md;
+    background: checked ? Theme.selection : area.pressed ? Theme.active : area.has-hover ? (root.danger ? Theme.danger-hover : Theme.hover) : transparent;
+    animate background, border-color { duration: 110ms; easing: ease-out; }
     border-width: focus.has-focus ? 1px : 0px;
     border-color: Palette.accent-background;
     opacity: enabled ? 1 : 0.4;
@@ -52,7 +68,7 @@ export component IconButton inherits Rectangle {
     accessible-enabled: enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
     forward-focus: focus;
-    Image { x: 8px; y: 8px; width: 16px; height: 16px; source: root.icon; colorize: root.checked ? Palette.accent-background : root.danger && area.has-hover ? #c42b1c : Palette.foreground; }
+    Image { x: 8px; y: 8px; width: 16px; height: 16px; source: root.icon; colorize: root.checked ? Palette.accent-background : root.danger && area.has-hover ? Theme.danger : Palette.foreground; }
     focus := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.clicked(); return accept; } return reject; }
@@ -165,7 +181,7 @@ export component StepperButton inherits Rectangle {
     width: 30px;
     height: 32px;
     horizontal-stretch: 0;
-    border-radius: 4px;
+    border-radius: Theme.radius-sm;
     background: !root.enabled ? Theme.navigation : area.pressed ? Theme.selection : area.has-hover ? Theme.navigation : Palette.control-background;
     border-width: 1px;
     border-color: focus.has-focus && root.enabled ? Palette.accent-background : Theme.stroke;
@@ -205,17 +221,21 @@ export component StepperButton inherits Rectangle {
 export component SettingsSelect inherits Rectangle {
     in property <[string]> model;
     in property <bool> enabled: true;
+    in property <int> max-visible-items: 6;
     in-out property <int> current-index: 0;
     in property <string> accessible-name;
     callback selected(string);
     out property <string> current-value: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
-    width: 150px;
+    property <length> list-height: root.model.length * 32px;
+    property <length> popup-height: min(root.model.length, root.max-visible-items) * 32px + 8px;
+    preferred-width: 150px;
+    min-width: 84px;
     height: 32px;
-    horizontal-stretch: 0;
-    border-radius: 4px;
-    background: !root.enabled ? Theme.navigation : area.pressed ? Theme.navigation : area.has-hover ? Theme.navigation : Palette.control-background;
+    border-radius: Theme.radius-sm;
+    background: !root.enabled ? Theme.navigation : area.pressed ? Theme.active : area.has-hover ? Theme.hover : Palette.control-background;
     border-width: 1px;
     border-color: key-focus.has-focus && root.enabled ? Palette.accent-background : Theme.stroke;
+    animate background, border-color { duration: 110ms; easing: ease-out; }
     opacity: root.enabled ? 1 : 0.45;
     forward-focus: key-focus;
     accessible-role: combobox;
@@ -223,7 +243,7 @@ export component SettingsSelect inherits Rectangle {
     accessible-enabled: root.enabled;
     accessible-expandable: true;
     accessible-value: root.current-value;
-    accessible-action-expand => { if root.enabled { popup.show(); } }
+    accessible-action-expand => { if root.enabled && root.model.length > 0 { popup.show(); } }
 
     HorizontalLayout {
         padding-left: 11px;
@@ -253,7 +273,7 @@ export component SettingsSelect inherits Rectangle {
         key-pressed(event) => {
             if !root.enabled { return reject; }
             if event.text == Key.Return || event.text == " " {
-                popup.show();
+                if root.model.length > 0 { popup.show(); }
                 return accept;
             }
             if event.text == Key.UpArrow && root.current-index > 0 {
@@ -273,7 +293,7 @@ export component SettingsSelect inherits Rectangle {
     area := TouchArea {
         enabled: root.enabled;
         clicked => {
-            if root.enabled {
+            if root.enabled && root.model.length > 0 {
                 popup.show();
             }
         }
@@ -283,7 +303,7 @@ export component SettingsSelect inherits Rectangle {
         x: 0px;
         y: root.height + 4px;
         width: root.width;
-        height: root.model.length * 32px + 8px;
+        height: root.popup-height;
         close-policy: close-on-click-outside;
         forward-focus: popup-focus;
 
@@ -313,45 +333,225 @@ export component SettingsSelect inherits Rectangle {
             Rectangle {
                 width: parent.width;
                 height: parent.height;
-                border-radius: 6px;
-                background: Theme.surface;
+                border-radius: Theme.radius-lg;
+                background: Theme.elevated;
                 border-width: 1px;
-                border-color: Theme.stroke;
+                border-color: Theme.elevated-stroke;
 
-                VerticalLayout {
-                    padding: 4px;
-                    spacing: 0px;
-                    alignment: start;
-                    for value[index] in root.model: Rectangle {
-                        height: 32px;
-                        border-radius: 4px;
-                        background: index == root.current-index ? Theme.selection : opt-touch.has-hover ? Theme.navigation : transparent;
-                        if index == root.current-index: Rectangle {
-                            x: 2px;
-                            y: 8px;
-                            width: 3px;
-                            height: 16px;
-                            border-radius: 1.5px;
-                            background: Palette.accent-background;
-                        }
-                        Text {
-                            x: 12px;
-                            width: parent.width - 20px;
-                            height: parent.height;
-                            text: value;
-                            color: index == root.current-index ? Palette.accent-background : Palette.foreground;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        opt-touch := TouchArea {
-                            clicked => {
-                                root.current-index = index;
-                                root.selected(value);
-                                popup.close();
+                ScrollView {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    content-width: self.visible-width;
+                    content-height: root.list-height;
+
+                    VerticalLayout {
+                        padding: 0px;
+                        spacing: 0px;
+                        alignment: start;
+                        for value[index] in root.model: Rectangle {
+                            height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: index == root.current-index ? Theme.selection : opt-touch.has-hover ? Theme.hover : transparent;
+                            animate background { duration: 100ms; easing: ease-out; }
+                            if index == root.current-index: Rectangle {
+                                x: 2px;
+                                y: 8px;
+                                width: 3px;
+                                height: 16px;
+                                border-radius: 1.5px;
+                                background: Palette.accent-background;
+                            }
+                            Text {
+                                x: 12px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                text: value;
+                                color: index == root.current-index ? Palette.accent-background : Palette.foreground;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            opt-touch := TouchArea {
+                                clicked => {
+                                    root.current-index = index;
+                                    root.selected(value);
+                                    popup.close();
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+export component BatchActionButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <string> tooltip;
+    callback clicked;
+    horizontal-stretch: 0;
+    height: 30px;
+    border-radius: Theme.radius-md;
+    background: !root.enabled ? transparent : area.pressed ? (root.danger ? Theme.danger-hover : Theme.active) : area.has-hover ? (root.danger ? Theme.danger-hover : Theme.hover) : transparent;
+    border-width: key-focus.has-focus && root.enabled ? 1px : 0px;
+    border-color: Palette.accent-background;
+    opacity: root.enabled ? 1 : 0.38;
+    animate background, opacity { duration: 100ms; easing: ease-out; }
+    forward-focus: key-focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        alignment: center;
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            font-weight: 500;
+            color: root.danger && root.enabled ? Theme.danger : Palette.foreground;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    key-focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    if root.tooltip != "": Tooltip { HintSurface { title: root.tooltip; } }
+}
+
+// Slint's software renderer leaves draw_box_shadow unimplemented, so elevated floating bars use
+// layered translucent rounded frames to create crisp elevation.
+export component ElevationShadow inherits Rectangle {
+    in property <length> radius: Theme.radius-lg;
+    Rectangle { x: -3px; y: 2px; width: parent.width + 6px; height: parent.height + 6px; border-radius: root.radius + 3px; background: Theme.shadow-ambient; }
+    Rectangle { x: -1px; y: 3px; width: parent.width + 2px; height: parent.height + 2px; border-radius: root.radius + 1px; background: Theme.shadow-mid; }
+    Rectangle { x: 0px; y: 1px; width: parent.width; height: parent.height + 1px; border-radius: root.radius; background: Theme.shadow-key; }
+}
+
+export component ToastBar inherits Rectangle {
+    in property <string> text;
+    in property <length> container-height;
+    in property <length> bottom-offset: 14px;
+    callback dismiss;
+    private property <string> shown-text: root.text;
+    changed text => {
+        if root.text != "" {
+            root.shown-text = root.text;
+            auto-hide.restart();
+        }
+    }
+    visible: root.text != "" || self.opacity > 0.01;
+    height: max(38px, toast-layout.preferred-height);
+    y: root.container-height - self.height - root.bottom-offset + (root.text != "" ? 0px : 10px);
+    opacity: root.text != "" ? 1 : 0;
+    animate y, opacity { duration: 180ms; easing: ease-out; }
+
+    auto-hide := Timer {
+        interval: 4200ms;
+        running: root.text != "" && !toast-hover.has-hover;
+        triggered => { root.dismiss(); }
+    }
+
+    ElevationShadow { width: parent.width; height: parent.height; }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: Theme.radius-lg;
+        background: Theme.elevated;
+        border-width: 1px;
+        border-color: Theme.elevated-stroke;
+
+        toast-hover := TouchArea {
+            enabled: root.text != "";
+        }
+
+        toast-layout := HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 6px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: 8px;
+            Rectangle {
+                width: 3px;
+                height: 16px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 1.5px;
+                background: Palette.accent-background;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: root.shown-text;
+                color: Palette.foreground;
+                font-size: 12.5px;
+                wrap: word-wrap;
+                max-lines: 2;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 26px;
+                height: 26px;
+                y: (parent.height - self.height) / 2;
+                horizontal-stretch: 0;
+                border-radius: Theme.radius-md;
+                background: close-touch.pressed ? Theme.active : close-touch.has-hover ? Theme.hover : transparent;
+                border-width: close-focus.has-focus ? 1px : 0px;
+                border-color: Palette.accent-background;
+                animate background { duration: 100ms; easing: ease-out; }
+                forward-focus: close-focus;
+                accessible-role: button;
+                accessible-label: I18n.en ? "Dismiss" : "关闭提示";
+                accessible-enabled: root.text != "";
+                accessible-action-default => { root.dismiss(); }
+                Image {
+                    x: 7px;
+                    y: 7px;
+                    width: 12px;
+                    height: 12px;
+                    source: @image-url("icons/close.svg");
+                    colorize: Palette.alternate-foreground;
+                }
+                close-focus := FocusScope {
+                    x: 0px;
+                    width: 0px;
+                    enabled: root.text != "";
+                    key-pressed(event) => {
+                        if event.text == Key.Return || event.text == " " {
+                            root.dismiss();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
+                close-touch := TouchArea {
+                    enabled: root.text != "";
+                    clicked => { root.dismiss(); }
+                }
+                Tooltip { HintSurface { title: I18n.en ? "Dismiss" : "关闭提示"; } }
             }
         }
     }

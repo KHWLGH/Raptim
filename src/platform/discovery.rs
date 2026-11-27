@@ -1,5 +1,6 @@
 //! Start Menu shortcut discovery, packaged AppsFolder enumeration and Shell icon extraction.
 use super::*;
+use windows::core::Interface;
 
 /// AppsFolder gives one display name plus one parsing name per child; only entries that parse to
 /// an app id are usable as a launch target, so everything else (virtual sub-folders in
@@ -83,14 +84,285 @@ fn child_name(
     String::from_utf16_lossy(&wide[..end])
 }
 
-/// Extract the Windows Shell icon (including shortcut resolution) and save PNG pixels.
+/// Expand `%VAR%` environment placeholders commonly returned by `.lnk` icon locations.
+fn expand_env_vars(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            out.push('%');
+            out.push_str(after);
+            return out;
+        };
+        let name = &after[..end];
+        if !name.is_empty()
+            && !name.contains(['\\', '/'])
+            && let Ok(val) = std::env::var(name)
+        {
+            out.push_str(&val);
+        } else {
+            out.push('%');
+            out.push_str(name);
+            out.push('%');
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn resolve_icon_location(raw_path: &str) -> Option<std::path::PathBuf> {
+    let expanded = expand_env_vars(raw_path.trim().trim_matches('"').trim());
+    if expanded.is_empty() {
+        return None;
+    }
+    let direct = Path::new(&expanded);
+    if direct.is_file() {
+        return Some(direct.to_path_buf());
+    }
+    if !expanded.contains('\\') && !expanded.contains('/') {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| String::from(r"C:\Windows"));
+        let sys32 = Path::new(&root).join("System32").join(&expanded);
+        if sys32.is_file() {
+            return Some(sys32);
+        }
+    }
+    None
+}
+
+fn lnk_icon_candidates(path: &Path) -> Vec<(std::path::PathBuf, i32)> {
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    unsafe {
+        let Ok(link): windows::core::Result<IShellLinkW> =
+            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        else {
+            return candidates;
+        };
+        let Ok(persist): windows::core::Result<IPersistFile> = link.cast() else {
+            return candidates;
+        };
+        let wide_path = wide(&path.to_string_lossy());
+        if persist.Load(PCWSTR(wide_path.as_ptr()), STGM_READ).is_err() {
+            return candidates;
+        }
+        let mut icon_buf = [0u16; 32768];
+        let mut icon_index = 0i32;
+        if link.GetIconLocation(&mut icon_buf, &mut icon_index).is_ok() {
+            let end = icon_buf
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(icon_buf.len());
+            let raw = String::from_utf16_lossy(&icon_buf[..end]);
+            if let Some(resolved) = resolve_icon_location(&raw) {
+                candidates.push((resolved, icon_index));
+            }
+        }
+        let darwin = link
+            .cast::<IShellLinkDataList>()
+            .ok()
+            .and_then(|data| data.GetFlags().ok())
+            .is_some_and(|flags| flags & SLDF_HAS_DARWINID.0 as u32 != 0);
+        if !darwin {
+            let mut target_buf = [0u16; 32768];
+            if link
+                .GetPath(&mut target_buf, std::ptr::null_mut(), 0)
+                .is_ok()
+            {
+                let end = target_buf
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(target_buf.len());
+                let raw = String::from_utf16_lossy(&target_buf[..end]);
+                if let Some(resolved) = resolve_icon_location(&raw)
+                    && candidates.iter().all(|(p, i)| p != &resolved || *i != 0)
+                {
+                    candidates.push((resolved, 0));
+                }
+            }
+        }
+    }
+    candidates
+}
+
+fn extract_direct_resource_icon(path: &Path, icon_index: i32) -> Option<image::RgbaImage> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    let img = match ext.as_str() {
+        "ico" => {
+            let meta = std::fs::metadata(path).ok()?;
+            if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
+                return None;
+            }
+            let bytes = std::fs::read(path).ok()?;
+            crate::icons::decode_best_ico(&bytes)?
+        }
+        "exe" | "dll" | "cpl" | "scr" | "ocx" | "mun" => {
+            crate::icons::extract_pe_icon(path, icon_index)?
+        }
+        _ => return None,
+    };
+    img.pixels().any(|p| p[3] > 0).then_some(img)
+}
+
+struct OwnedBitmap(HBITMAP);
+impl Drop for OwnedBitmap {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(self.0.into());
+            }
+        }
+    }
+}
+
+struct OwnedDc(HDC);
+impl Drop for OwnedDc {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = DeleteDC(self.0);
+            }
+        }
+    }
+}
+
+unsafe fn hbitmap_to_rgba(bitmap: HBITMAP) -> Option<image::RgbaImage> {
+    if bitmap.is_invalid() {
+        return None;
+    }
+    let mut bm = BITMAP::default();
+    if unsafe {
+        GetObjectW(
+            bitmap.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some((&mut bm as *mut BITMAP).cast()),
+        )
+    } == 0
+    {
+        return None;
+    }
+    let width = u32::try_from(bm.bmWidth).ok()?;
+    let height = bm.bmHeight.unsigned_abs();
+    if width == 0 || height == 0 || width > 1024 || height > 1024 {
+        return None;
+    }
+    let dc = OwnedDc(unsafe { CreateCompatibleDC(None) });
+    if dc.0.is_invalid() {
+        return None;
+    }
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let byte_len = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(4)?;
+    let mut bytes = vec![0u8; byte_len];
+    let copied = unsafe {
+        GetDIBits(
+            dc.0,
+            bitmap,
+            0,
+            height,
+            Some(bytes.as_mut_ptr().cast()),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        )
+    };
+    if copied == 0 || bytes.iter().all(|&b| b == 0) {
+        return None;
+    }
+    let all_alpha_zero = bytes.as_chunks::<4>().0.iter().all(|p| p[3] == 0);
+    for p in bytes.as_chunks_mut::<4>().0 {
+        p.swap(0, 2);
+        if all_alpha_zero {
+            p[3] = 255;
+        } else if p[3] > 0 && p[3] < 255 {
+            let a = u32::from(p[3]);
+            for c in &mut p[..3] {
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    let image = image::RgbaImage::from_raw(width, height, bytes)?;
+    let trimmed = crate::icons::trim_jumbo_corner_padding(image);
+    trimmed.pixels().any(|p| p[3] > 0).then_some(trimmed)
+}
+
+unsafe fn shell_item_image(
+    parsing_name: &str,
+    allow_thumbnail_fallback: bool,
+) -> Option<image::RgbaImage> {
+    let wide_name = wide(parsing_name);
+    let factory: IShellItemImageFactory =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(wide_name.as_ptr()), None) }.ok()?;
+    let size = SIZE { cx: 256, cy: 256 };
+    for flag in [SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY] {
+        if let Ok(bmp) = unsafe { factory.GetImage(size, flag) } {
+            let guard = OwnedBitmap(bmp);
+            if let Some(image) = unsafe { hbitmap_to_rgba(guard.0) } {
+                return Some(image);
+            }
+        }
+    }
+    if allow_thumbnail_fallback
+        && let Ok(bmp) = unsafe { factory.GetImage(size, SIIGBF_BIGGERSIZEOK) }
+    {
+        let guard = OwnedBitmap(bmp);
+        return unsafe { hbitmap_to_rgba(guard.0) };
+    }
+    None
+}
+
+/// Extract the highest-resolution icon via direct resource inspection, Shell item image factory,
+/// and `SHGetFileInfoW` fallback, then save Lanczos3-downscaled PNG pixels.
 pub fn shell_icon(path: &Path) -> Vec<u8> {
     let Ok(_com) = ComGuard::new() else {
         return vec![];
     };
+    let is_lnk = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"));
+    let direct = if is_lnk {
+        lnk_icon_candidates(path)
+            .into_iter()
+            .find_map(|(candidate, index)| extract_direct_resource_icon(&candidate, index))
+    } else {
+        extract_direct_resource_icon(path, 0)
+    };
+    if let Some(image) = direct
+        && let Ok(png) = crate::icons::encode(image)
+    {
+        return png;
+    }
+
+    let normalized = path.to_string_lossy().replace('/', "\\");
+    if let Some(image) = unsafe { shell_item_image(&normalized, false) }
+        && let Ok(png) = crate::icons::encode(image)
+    {
+        return png;
+    }
+
     unsafe {
         let mut info = SHFILEINFOW::default();
-        let name = wide(&path.to_string_lossy().replace('/', "\\"));
+        let name = wide(&normalized);
         if SHGetFileInfoW(
             PCWSTR(name.as_ptr()),
             FILE_FLAGS_AND_ATTRIBUTES(0),
@@ -105,8 +377,8 @@ pub fn shell_icon(path: &Path) -> Vec<u8> {
     }
 }
 
-/// Packaged applications have no file system path: their icon is served by the AppsFolder
-/// namespace, so the display name is parsed into an item id and looked up in the same image list.
+/// Packaged applications have no file system path: request their high-resolution logo through
+/// `IShellItemImageFactory` first, falling back to the AppsFolder Shell image list.
 pub fn app_icon(aumid: &str) -> Vec<u8> {
     if !aumid.contains('!') || aumid.contains('\\') {
         return Vec::new();
@@ -114,8 +386,14 @@ pub fn app_icon(aumid: &str) -> Vec<u8> {
     let Ok(_com) = ComGuard::new() else {
         return vec![];
     };
+    let parsing = format!("shell:AppsFolder\\{aumid}");
+    if let Some(image) = unsafe { shell_item_image(&parsing, true) }
+        && let Ok(png) = crate::icons::encode(image)
+    {
+        return png;
+    }
     unsafe {
-        let name = wide(&format!("shell:AppsFolder\\{aumid}"));
+        let name = wide(&parsing);
         let mut id: *mut Common::ITEMIDLIST = std::ptr::null_mut();
         if SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut id, 0, None).is_err() {
             return Vec::new();
@@ -232,6 +510,7 @@ unsafe fn icon_by_index(index: i32) -> Vec<u8> {
             }
         }
         image::RgbaImage::from_raw(size as u32, size as u32, bytes)
+            .map(crate::icons::trim_jumbo_corner_padding)
             .and_then(|i| crate::icons::encode(i).ok())
             .unwrap_or_default()
     }
@@ -380,4 +659,39 @@ pub fn discover_installed_entries() -> Vec<DiscoveredApp> {
     }
     out.sort_by_key(|a| a.name.to_lowercase());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_environment_variables_in_icon_locations() {
+        let expanded = expand_env_vars(r"%SystemRoot%\System32\shell32.dll");
+        if let Ok(sys_root) = std::env::var("SystemRoot") {
+            assert_eq!(expanded, format!(r"{sys_root}\System32\shell32.dll"));
+        }
+        assert_eq!(
+            expand_env_vars(r"C:\Tools\%RAPTIM_MISSING_TEST_VAR%\app.exe"),
+            r"C:\Tools\%RAPTIM_MISSING_TEST_VAR%\app.exe"
+        );
+        assert_eq!(expand_env_vars("plain%unclosed"), "plain%unclosed");
+    }
+
+    #[test]
+    fn shell_icon_extracts_high_res_icon_from_system_exe() {
+        let notepad = Path::new(r"C:\Windows\System32\notepad.exe");
+        if !notepad.is_file() {
+            return;
+        }
+        let png = shell_icon(notepad);
+        assert!(!png.is_empty());
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert!(
+            decoded.width().min(decoded.height()) >= 48,
+            "expected >=48px icon, got {}x{}",
+            decoded.width(),
+            decoded.height()
+        );
+    }
 }
