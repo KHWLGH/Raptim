@@ -1,6 +1,6 @@
 [简体中文](zh-CN.md) | **English**
 
-# 0.1.0 - 2026-11-27
+# 0.1.0 - 2026-11-28
 
 ## Added
 
@@ -22,7 +22,7 @@
 - Enhanced high-resolution native icon extraction (`src/icons.rs`, `src/platform/discovery.rs`): desktop executables/DLLs, `.ico` files, and `.lnk` icon locations now parse PE `RT_GROUP_ICON` / `.ico` frames directly to select the highest-resolution frame (including embedded RGB/palette PNGs), UWP/MSIX apps and shell items query `IShellItemImageFactory` at 256 px before falling back to `SHGetFileInfoW` / `SHIL_JUMBO`, legacy 256 px corner-padded icons are automatically cropped to their natural size, and all downscaling to `STORE_MAX = 128` now uses `Lanczos3`.
 - Completed **Settings → About**: reads `CARGO_PKG_VERSION` automatically, adds GitHub / Issues / Changelog / Copy env info buttons, adds `GPL-3.0-only` card and an offline `Esc`-closable reader (`ListView`-virtualized [LICENSE](../../LICENSE) & third-party notices), plus Rust and `AboutSlint` attribution cards.
 - Standardized repository and distribution licensing on `GPL-3.0-only` (matching Slint 1.18.0's GPLv3 path), added root [LICENSE](../../LICENSE) and `Cargo.toml` license metadata, and documented all direct dependencies and bundled assets in [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md).
-- Upgraded local storage and JSON format: moved icons from `entries.payload` into a dedicated `icon BLOB` column (Base64 in JSON), materialized `dup_key` on write, split host window geometry and `always_on_top` into `local_state` (excluded from exports), and fail closed without altering bytes on incompatible schemas or unknown fields ([Architecture](../../docs/en/ARCHITECTURE.md#data-storage-and-compatibility-boundaries)).
+- Upgraded local storage and JSON format: moved icons from `entries.payload` into a dedicated `icon BLOB` column (Base64 in JSON), materialized `dup_key` on write, split host window geometry and `always_on_top` into `local_state` (excluded from exports), and fail closed without altering bytes on incompatible schemas or unknown fields ([Architecture](../../docs/en/ARCHITECTURE.md#data-storage--compatibility-boundaries)).
 - Simplified Data management to **Export / Restore** (removing redundant backup snapshots and `rusqlite` `backup` feature); Restore runs inside a single transaction with `dup_key` duplicate pre-checks.
 - Unified all in-app context menus into pure-data module `raptim::menus` with bidirectional `region()` verification, reusing blank-area actions in **More** and grouping tray items into four semantic sections.
 - Moved name prompt and app picker into in-window overlays, deferred `SettingsWindow` creation until opened, and restored main window focus only when closing foreground child windows.
@@ -32,11 +32,17 @@
 
 - Fixed gray corner artifacts peeking behind hover tooltips (`Tooltip` / `HintSurface`): `prepare_tooltips` now strips Slint 1.18's uniform-radius `ToolTipImpl` wrapper compiled as `BasicBorderRectangle` by clearing its `background` and `border_color` brushes (without mutating constant `border_width` / `border_radius`), preserving the Fluent rounded card appearance cleanly.
 - Fixed custom checkboxes in batch selection, path-conversion scope picker, and installed-app discovery rendering as solid squares when `U+2713` is missing in software rendering: replaced glyph text with vector checkmark SVG (`ui/icons/check.svg`) and vector indeterminate indicator.
-- Unified `dup_key` validation across `update_targets_checked` (relocation & path conversion) and all target-mutating code paths while keeping `entries_collection` non-unique so batch swaps and existing duplicate DBs continue to open safely.
+- Unified `dup_key` validation for all target changes, matched `update_targets_checked` updates by entry ID, normalized working-directory slashes, and refreshed stale keys when opening a moved portable database. The `entries_collection` index stays non-unique so batch swaps and databases with existing duplicates still work.
 - Fixed false relocation prompts on non-path launch errors (such as UAC cancellation) using `Failure.relocatable`.
-- Fixed desktop shortcut creation for URLs and Store apps, single-instance listener exits on `WAIT_FAILED`, hotkey cache divergence on `configure` timeout, HTTP `2xx` verification and uppercase `<LINK HREF>` handling in web favicon fetching.
+- Fixed desktop shortcut creation for URLs and Store apps, single-instance listener exits on `WAIT_FAILED`, HTTP `2xx` verification, and uppercase `<LINK HREF>` handling in web favicon fetching.
+- Fixed global hotkeys remaining registered after disabling them, cache divergence after configuration timeouts, autostart registry `HKEY` leaks, trailing-backslash argument quoting, and stale `StartupApproved\Run` entries when re-enabling startup after Task Manager disabled it.
 - Eliminated unconditional `GWL_EXSTYLE` writes, `winit::set_window_level` calls (which stripped `WS_EX_TOOLWINDOW`), and redundant `SetWindowRgn` calls causing taskbar flashes and repeated frame rebuilds (confirming 1/1 default and 0/0 always-on-top frame writes; see [Performance & Boundaries](../../docs/en/PERFORMANCE.md#edge-frame-writes--compositor-boundaries)).
 - Fixed menu glyphs and reorder boundary checks, and ensured `SHBindToParent`'s interior `ppidlLast` child pointer is never passed to `CoTaskMemFree`.
+- Game Do Not Disturb now recalculates release timing when debounce settings change and releases protection immediately when session bypass is enabled. Elevated launches respect the bypass.
+- Fixed edge reveal while auto-hide is paused, off-by-one non-DWM rounded regions and their tracking, context menu re-entrancy and window property cleanup, and monitor hot-unplug handling. File drops now distinguish shortcuts from programs correctly, and dropped URL titles have control characters removed.
+- Fixed a main-window reference cycle, settings control synchronization, navigation and search scrolling, path-conversion details scrolling, unwanted favicon requests when opening URL entries, editor error colors, keyboard and accessibility support for installed app discovery, and focus restoration after closing overlays.
+- Fixed scrollbar drag stutter caused by `DragGuard`. Docked auto-hide stays paused while the main window owns mouse capture and the mouse button remains pressed outside the window.
+- Fixed URL scheme detection and case-insensitive `localhost` handling, enforced the 256 KiB icon limit and category migration level and 200-character limits, checked category names case-insensitively, and corrected protection-log CSV escaping, header deduplication, and native-path redaction.
 
 ## Performance & Maintenance
 
@@ -44,3 +50,6 @@
 - Implemented viewport row virtualization, 24 MiB LRU icon decode cache with background workers, and `STORE_MAX = 128` downscaling.
 - Modularized binary handlers (`app_*`, `ui_commands`) and Win32 submodules (`platform/*`), consolidating `slint::include_modules!()` inside `src/lib.rs`.
 - Replaced fragile pixel/text snapshot checks with pure-logic unit tests and headless `scripts/verify.ps1` verification.
+- Made the 500 ms background poll run on demand, reused frame-clock events and WinHTTP sessions and buffers, coalesced icon cache notifications, and skipped work when its queue is full. Reduced process-matching allocations, repeated OLE format queries, and icon data copying during broken-item checks.
+- Reduced software-rendering dirty regions, instantiated grid tiles only for existing items in each row, and trimmed work during scrolling and timer updates. Moved folder, log, and external-link opens off the UI thread, reused icon bytes read from the database, and reduced idle redraws.
+- Added a fallback icon for shortcuts, removed unused icons and UI bindings and callbacks, and trimmed unused public exports, fields, and derives.
