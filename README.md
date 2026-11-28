@@ -36,11 +36,8 @@ Raptim 可以把常用的程序、文件、文件夹、网址和系统应用集�
 ## 界面预览
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/previews/overview-dark.png" />
-    <source media="(prefers-color-scheme: light)" srcset="docs/previews/overview-light.png" />
-    <img src="docs/previews/overview-light.png" alt="Raptim 界面总览" width="100%" />
-  </picture>
+  <img src="docs/previews/overview-light.png#gh-light-mode-only" alt="Raptim 界面总览" width="100%" />
+  <img src="docs/previews/overview-dark.png#gh-dark-mode-only" alt="Raptim 界面总览" width="100%" />
 </p>
 
 <p align="center">
@@ -52,70 +49,91 @@ Raptim 可以把常用的程序、文件、文件夹、网址和系统应用集�
     <td width="50%" align="center">
       <strong>主窗口 · 网格视图</strong><br />
       <sub>一级分组栏、二级分类导航与多列项目网格</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/main-grid.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/main-grid.png" />
-        <img src="docs/previews/light/main-grid.png" alt="主窗口网格视图" width="320" />
-      </picture>
+      <img src="docs/previews/light/main-grid.png#gh-light-mode-only" alt="主窗口网格视图" width="320" />
+      <img src="docs/previews/dark/main-grid.png#gh-dark-mode-only" alt="主窗口网格视图" width="320" />
     </td>
     <td width="50%" align="center">
       <strong>主窗口 · 快速搜索</strong><br />
       <sub>支持全部 / 分组 / 分类范围与中文全拼、首字母检索</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/main-search.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/main-search.png" />
-        <img src="docs/previews/light/main-search.png" alt="主窗口搜索浮层" width="320" />
-      </picture>
+      <img src="docs/previews/light/main-search.png#gh-light-mode-only" alt="主窗口搜索浮层" width="320" />
+      <img src="docs/previews/dark/main-search.png#gh-dark-mode-only" alt="主窗口搜索浮层" width="320" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
       <strong>扫描导入已安装软件</strong><br />
       <sub>自动识别开始菜单与系统应用，支持关键字筛选批量导入</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/main-discover.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/main-discover.png" />
-        <img src="docs/previews/light/main-discover.png" alt="扫描导入已安装软件" width="320" />
-      </picture>
+      <img src="docs/previews/light/main-discover.png#gh-light-mode-only" alt="扫描导入已安装软件" width="320" />
+      <img src="docs/previews/dark/main-discover.png#gh-dark-mode-only" alt="扫描导入已安装软件" width="320" />
     </td>
     <td width="50%" align="center">
       <strong>项目编辑表单</strong><br />
       <sub>支持程序、文件、文件夹、网址、快捷方式与 UWP 应用</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/editor-program.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/editor-program.png" />
-        <img src="docs/previews/light/editor-program.png" alt="项目编辑窗口" width="360" />
-      </picture>
+      <img src="docs/previews/light/editor-program.png#gh-light-mode-only" alt="项目编辑窗口" width="360" />
+      <img src="docs/previews/dark/editor-program.png#gh-dark-mode-only" alt="项目编辑窗口" width="360" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
       <strong>设置 · 呼出与贴边收纳</strong><br />
       <sub>全局热键录制、贴边自动隐藏、露边宽度与始终置顶</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/settings-summon.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/settings-summon.png" />
-        <img src="docs/previews/light/settings-summon.png" alt="设置呼出与隐藏页" width="420" />
-      </picture>
+      <img src="docs/previews/light/settings-summon.png#gh-light-mode-only" alt="设置呼出与隐藏页" width="420" />
+      <img src="docs/previews/dark/settings-summon.png#gh-dark-mode-only" alt="设置呼出与隐藏页" width="420" />
     </td>
     <td width="50%" align="center">
       <strong>设置 · 游戏勿扰保护</strong><br />
       <sub>全屏自动免打扰、临时旁路开关与严格保护程序列表</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/dark/settings-protection.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/light/settings-protection.png" />
-        <img src="docs/previews/light/settings-protection.png" alt="设置游戏勿扰页" width="420" />
-      </picture>
+      <img src="docs/previews/light/settings-protection.png#gh-light-mode-only" alt="设置游戏勿扰页" width="420" />
+      <img src="docs/previews/dark/settings-protection.png#gh-dark-mode-only" alt="设置游戏勿扰页" width="420" />
     </td>
   </tr>
 </table>
 
 <details>
-<summary>查看深色主题总览</summary>
+<summary>查看深色主题完整预览</summary>
 
 <p align="center">
   <img src="docs/previews/overview-dark.png" alt="Raptim 深色主题界面总览" width="100%" />
 </p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>主窗口 · 网格视图</strong><br />
+      <sub>一级分组栏、二级分类导航与多列项目网格</sub><br /><br />
+      <img src="docs/previews/dark/main-grid.png" alt="主窗口网格视图（深色主题）" width="320" />
+    </td>
+    <td width="50%" align="center">
+      <strong>主窗口 · 快速搜索</strong><br />
+      <sub>支持全部 / 分组 / 分类范围与中文全拼、首字母检索</sub><br /><br />
+      <img src="docs/previews/dark/main-search.png" alt="主窗口搜索浮层（深色主题）" width="320" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>扫描导入已安装软件</strong><br />
+      <sub>自动识别开始菜单与系统应用，支持关键字筛选批量导入</sub><br /><br />
+      <img src="docs/previews/dark/main-discover.png" alt="扫描导入已安装软件（深色主题）" width="320" />
+    </td>
+    <td width="50%" align="center">
+      <strong>项目编辑表单</strong><br />
+      <sub>支持程序、文件、文件夹、网址、快捷方式与 UWP 应用</sub><br /><br />
+      <img src="docs/previews/dark/editor-program.png" alt="项目编辑窗口（深色主题）" width="360" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>设置 · 呼出与贴边收纳</strong><br />
+      <sub>全局热键录制、贴边自动隐藏、露边宽度与始终置顶</sub><br /><br />
+      <img src="docs/previews/dark/settings-summon.png" alt="设置呼出与隐藏页（深色主题）" width="420" />
+    </td>
+    <td width="50%" align="center">
+      <strong>设置 · 游戏勿扰保护</strong><br />
+      <sub>全屏自动免打扰、临时旁路开关与严格保护程序列表</sub><br /><br />
+      <img src="docs/previews/dark/settings-protection.png" alt="设置游戏勿扰页（深色主题）" width="420" />
+    </td>
+  </tr>
+</table>
 
 </details>
 

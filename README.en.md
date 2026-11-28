@@ -36,11 +36,8 @@ Built natively with **Rust**, **Slint**, and embedded **SQLite**, Raptim require
 ## UI Previews
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/overview-dark.png" />
-    <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/overview-light.png" />
-    <img src="docs/previews/en/overview-light.png" alt="Raptim English UI Overview" width="100%" />
-  </picture>
+  <img src="docs/previews/en/overview-light.png#gh-light-mode-only" alt="Raptim English UI Overview" width="100%" />
+  <img src="docs/previews/en/overview-dark.png#gh-dark-mode-only" alt="Raptim English UI Overview" width="100%" />
 </p>
 
 <p align="center">
@@ -52,70 +49,91 @@ Built natively with **Rust**, **Slint**, and embedded **SQLite**, Raptim require
     <td width="50%" align="center">
       <strong>Main Window · Grid View</strong><br />
       <sub>Top group tabs, category sidebar, and multi-column icon grid</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/dark/main-grid.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/light/main-grid.png" />
-        <img src="docs/previews/en/light/main-grid.png" alt="Main window grid view" width="320" />
-      </picture>
+      <img src="docs/previews/en/light/main-grid.png#gh-light-mode-only" alt="Main window grid view" width="320" />
+      <img src="docs/previews/en/dark/main-grid.png#gh-dark-mode-only" alt="Main window grid view" width="320" />
     </td>
     <td width="50%" align="center">
       <strong>Main Window · Live Search</strong><br />
       <sub>All / Group / Category scopes with multi-keyword and Pinyin matching</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/dark/main-search.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/light/main-search.png" />
-        <img src="docs/previews/en/light/main-search.png" alt="Main window live search" width="320" />
-      </picture>
+      <img src="docs/previews/en/light/main-search.png#gh-light-mode-only" alt="Main window live search" width="320" />
+      <img src="docs/previews/en/dark/main-search.png#gh-dark-mode-only" alt="Main window live search" width="320" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
       <strong>Scan & Import Installed Apps</strong><br />
       <sub>Background scan of Start Menu and Store/UWP apps with batch import</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/dark/main-discover.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/light/main-discover.png" />
-        <img src="docs/previews/en/light/main-discover.png" alt="Scan and import installed apps" width="320" />
-      </picture>
+      <img src="docs/previews/en/light/main-discover.png#gh-light-mode-only" alt="Scan and import installed apps" width="320" />
+      <img src="docs/previews/en/dark/main-discover.png#gh-dark-mode-only" alt="Scan and import installed apps" width="320" />
     </td>
     <td width="50%" align="center">
       <strong>Item Editor</strong><br />
       <sub>Programs, files, folders, URLs, shortcuts, and App AUMIDs</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/dark/editor-program.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/light/editor-program.png" />
-        <img src="docs/previews/en/light/editor-program.png" alt="Item editor window" width="360" />
-      </picture>
+      <img src="docs/previews/en/light/editor-program.png#gh-light-mode-only" alt="Item editor window" width="360" />
+      <img src="docs/previews/en/dark/editor-program.png#gh-dark-mode-only" alt="Item editor window" width="360" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
       <strong>Settings · Summon & Hide</strong><br />
       <sub>Global hotkey recorder, edge auto-hide, strip width, and always on top</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/dark/settings-summon.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/light/settings-summon.png" />
-        <img src="docs/previews/en/light/settings-summon.png" alt="Settings Summon and Hide" width="420" />
-      </picture>
+      <img src="docs/previews/en/light/settings-summon.png#gh-light-mode-only" alt="Settings Summon and Hide" width="420" />
+      <img src="docs/previews/en/dark/settings-summon.png#gh-dark-mode-only" alt="Settings Summon and Hide" width="420" />
     </td>
     <td width="50%" align="center">
       <strong>Settings · Game DND Protection</strong><br />
       <sub>Fullscreen protection, session bypass, and strict protected app list</sub><br /><br />
-      <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/previews/en/dark/settings-protection.png" />
-        <source media="(prefers-color-scheme: light)" srcset="docs/previews/en/light/settings-protection.png" />
-        <img src="docs/previews/en/light/settings-protection.png" alt="Settings Game DND" width="420" />
-      </picture>
+      <img src="docs/previews/en/light/settings-protection.png#gh-light-mode-only" alt="Settings Game DND" width="420" />
+      <img src="docs/previews/en/dark/settings-protection.png#gh-dark-mode-only" alt="Settings Game DND" width="420" />
     </td>
   </tr>
 </table>
 
 <details>
-<summary>View Dark Theme Overview</summary>
+<summary>View Full Dark Theme Previews</summary>
 
 <p align="center">
   <img src="docs/previews/en/overview-dark.png" alt="Raptim Dark Theme UI Overview" width="100%" />
 </p>
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Main Window · Grid View</strong><br />
+      <sub>Top group tabs, category sidebar, and multi-column icon grid</sub><br /><br />
+      <img src="docs/previews/en/dark/main-grid.png" alt="Main window grid view (Dark Theme)" width="320" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Main Window · Live Search</strong><br />
+      <sub>All / Group / Category scopes with multi-keyword and Pinyin matching</sub><br /><br />
+      <img src="docs/previews/en/dark/main-search.png" alt="Main window live search (Dark Theme)" width="320" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Scan & Import Installed Apps</strong><br />
+      <sub>Background scan of Start Menu and Store/UWP apps with batch import</sub><br /><br />
+      <img src="docs/previews/en/dark/main-discover.png" alt="Scan and import installed apps (Dark Theme)" width="320" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Item Editor</strong><br />
+      <sub>Programs, files, folders, URLs, shortcuts, and App AUMIDs</sub><br /><br />
+      <img src="docs/previews/en/dark/editor-program.png" alt="Item editor window (Dark Theme)" width="360" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Settings · Summon & Hide</strong><br />
+      <sub>Global hotkey recorder, edge auto-hide, strip width, and always on top</sub><br /><br />
+      <img src="docs/previews/en/dark/settings-summon.png" alt="Settings Summon and Hide (Dark Theme)" width="420" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Settings · Game DND Protection</strong><br />
+      <sub>Fullscreen protection, session bypass, and strict protected app list</sub><br /><br />
+      <img src="docs/previews/en/dark/settings-protection.png" alt="Settings Game DND (Dark Theme)" width="420" />
+    </td>
+  </tr>
+</table>
 
 </details>
 
