@@ -90,47 +90,43 @@ Built natively with **Rust**, **Slint**, and embedded **SQLite**, Raptim require
 </table>
 
 <details>
-<summary>View Full Dark Theme Previews</summary>
-
-<p align="center">
-  <img src="docs/previews/en/overview-dark.png" alt="Raptim Dark Theme UI Overview" width="100%" />
-</p>
+<summary>View More UI Screenshots (List View, Batch Actions, Broken Check & Settings)</summary>
 
 <table>
   <tr>
     <td width="50%" align="center">
-      <strong>Main Window · Grid View</strong><br />
-      <sub>Top group tabs, category sidebar, and multi-column icon grid</sub><br /><br />
-      <img src="docs/previews/en/dark/main-grid.png" alt="Main window grid view (Dark Theme)" width="320" />
+      <strong>Main Window · List View</strong><br />
+      <sub>Compact list layout showing item names and target paths</sub><br /><br />
+      <img src="docs/previews/en/light/main-list.png#gh-light-mode-only" alt="Main window list view" width="320" />
+      <img src="docs/previews/en/dark/main-list.png#gh-dark-mode-only" alt="Main window list view" width="320" />
     </td>
     <td width="50%" align="center">
-      <strong>Main Window · Live Search</strong><br />
-      <sub>All / Group / Category scopes with multi-keyword and Pinyin matching</sub><br /><br />
-      <img src="docs/previews/en/dark/main-search.png" alt="Main window live search (Dark Theme)" width="320" />
+      <strong>Batch Multi-Select</strong><br />
+      <sub>Select multiple items to move, copy, or delete from the floating action bar</sub><br /><br />
+      <img src="docs/previews/en/light/main-batch.png#gh-light-mode-only" alt="Batch multi-select" width="320" />
+      <img src="docs/previews/en/dark/main-batch.png#gh-dark-mode-only" alt="Batch multi-select" width="320" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <strong>Broken Item Check</strong><br />
+      <sub>Offline scan for missing files, folders, and uninstalled apps with quick relocate or remove</sub><br /><br />
+      <img src="docs/previews/en/light/main-broken.png#gh-light-mode-only" alt="Broken item check" width="320" />
+      <img src="docs/previews/en/dark/main-broken.png#gh-dark-mode-only" alt="Broken item check" width="320" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <strong>Scan & Import Installed Apps</strong><br />
-      <sub>Background scan of Start Menu and Store/UWP apps with batch import</sub><br /><br />
-      <img src="docs/previews/en/dark/main-discover.png" alt="Scan and import installed apps (Dark Theme)" width="320" />
+      <strong>Settings · General</strong><br />
+      <sub>Theme, bilingual UI language, autostart, click mode, and hover-to-switch delay</sub><br /><br />
+      <img src="docs/previews/en/light/settings-general.png#gh-light-mode-only" alt="Settings General" width="420" />
+      <img src="docs/previews/en/dark/settings-general.png#gh-dark-mode-only" alt="Settings General" width="420" />
     </td>
     <td width="50%" align="center">
-      <strong>Item Editor</strong><br />
-      <sub>Programs, files, folders, URLs, shortcuts, and App AUMIDs</sub><br /><br />
-      <img src="docs/previews/en/dark/editor-program.png" alt="Item editor window (Dark Theme)" width="360" />
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <strong>Settings · Summon & Hide</strong><br />
-      <sub>Global hotkey recorder, edge auto-hide, strip width, and always on top</sub><br /><br />
-      <img src="docs/previews/en/dark/settings-summon.png" alt="Settings Summon and Hide (Dark Theme)" width="420" />
-    </td>
-    <td width="50%" align="center">
-      <strong>Settings · Game DND Protection</strong><br />
-      <sub>Fullscreen protection, session bypass, and strict protected app list</sub><br /><br />
-      <img src="docs/previews/en/dark/settings-protection.png" alt="Settings Game DND (Dark Theme)" width="420" />
+      <strong>Settings · About</strong><br />
+      <sub>Version info, one-click diagnostics copy, GPLv3 license, and third-party attributions</sub><br /><br />
+      <img src="docs/previews/en/light/settings-about.png#gh-light-mode-only" alt="Settings About" width="420" />
+      <img src="docs/previews/en/dark/settings-about.png#gh-dark-mode-only" alt="Settings About" width="420" />
     </td>
   </tr>
 </table>

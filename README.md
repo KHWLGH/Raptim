@@ -90,47 +90,43 @@ Raptim 可以把常用的程序、文件、文件夹、网址和系统应用集�
 </table>
 
 <details>
-<summary>查看深色主题完整预览</summary>
-
-<p align="center">
-  <img src="docs/previews/overview-dark.png" alt="Raptim 深色主题界面总览" width="100%" />
-</p>
+<summary>查看更多界面截图（列表视图、批量整理、失效检查与设置页）</summary>
 
 <table>
   <tr>
     <td width="50%" align="center">
-      <strong>主窗口 · 网格视图</strong><br />
-      <sub>一级分组栏、二级分类导航与多列项目网格</sub><br /><br />
-      <img src="docs/previews/dark/main-grid.png" alt="主窗口网格视图（深色主题）" width="320" />
+      <strong>主窗口 · 列表视图</strong><br />
+      <sub>单列紧凑列表展示项目名称与完整目标路径</sub><br /><br />
+      <img src="docs/previews/light/main-list.png#gh-light-mode-only" alt="主窗口列表视图" width="320" />
+      <img src="docs/previews/dark/main-list.png#gh-dark-mode-only" alt="主窗口列表视图" width="320" />
     </td>
     <td width="50%" align="center">
-      <strong>主窗口 · 快速搜索</strong><br />
-      <sub>支持全部 / 分组 / 分类范围与中文全拼、首字母检索</sub><br /><br />
-      <img src="docs/previews/dark/main-search.png" alt="主窗口搜索浮层（深色主题）" width="320" />
+      <strong>批量多选整理</strong><br />
+      <sub>勾选多个条目并通过底部悬浮栏一键移动、复制或删除</sub><br /><br />
+      <img src="docs/previews/light/main-batch.png#gh-light-mode-only" alt="批量多选整理" width="320" />
+      <img src="docs/previews/dark/main-batch.png#gh-dark-mode-only" alt="批量多选整理" width="320" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <strong>失效项目检查</strong><br />
+      <sub>离线检测缺失文件、文件夹与已卸载应用，支持快速重定位或移除</sub><br /><br />
+      <img src="docs/previews/light/main-broken.png#gh-light-mode-only" alt="失效项目检查" width="320" />
+      <img src="docs/previews/dark/main-broken.png#gh-dark-mode-only" alt="失效项目检查" width="320" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <strong>扫描导入已安装软件</strong><br />
-      <sub>自动识别开始菜单与系统应用，支持关键字筛选批量导入</sub><br /><br />
-      <img src="docs/previews/dark/main-discover.png" alt="扫描导入已安装软件（深色主题）" width="320" />
+      <strong>设置 · 常规</strong><br />
+      <sub>外观主题、双语界面切换、开机启动、单双击启动与悬停切换分类</sub><br /><br />
+      <img src="docs/previews/light/settings-general.png#gh-light-mode-only" alt="设置常规页" width="420" />
+      <img src="docs/previews/dark/settings-general.png#gh-dark-mode-only" alt="设置常规页" width="420" />
     </td>
     <td width="50%" align="center">
-      <strong>项目编辑表单</strong><br />
-      <sub>支持程序、文件、文件夹、网址、快捷方式与 UWP 应用</sub><br /><br />
-      <img src="docs/previews/dark/editor-program.png" alt="项目编辑窗口（深色主题）" width="360" />
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" align="center">
-      <strong>设置 · 呼出与贴边收纳</strong><br />
-      <sub>全局热键录制、贴边自动隐藏、露边宽度与始终置顶</sub><br /><br />
-      <img src="docs/previews/dark/settings-summon.png" alt="设置呼出与隐藏页（深色主题）" width="420" />
-    </td>
-    <td width="50%" align="center">
-      <strong>设置 · 游戏勿扰保护</strong><br />
-      <sub>全屏自动免打扰、临时旁路开关与严格保护程序列表</sub><br /><br />
-      <img src="docs/previews/dark/settings-protection.png" alt="设置游戏勿扰页（深色主题）" width="420" />
+      <strong>设置 · 关于</strong><br />
+      <sub>版本号、环境信息一键复制、GPLv3 许可与第三方组件归属</sub><br /><br />
+      <img src="docs/previews/light/settings-about.png#gh-light-mode-only" alt="设置关于页" width="420" />
+      <img src="docs/previews/dark/settings-about.png#gh-dark-mode-only" alt="设置关于页" width="420" />
     </td>
   </tr>
 </table>
