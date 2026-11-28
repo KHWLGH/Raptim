@@ -96,7 +96,7 @@ flowchart LR
 - **单调防过期机制**：来自平台监视的异步 `NativeSignal` 若可能产生窗体显示副作用，会携带调度当时的 `policy.ticket()`，进入 UI 线程后若保护等级或旁路状态已变更即直接丢弃。图标回填、应用图标提取与失效检查同样绑定 `data_epoch` / `icon_epoch` / `editor_generation`，防止旧会话回调污染当前界面。
 - **低功耗空闲与动画调度**：
   - 主窗口、设置与编辑窗口全部隐藏且保护态为 `Normal` 时，500 ms 常规评估停止轮询（`should_poll_tick` 返回 `false`），后台完全零轮询等待系统唤醒信号。
-  - 贴边收纳态使用 `collapsed_probe` 检测鼠标与停靠揭示带的距离：鼠标位于 96 px 接近带（`APPROACH_MARGIN_PX`）外时降频至 **32 ms**，进入接近带内恢复 **16 ms**；未贴边失焦淡出期间为 **8 ms**。
+  - 贴边收纳态使用 `collapsed_probe` 检测鼠标与停靠揭示带的距离：鼠标位于 96 px 接近带（`APPROACH_MARGIN_PX`）外时降频至 **32 ms**，进入接近带内恢复 **16 ms**；未贴边失焦淡出期间为 **8 ms**。收纳态复用 500 ms 巡检校准工作区和感应带。
   - 贴边滑动动画由专用线程 `FrameClock`（高分辨率可等待定时器配合 `DwmGetCompositionTimingInfo` 计算下一次 VBlank 时刻）按单帧未确认队列推进，不阻塞 UI 线程，静止或隐藏后立即休眠。
 
 ## 核心启动与唤出时序
@@ -167,7 +167,7 @@ sequenceDiagram
   1. `bypass == true`（本次运行暂停游戏勿扰）→ `Normal`
   2. `strict_rule == true`（前台进程命中严格保护程序列表）→ `Strict`
   3. `auxiliary_open == true`（设置/编辑/内联改名/文件对话框已打开）→ `Normal`
-  4. `fullscreen_geometry` 或系统通知为 `RunningD3dFullScreen` / `PresentationMode` → `Fullscreen`
+  4. `fullscreen_geometry`、系统通知为 `PresentationMode`，或系统通知为 `RunningD3dFullScreen` 且前台未识别为普通最大化窗口 → `Fullscreen`
   5. 其余情况 → `Normal`
 - **防抖与恢复**：保护升级立即生效并递增 `generation`（失效旧 `ticket`）；保护降级/解除需持续满足延迟（存在 `QUNS_BUSY` 信号时 3000 ms，否则 900 ms）。`ProtectionResume` 仅在进入保护前窗口本身可见、未固定且处于贴边状态时记录快照，保护解除后通过 `show_without_activation` 仅恢复边缘收纳条而绝不自动展开抢焦点。
 

@@ -6,22 +6,38 @@ pub enum Edge {
     Top,
 }
 pub fn dock(rect: Rect, work: Rect, threshold: i32) -> Option<(Edge, Rect)> {
-    let mut r = rect;
-    let edge = if r.x <= work.x + threshold {
-        r.x = work.x;
+    let edge = if rect.x <= work.x + threshold {
         Edge::Left
-    } else if r.x + r.width >= work.x + work.width - threshold {
-        r.x = work.x + work.width - r.width;
+    } else if rect.x + rect.width >= work.x + work.width - threshold {
         Edge::Right
-    } else if r.y <= work.y + threshold {
-        r.y = work.y;
+    } else if rect.y <= work.y + threshold {
         Edge::Top
     } else {
         return None;
     };
-    r.y = r.y.clamp(work.y, work.y + (work.height - r.height).max(0));
-    r.x = r.x.clamp(work.x, work.x + (work.width - r.width).max(0));
-    Some((edge, r))
+    Some((edge, place_at_edge(edge, rect, work)))
+}
+
+fn place_at_edge(edge: Edge, mut rect: Rect, work: Rect) -> Rect {
+    let right = work.x + (work.width - rect.width).max(0);
+    let bottom = work.y + (work.height - rect.height).max(0);
+    rect.x = match edge {
+        Edge::Left => work.x,
+        Edge::Right => right,
+        Edge::Top => rect.x.clamp(work.x, right),
+    };
+    rect.y = if edge == Edge::Top {
+        work.y
+    } else {
+        rect.y.clamp(work.y, bottom)
+    };
+    rect
+}
+
+pub fn align_to_edge(edge: Edge, mut rect: Rect, work: Rect) -> Rect {
+    rect.width = rect.width.min(work.width.max(1));
+    rect.height = rect.height.min(work.height.max(1));
+    place_at_edge(edge, rect, work)
 }
 const DOCK_OVERHANG_DIP: f32 = 10.0;
 
@@ -404,6 +420,30 @@ mod tests {
         let hidden = hidden_hwnd_position(edge, docked, 6, pad);
         assert_eq!(hidden.0 + hwnd.width - docked.x, 6);
         assert_eq!(reveal_band(edge, docked, 6).width, 6);
+    }
+
+    #[test]
+    fn collapsed_reveal_band_follows_the_current_work_area() {
+        let previous = Rect {
+            x: 1480,
+            y: 300,
+            width: 440,
+            height: 640,
+        };
+        let work = Rect {
+            x: 0,
+            y: 40,
+            width: 1600,
+            height: 860,
+        };
+        for (edge, cursor) in [
+            (Edge::Left, (0, 300)),
+            (Edge::Right, (1599, 300)),
+            (Edge::Top, (1160, 40)),
+        ] {
+            let docked = align_to_edge(edge, previous, work);
+            assert!(contains(reveal_band(edge, docked, 0), cursor));
+        }
     }
 
     #[test]

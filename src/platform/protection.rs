@@ -15,15 +15,21 @@ pub fn protection(settings: &Settings) -> Protection {
     decide(collect_signals(settings, &mut cache))
 }
 
-/// The raw observations behind one verdict. The existing deny-list, per-application rule and
-/// `rcMonitor` geometry work stays in `protection_cached`; the system notification state is
-/// added as the third signal and is only queried while fullscreen protection is switched on, so
-/// it can never resurrect a protection the user turned off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Foreground {
+    Other,
+    Maximized,
+    Fullscreen,
+    Strict,
+}
+
+/// Combines foreground classification with the notification state when fullscreen protection is enabled.
 pub fn collect_signals(settings: &Settings, cache: &mut ProtectionCache) -> Signals {
-    let observed = protection_cached(settings, cache);
+    let observed = classify_foreground(settings, cache);
     Signals {
-        strict_rule: observed == Protection::Strict,
-        fullscreen_geometry: observed == Protection::Fullscreen,
+        strict_rule: observed == Foreground::Strict,
+        fullscreen_geometry: observed == Foreground::Fullscreen,
+        maximized_window: observed == Foreground::Maximized,
         notification: if settings.fullscreen_protection {
             notification_state()
         } else {
@@ -67,7 +73,7 @@ fn rule_matches_path(rule: &str, path: &str) -> bool {
     }
 }
 
-fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protection {
+fn classify_foreground(settings: &Settings, cache: &mut ProtectionCache) -> Foreground {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null()
@@ -76,7 +82,7 @@ fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protec
             || !IsWindowVisible(hwnd).as_bool()
             || IsIconic(hwnd).as_bool()
         {
-            return Protection::Normal;
+            return Foreground::Other;
         }
         let mut class = [0u16; 64];
         let len = GetClassNameW(hwnd, &mut class).max(0) as usize;
@@ -93,12 +99,12 @@ fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protec
         .iter()
         .any(|name| eq_wide_ascii(class_slice, name))
         {
-            return Protection::Normal;
+            return Foreground::Other;
         }
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == GetCurrentProcessId() {
-            return Protection::Normal;
+            return Foreground::Other;
         }
         if !settings.protected_apps.is_empty() {
             // Both keys must match: a recycled pid under a different window must re-query.
@@ -120,19 +126,24 @@ fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protec
                     .iter()
                     .any(|rule| rule_matches_path(rule, path))
             }) {
-                return Protection::Strict;
+                return Foreground::Strict;
             }
         }
         if !settings.fullscreen_protection {
-            return Protection::Normal;
+            return Foreground::Other;
         }
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        if IsZoomed(hwnd).as_bool()
-            || style & WS_CAPTION.0 == WS_CAPTION.0
-            || ex_style & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0
-        {
-            return Protection::Normal;
+        if ex_style & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0 {
+            return Foreground::Other;
+        }
+        let maximized = IsZoomed(hwnd).as_bool();
+        if style & WS_CAPTION.0 == WS_CAPTION.0 {
+            return if maximized {
+                Foreground::Maximized
+            } else {
+                Foreground::Other
+            };
         }
         let mut rect = RECT::default();
         // DWM frame bounds are physical pixels with at most a small border offset
@@ -172,7 +183,7 @@ fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protec
             }
             if !measured {
                 if GetWindowRect(hwnd, &mut rect).is_err() {
-                    return Protection::Normal;
+                    return Foreground::Other;
                 }
                 tolerance = 24;
             }
@@ -182,12 +193,10 @@ fn protection_cached(settings: &Settings, cache: &mut ProtectionCache) -> Protec
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        if GetMonitorInfoW(monitor, &mut info).as_bool()
-            && fullscreen_rect(rect, info.rcMonitor, tolerance)
-        {
-            return Protection::Fullscreen;
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return classify_window_bounds(rect, info.rcMonitor, info.rcWork, tolerance, maximized);
         }
-        Protection::Normal
+        Foreground::Other
     }
 }
 
@@ -234,6 +243,25 @@ pub(super) fn fullscreen_rect(rect: RECT, screen: RECT, tolerance: i32) -> bool 
         && (rect.top - screen.top).abs() <= tolerance
         && (rect.right - screen.right).abs() <= tolerance
         && (rect.bottom - screen.bottom).abs() <= tolerance
+}
+
+fn classify_window_bounds(
+    rect: RECT,
+    screen: RECT,
+    work: RECT,
+    tolerance: i32,
+    maximized: bool,
+) -> Foreground {
+    let covers_screen = fullscreen_rect(rect, screen, tolerance);
+    if screen != work
+        && (rect == work || (maximized && !covers_screen && fullscreen_rect(rect, work, tolerance)))
+    {
+        Foreground::Maximized
+    } else if covers_screen && !maximized {
+        Foreground::Fullscreen
+    } else {
+        Foreground::Other
+    }
 }
 
 thread_local! {
@@ -375,5 +403,33 @@ impl Drop for ForegroundWatch {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_area_match_takes_priority_over_near_fullscreen_bounds() {
+        let screen = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        let work = RECT { top: 2, ..screen };
+        assert_eq!(
+            classify_window_bounds(work, screen, work, 8, false),
+            Foreground::Maximized
+        );
+        assert_eq!(
+            classify_window_bounds(screen, screen, work, 8, false),
+            Foreground::Fullscreen
+        );
+        assert_eq!(
+            classify_window_bounds(screen, screen, screen, 8, false),
+            Foreground::Fullscreen
+        );
     }
 }

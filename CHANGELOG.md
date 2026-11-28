@@ -10,6 +10,10 @@
 
 [简体中文草稿](changelog/unreleased/zh-CN.md) · [English Draft](changelog/unreleased/en-US.md)
 
+## [0.1.1] - 2026-11-28
+
+[简体中文](changelog/0.1.1/zh-CN.md) · [English](changelog/0.1.1/en-US.md)
+
 ## [0.1.0] - 2026-11-28
 
 [简体中文](changelog/0.1.0/zh-CN.md) · [English](changelog/0.1.0/en-US.md)

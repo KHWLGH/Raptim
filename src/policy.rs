@@ -21,12 +21,12 @@ pub enum Notification {
     Other,
 }
 
-/// Raw observations for one evaluation. The platform layer fills `strict_rule`,
-/// `fullscreen_geometry` and `notification`; the application fills the session flags.
+/// Raw observations for one evaluation, including foreground evidence and session flags.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Signals {
     pub strict_rule: bool,
     pub fullscreen_geometry: bool,
+    pub maximized_window: bool,
     pub notification: Notification,
     pub auxiliary_open: bool,
     pub bypass: bool,
@@ -50,10 +50,8 @@ pub fn decide(signals: Signals) -> Protection {
     } else if signals.auxiliary_open {
         Protection::Normal
     } else if signals.fullscreen_geometry
-        || matches!(
-            signals.notification,
-            Notification::RunningD3dFullScreen | Notification::PresentationMode
-        )
+        || signals.notification == Notification::PresentationMode
+        || (signals.notification == Notification::RunningD3dFullScreen && !signals.maximized_window)
     {
         Protection::Fullscreen
     } else {
@@ -89,6 +87,7 @@ pub enum ShowSource {
     Restore,
     /// Appended so the integer the metrics log records stays comparable across releases.
     NativeMenu,
+    EdgeHover,
 }
 
 pub struct DisplayPolicy {
@@ -220,5 +219,32 @@ mod tests {
         assert!(p.set_bypass(true));
         assert!(p.update(Protection::Normal, now + Duration::from_secs(3), true));
         assert_eq!(p.protection(), Protection::Normal);
+    }
+
+    #[test]
+    fn maximized_foreground_allows_edge_hover_after_d3d_hint_release() {
+        let mut signals = Signals {
+            notification: Notification::RunningD3dFullScreen,
+            ..Default::default()
+        };
+        let mut policy = DisplayPolicy::default();
+        let now = Instant::now();
+        policy.update(decide(signals), now, false);
+        assert!(!policy.allows(ShowSource::EdgeHover, policy.ticket()));
+
+        signals.maximized_window = true;
+        let windowed = decide(signals);
+        let protected_ticket = policy.ticket();
+        assert_eq!(windowed, Protection::Normal);
+        policy.update(windowed, now, false);
+        assert!(!policy.allows(ShowSource::EdgeHover, policy.ticket()));
+        policy.update(windowed, now + Duration::from_millis(900), false);
+        assert!(!policy.allows(ShowSource::EdgeHover, protected_ticket));
+        assert!(policy.allows(ShowSource::EdgeHover, policy.ticket()));
+
+        signals.notification = Notification::PresentationMode;
+        assert_eq!(decide(signals), Protection::Fullscreen);
+        signals.strict_rule = true;
+        assert_eq!(decide(signals), Protection::Strict);
     }
 }

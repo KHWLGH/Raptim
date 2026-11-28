@@ -6,7 +6,10 @@ impl App {
         // Re-checked here: this collapses the window onto the edge strip and raises it, which is
         // still a covering topmost. Returning before `take` keeps the resume snapshot for a later,
         // genuine release (Strict -> Fullscreen is a de-escalation but not a release).
-        if self.policy.protection() != Protection::Normal {
+        if !self
+            .policy
+            .allows(ShowSource::Restore, self.policy.ticket())
+        {
             return;
         }
         let Some(state) = self

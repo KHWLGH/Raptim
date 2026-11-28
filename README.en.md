@@ -193,7 +193,7 @@ The compiled executable is placed at `target/release/raptim.exe`. Supported laun
 | [Architecture](docs/en/ARCHITECTURE.md) | Module layout, threading & events, SQLite schema, `dup_key` deduplication, policy state machine, and Win32/DWM boundaries |
 | [Development & Build](docs/en/DEVELOPMENT.md) | Environment setup, Cargo/SQLite build config, headless verification gate, preview generator, tests, and changelog workflow |
 | [Performance & Boundaries](docs/en/PERFORMANCE.md) | Storage and startup benchmarks, icon cache budget, edge frame-write findings, and rejected optimizations |
-| [Changelog](CHANGELOG.md) | Release index (`zh-CN` & `en-US`; latest [0.1.0](changelog/0.1.0/en-US.md)) |
+| [Changelog](CHANGELOG.md) | Release index (`zh-CN` & `en-US`; latest [0.1.1](changelog/0.1.1/en-US.md)) |
 | [License (GPL-3.0-only)](LICENSE) · [Third-Party Notices](THIRD_PARTY_NOTICES.md) | Full GNU GPLv3 text, direct dependency license review, and asset attribution |
 
 ## Verification

@@ -555,71 +555,7 @@ impl App {
                 self.sync_dock_overhang();
             }
         }
-        if let Some((edge, old)) = self.dock {
-            let size = self.main.window().size();
-            let scale = self.main.window().scale_factor();
-            let applied_pad = self.dock_overhang_for(edge);
-            let wanted_pad = if self.settings.edge_hide {
-                raptim::docking::overhang_px(scale)
-            } else {
-                0
-            };
-            let expected = raptim::docking::docked_hwnd_rect(edge, old, applied_pad);
-            if let Some(work) =
-                platform::work_area_at((old.x + old.width / 2, old.y + old.height / 2))
-                && (Some(work) != self.dock_work
-                    || size.width as i32 != expected.width
-                    || size.height as i32 != expected.height
-                    || applied_pad != wanted_pad)
-            {
-                let stay_hidden = self.protected_edge_waiting || self.edge_hidden;
-                if !stay_hidden {
-                    self.reveal_edge();
-                }
-                let raw_w = size.width as i32;
-                let raw_h = size.height as i32;
-                let (vis_w, vis_h) = match edge {
-                    raptim::docking::Edge::Left | raptim::docking::Edge::Right => {
-                        ((raw_w - applied_pad).max(1), raw_h.max(1))
-                    }
-                    raptim::docking::Edge::Top => (raw_w.max(1), (raw_h - applied_pad).max(1)),
-                };
-                let mut rect = windowing::Rect {
-                    width: vis_w.min(work.width.max(1)),
-                    height: vis_h.min(work.height.max(1)),
-                    ..old
-                };
-                rect.x = rect
-                    .x
-                    .clamp(work.x, work.x + (work.width - rect.width).max(0));
-                rect.y = rect
-                    .y
-                    .clamp(work.y, work.y + (work.height - rect.height).max(0));
-                match edge {
-                    raptim::docking::Edge::Left => rect.x = work.x,
-                    raptim::docking::Edge::Right => rect.x = work.x + work.width - rect.width,
-                    raptim::docking::Edge::Top => rect.y = work.y,
-                }
-                self.dock = Some((edge, rect));
-                self.dock_work = Some(work);
-                self.sync_dock_overhang();
-                let pad = self.dock_overhang_for(edge);
-                if stay_hidden {
-                    let strip = self.edge_strip_px();
-                    platform::move_clipped(
-                        self.main.window(),
-                        raptim::docking::hidden_hwnd_position(edge, rect, strip, pad),
-                        work,
-                    );
-                    self.sync_edge_appearance();
-                } else {
-                    let hwnd = raptim::docking::docked_hwnd_rect(edge, rect, pad);
-                    platform::set_bounds(self.main.window(), hwnd);
-                    platform::move_clipped(self.main.window(), (hwnd.x, hwnd.y), work);
-                    platform::decorate(self.main.window());
-                }
-            }
-        }
+        self.sync_dock_geometry();
         let captured = platform::has_mouse_capture(self.main.window());
         let paused = (!self.protected_edge_waiting && self.auto_hide_guard().paused())
             || (platform::mouse_down()
@@ -665,7 +601,7 @@ impl App {
                         }))
                 {
                     if self.edge_since.elapsed() >= Duration::from_millis(24)
-                        && self.allowed(ShowSource::Hotkey)
+                        && self.allowed(ShowSource::EdgeHover)
                     {
                         self.animate_edge(false);
                         self.edge_since = now;
@@ -742,6 +678,63 @@ impl App {
         }
     }
 
+    fn sync_dock_geometry(&mut self) {
+        let Some((edge, old)) = self.dock else {
+            return;
+        };
+        let Some(work) = platform::work_area_at((old.x + old.width / 2, old.y + old.height / 2))
+        else {
+            return;
+        };
+        let size = self.main.window().size();
+        let applied_pad = self.dock_overhang_for(edge);
+        let wanted_pad = if self.settings.edge_hide {
+            raptim::docking::overhang_px(self.main.window().scale_factor())
+        } else {
+            0
+        };
+        let expected = raptim::docking::docked_hwnd_rect(edge, old, applied_pad);
+        if Some(work) == self.dock_work
+            && size.width as i32 == expected.width
+            && size.height as i32 == expected.height
+            && applied_pad == wanted_pad
+        {
+            return;
+        }
+        let stay_hidden = self.protected_edge_waiting || self.edge_hidden;
+        if !stay_hidden {
+            self.reveal_edge();
+        }
+        let visible = raptim::docking::visible_rect_from_hwnd(
+            edge,
+            windowing::Rect {
+                width: size.width as i32,
+                height: size.height as i32,
+                ..old
+            },
+            applied_pad,
+        );
+        let rect = raptim::docking::align_to_edge(edge, visible, work);
+        self.dock = Some((edge, rect));
+        self.dock_work = Some(work);
+        self.sync_dock_overhang();
+        let pad = self.dock_overhang_for(edge);
+        if stay_hidden {
+            let strip = self.edge_strip_px();
+            platform::move_clipped(
+                self.main.window(),
+                raptim::docking::hidden_hwnd_position(edge, rect, strip, pad),
+                work,
+            );
+            self.sync_edge_appearance();
+        } else {
+            let hwnd = raptim::docking::docked_hwnd_rect(edge, rect, pad);
+            platform::set_bounds(self.main.window(), hwnd);
+            platform::move_clipped(self.main.window(), (hwnd.x, hwnd.y), work);
+            platform::decorate(self.main.window());
+        }
+    }
+
     /// Cursor distance from the reveal band beyond which the collapsed poll drops to half rate.
     const APPROACH_MARGIN_PX: i32 = 96;
 
@@ -771,7 +764,7 @@ impl App {
         let cursor = platform::cursor();
         if raptim::docking::contains(raptim::docking::reveal_band(edge, rect, strip), cursor) {
             if self.edge_since.elapsed() >= Duration::from_millis(24)
-                && self.allowed(ShowSource::Hotkey)
+                && self.allowed(ShowSource::EdgeHover)
             {
                 self.animate_edge(false);
                 self.edge_since = now;
@@ -1700,6 +1693,15 @@ impl App {
                         if s.should_poll_tick() {
                             s.evaluate();
                         }
+                        if s.main.window().is_visible()
+                            && s.settings.edge_hide
+                            && s.edge_hidden
+                            && s.edge_motion.is_none()
+                            && s.drag.is_none()
+                            && s.policy.allows(ShowSource::Restore, s.policy.ticket())
+                        {
+                            s.sync_dock_geometry();
+                        }
                         if !s.pending_files.is_empty() {
                             s.process_files();
                         }
@@ -2388,11 +2390,32 @@ fn run_at_with_mode(
         s.apply_theme();
     }
     let startup = Rc::downgrade(&app);
-    slint::Timer::single_shot(Duration::ZERO, move || {
-        if let Some(app) = startup.upgrade() {
-            app.borrow_mut().show_main(ShowSource::Startup);
-        }
-    });
+    if silent_startup {
+        use slint::winit_030::WinitWindowAccessor;
+
+        let main = main.as_weak();
+        drop(slint::spawn_local(async move {
+            let Some(main) = main.upgrade() else {
+                return;
+            };
+            if let Err(error) = main.window().winit_window().await {
+                raptim::diagnostics::error("silent startup", &error.to_string());
+                return;
+            }
+            if let Some(app) = startup.upgrade() {
+                let mut app = app.borrow_mut();
+                if app.silent_startup {
+                    app.show_main(ShowSource::Startup);
+                }
+            }
+        })?);
+    } else {
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(app) = startup.upgrade() {
+                app.borrow_mut().show_main(ShowSource::Startup);
+            }
+        });
+    }
     {
         let s = app.borrow();
         let wanted: Vec<_> = s
