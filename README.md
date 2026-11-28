@@ -10,6 +10,7 @@
 
 [![License](https://img.shields.io/badge/license-GPL--3.0--only-blue?style=flat-square)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/KHWLGH/Raptim/total?style=flat-square)](https://github.com/KHWLGH/Raptim/releases)
 [![Issues](https://img.shields.io/github/issues/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim/issues)
 [![Last commit](https://img.shields.io/github/last-commit/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim/commits/main)
 [![Repo size](https://img.shields.io/github/repo-size/KHWLGH/Raptim?style=flat-square)](https://github.com/KHWLGH/Raptim)
